@@ -1,0 +1,21 @@
+# build + packaging artifacts (egg-info is regenerated from pyproject.toml + VERSION)
+*.egg-info/
+build/
+dist/
+*.whl
+
+# python
+__pycache__/
+*.py[cod]
+
+# local environments
+.venv/
+venv/
+
+# backups made by `luna-doctor fix` apply blocks and by hand
+*.bak
+*.bak.*
+
+# editors / os
+.DS_Store
+*.swp
