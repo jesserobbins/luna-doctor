@@ -16,6 +16,10 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Changed
+
+- License changed from MIT to Apache-2.0.
+
 ## [0.1.0] - 2026-10-21
 
 ### Added

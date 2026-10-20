@@ -14,7 +14,7 @@ keywords = ["lunaroute", "concurrency", "agents", "diagnostics", "pi", "claude-c
 classifiers = [
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
