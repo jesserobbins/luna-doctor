@@ -27,6 +27,10 @@ Versioning policy:
   wall that killed them, so a burst's tail is visible pushing into it.
 - `--width`, `--height`, `--out` and `--open` for the chart; `--json` reports the
   written path plus the metrics.
+- Minute-level concurrency series in `analyze`: per UTC minute, the max requests
+  in flight, how many started, and how many died on admission — the finest grain
+  the request windows support, and finer than agentsview's 5-minute activity
+  bucket, so a burst can be lined up against the 120.2s admission deadline.
 
 ### Changed
 

@@ -26,6 +26,7 @@ import argparse
 import glob
 import http.client
 import json
+import math
 import os
 import ssl
 import statistics
@@ -447,6 +448,58 @@ def pressure_windows(reqs: list[Request], threshold: int) -> list[dict]:
     return out
 
 
+def concurrency_by_minute(reqs: list[Request]) -> list[dict]:
+    """Minute-level concurrency series.
+
+    agentsview's finest activity bucket is 5 minutes, which is too coarse to
+    line a burst up against the 120 s admission deadline. Request windows here
+    have second resolution, so bin them per UTC minute: max requests in flight,
+    how many started, and how many died on admission inside that minute.
+    """
+    events: list[tuple[float, int]] = []
+    for r in reqs:
+        if r.start is None or r.end is None or r.end < r.start:
+            continue
+        events.append((r.start, 1))
+        events.append((r.end, -1))
+    if not events:
+        return []
+    events.sort()
+    lo = math.floor(min(events, key=lambda e: e[0])[0] / 60.0) * 60
+    hi = max(events, key=lambda e: e[0])[0]
+    deaths: dict[int, int] = {}
+    starts: dict[int, int] = {}
+    for r in reqs:
+        if r.start is not None:
+            starts[int(r.start // 60)] = starts.get(int(r.start // 60), 0) + 1
+        if r.outcome == "admission_timeout" and r.end is not None:
+            m = int(r.end // 60)
+            deaths[m] = deaths.get(m, 0) + 1
+    out: list[dict] = []
+    i = 0
+    cur = 0
+    peak = 0
+    minute = int(lo // 60)
+    last = int(hi // 60)
+    while minute <= last:
+        boundary = (minute + 1) * 60.0
+        while i < len(events) and events[i][0] < boundary:
+            cur += events[i][1]
+            peak = max(peak, cur)
+            i += 1
+        if peak or minute in starts or minute in deaths:
+            out.append({
+                "minute": datetime.fromtimestamp(minute * 60, timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+                "max_concurrent": peak,
+                "started": starts.get(minute, 0),
+                "admission_deaths": deaths.get(minute, 0),
+            })
+        minute += 1
+        # a request spanning the boundary is still in flight: sample cur, not 0
+        peak = cur
+    return out
+
+
 def analyse(reqs: list[Request], window_hours: float) -> dict:
     n = len(reqs)
     by_outcome: dict[str, int] = {}
@@ -518,6 +571,7 @@ def analyse(reqs: list[Request], window_hours: float) -> dict:
         "admission_conversion": conv,
         "pressure_windows": len(win),
         "longest_pressure_window": longest,
+        "by_minute": concurrency_by_minute(reqs),
         "totals": {"completed": len(done), "admission_deaths": len(adm)},
     }
 
@@ -619,6 +673,15 @@ def render(m: dict, head: str, adj: list[str], as_json: bool) -> None:
     print(f"outcomes          {', '.join(f'{k} {v}' for k, v in sorted(m['by_outcome'].items()))}")
     peaks = ', '.join(f"{k} {v}" for k, v in sorted(m["peak_by_harness"].items()))
     print(f"peak concurrency  {m['peak_concurrency']} ({peaks})" + (f" at {m['peak_at']}" if m["peak_at"] else ""))
+    bm = m.get("by_minute") or []
+    dead_minutes = [x for x in bm if x["admission_deaths"]]
+    if dead_minutes:
+        print(f"minute-level      {len(bm)} active minute(s); deaths in:")
+        for x in dead_minutes[:6]:
+            print(f"  {x['minute']}  max {x['max_concurrent']} in flight, {x['started']} started, {x['admission_deaths']} died on admission")
+    elif bm:
+        busy = max(bm, key=lambda x: (x["max_concurrent"], x["started"]))
+        print(f"minute-level      {len(bm)} active minute(s); busiest {busy['minute']} (max {busy['max_concurrent']} in flight, {busy['started']} started)")
     for tier in ("interactive", "background"):
         l = m["latency_s"][tier]
         if l["n"]:

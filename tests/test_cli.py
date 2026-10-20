@@ -156,6 +156,49 @@ class Chart(unittest.TestCase):
 
 
 class Sources(unittest.TestCase):
+    def _module(self):
+        import importlib.util
+        import sys
+        from importlib.machinery import SourceFileLoader
+        loader = SourceFileLoader("luna_doctor", CLI)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[loader.name] = mod     # dataclass annotations resolve via sys.modules
+        loader.exec_module(mod)
+        return mod
+
+    def test_concurrency_by_minute_bins_and_carries_over(self):
+        """Minute series: per-minute max in-flight, boundary-spanning requests counted."""
+        m = self._module()
+        base = 1_700_000_000.0
+        base -= base % 60                  # align to a minute boundary
+        R = m.Request
+        reqs = [
+            R(harness="pi", session="s", model="m", start=base, end=base + 90),
+            R(harness="pi", session="s", model="m", start=base + 30, end=base + 40),
+            R(harness="pi", session="s", model="m", start=base + 75, end=base + 95),
+            R(harness="pi", session="s", model="m", start=base + 150, end=base + 160,
+              outcome="admission_timeout"),
+        ]
+        series = m.concurrency_by_minute(reqs)
+        self.assertEqual(len(series), 3)
+        # minute 0: two requests overlap -> peak 2
+        self.assertEqual(series[0]["max_concurrent"], 2)
+        self.assertEqual(series[0]["started"], 2)
+        # minute 1: request 1 still in flight across the boundary, not reset to 0
+        self.assertEqual(series[1]["max_concurrent"], 2)
+        self.assertEqual(series[1]["started"], 1)
+        # minute 2: the admission death lands in the minute it died
+        self.assertEqual(series[2]["max_concurrent"], 1)
+        self.assertEqual(series[2]["started"], 1)
+        self.assertEqual(series[2]["admission_deaths"], 1)
+        for row in series:
+            self.assertRegex(row["minute"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$")
+
+    def test_concurrency_by_minute_empty(self):
+        m = self._module()
+        self.assertEqual(m.concurrency_by_minute([]), [])
+
     def test_both_files_compile(self):
         for rel in ("bin/luna-doctor", "bin/_fix_block.py"):
             path = os.path.join(ROOT, rel)
