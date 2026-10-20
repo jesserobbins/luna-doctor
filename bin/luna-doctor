@@ -1,0 +1,951 @@
+#!/usr/bin/env python3
+"""luna-doctor - explain what your local agent traffic is doing to your
+LunaRoute concurrency, and what to adjust.
+
+Two halves:
+
+  analyze   reads the local agent logs (pi, claude-code) and reconstructs what
+            the machine asked for, what it got, and at what tier.
+  probe     measures the gateway directly, capturing the response headers that
+            say which tier served a request and whether it was demoted.
+
+The constants below are measured, not assumed. See research notes: the gateway
+waits ~25.2s before sending SSE headers, kills unadmitted requests at ~120.2s
+with `scheduler admission timeout`, demotes overflow past a burst cap to the
+background tier with `x-lunaroute-warning: overflowed-to-background`, and holds
+demoted streams open with an SSE keep-alive every ~10s while producing nothing.
+pi's own idle budget is 300s, which is where `Stream ended without finish_reason`
+comes from - a client string, never a gateway one.
+
+Exit codes: 0 no pressure, 1 pressure found, 2 no data.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import http.client
+import json
+import os
+import ssl
+import statistics
+import sys
+import threading
+import time
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+
+VERSION = "0.1.0"
+
+# ---- measured constants -----------------------------------------------------
+PRE_HEADER_WAIT_S = 25.2        # fixed wait before SSE headers, load-independent
+ADMISSION_DEADLINE_S = 120.2    # `scheduler admission timeout`
+CLIENT_IDLE_TIMEOUT_S = 300.0   # pi DEFAULT_HTTP_IDLE_TIMEOUT_MS
+UPSTREAM_HOLD_S = 10.1          # 503 INFERENCE_UNAVAILABLE hold
+KEEPALIVE_S = 10.0              # SSE keep-alive cadence in background tier
+INTERACTIVE_BURST_CAP = 10      # per-burst interactive class cap: min(n, 10)
+ADVISE_FANOUT_MAX = 5           # our recommendation, half the observed cap
+
+PI_STORE = "~/.pi/agent/sessions"
+CLAUDE_STORE = "~/.claude/projects"
+CODEX_STORE = "~/.codex/sessions"
+GATEWAY_HOST = "gw.lunaroute.com"
+LR_CONFIG = "~/.config/lunaroute/config.json"
+
+
+# ---- model ------------------------------------------------------------------
+@dataclass
+class Request:
+    harness: str
+    session: str
+    model: str
+    provider: str = ""
+    start: float | None = None
+    end: float | None = None
+    out_tokens: int = 0
+    in_tokens: int = 0
+    stop_reason: str | None = None
+    error_message: str | None = None
+    response_id: str | None = None
+    tier: str = "interactive"
+    demoted: bool = False
+    outcome: str = "unknown"
+    thinking_chars: int = 0
+    text_chars: int = 0
+
+    @property
+    def duration(self) -> float | None:
+        if self.start is None or self.end is None:
+            return None
+        d = self.end - self.start
+        return d if d >= 0 else None
+
+    @property
+    def saturated(self) -> bool:
+        return self.outcome in ("admission_timeout", "client_idle_timeout", "stream_stalled")
+
+
+def tier_of(model: str | None, warning: str | None = None) -> tuple[str, bool]:
+    """Return (tier, demoted)."""
+    m = (model or "").lower()
+    if "overflowed-to-background" in (warning or ""):
+        return "background", True
+    if m.endswith("-background") or "-background-" in m:
+        return "background", False
+    return "interactive", False
+
+
+def classify(rec: dict) -> str:
+    """Outcome bucket from a log record (pi/claude shapes normalized first).
+
+    String sets verified against the real stores, not guessed: pi emits
+    `scheduler admission timeout` (gateway), `OpenAI Responses stream ended
+    before a terminal response event` / `Stream ended without finish_reason`
+    (pi client idle budget), `This operation was aborted` / `Operation aborted`
+    (client), `Connection error.`, `Request timed out.`, and 5xx passthrough.
+    """
+    err = rec.get("error_message") or ""
+    low = err.lower()
+    stop = rec.get("stop_reason") or ""
+    if "scheduler admission timeout" in low:
+        return "admission_timeout"
+    if ("stream ended without finish_reason" in low
+            or "stream ended before a terminal response event" in low):
+        return "client_idle_timeout"
+    if "inference_unavailable" in low or err.startswith("503"):
+        return "upstream_unavailable"
+    if "internal_error" in low or err.startswith("500") or err.startswith("502"):
+        return "upstream_error"
+    if "failed to resolve api key" in low or "401" in low[:4]:
+        return "auth_error"
+    if "rate_limit_error" in low or err.startswith("429") or "would exceed your account" in low:
+        return "rate_limited"
+    if "aborted" in low or stop == "aborted":
+        return "aborted"
+    if "connection error" in low or "connection reset" in low:
+        return "connection_error"
+    if "timed out" in low or "timeout" in low:
+        return "request_timeout"
+    if stop in ("stop", "stop_sequence", "toolUse", "tool_use", "end_turn", "length"):
+        return "completed"
+    if err:
+        return "other_error"
+    return "completed" if rec.get("out_tokens") else "unknown"
+
+
+# ---- adapters ---------------------------------------------------------------
+def _iso_to_epoch(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        s = ts.replace("Z", "+00:00")
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def iter_jsonl(path: str):
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except Exception:
+                    continue
+    except (OSError, UnicodeError):
+        return
+
+
+def _session_name(path: str) -> str:
+    """Subagent runs store their log as `<project>/<session>/<runid>/run-N/session.jsonl`.
+    Name those by run id + run dir instead of collapsing them all to 'session'."""
+    name = os.path.basename(path).rsplit(".jsonl", 1)[0]
+    if name == "session":
+        run_dir = os.path.dirname(path)
+        run_id = os.path.basename(os.path.dirname(run_dir))
+        return f"{run_id}/{os.path.basename(run_dir)}"
+    return name
+
+
+def iter_pi(roots: list[str], since: float) -> list[Request]:
+    out: list[Request] = []
+    seen: set[str] = set()
+    for root in roots:
+        for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+            try:
+                if os.path.getmtime(path) < since - 86400:
+                    continue
+            except OSError:
+                continue
+            session = _session_name(path)
+            for obj in iter_jsonl(path):
+                if obj.get("type") != "message":
+                    continue
+                msg = obj.get("message") or {}
+                if msg.get("role") != "assistant":
+                    continue
+                end = _iso_to_epoch(obj.get("timestamp"))
+                if end is None or end < since:
+                    continue
+                start_ms = msg.get("timestamp")
+                start = (start_ms / 1000.0) if isinstance(start_ms, (int, float)) else None
+                model = msg.get("model") or ""
+                provider = msg.get("provider") or ""
+                usage = msg.get("usage") or {}
+                rid = msg.get("responseId")
+                key = rid or f"{session}:{obj.get('id')}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                content = msg.get("content") or []
+                think = text = 0
+                for block in content if isinstance(content, list) else []:
+                    if not isinstance(block, dict):
+                        continue
+                    t = block.get("type")
+                    if t == "thinking":
+                        think += len(block.get("thinking") or "")
+                    elif t == "text":
+                        text += len(block.get("text") or "")
+                req = Request(
+                    harness="pi",
+                    session=session,
+                    model=model,
+                    provider=provider,
+                    start=start,
+                    end=end,
+                    out_tokens=int(usage.get("output") or 0),
+                    in_tokens=int(usage.get("input") or 0),
+                    stop_reason=msg.get("stopReason"),
+                    error_message=msg.get("errorMessage"),
+                    response_id=rid,
+                    thinking_chars=think,
+                    text_chars=text,
+                )
+                req.tier, req.demoted = tier_of(model)
+                req.outcome = classify(asdict(req))
+                out.append(req)
+    return out
+
+
+def iter_claude(roots: list[str], since: float) -> list[Request]:
+    """claude-code: one response spans several assistant records sharing
+    message.id; dedupe on (session, message.id) and take the start from the
+    preceding non-assistant record."""
+    out: list[Request] = []
+    for root in roots:
+        for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+            try:
+                if os.path.getmtime(path) < since - 86400:
+                    continue
+            except OSError:
+                continue
+            session = _session_name(path)
+            prev_ts: float | None = None
+            pending_err: str | None = None
+            groups: dict[str, dict] = {}
+            order: list[str] = []
+            for obj in iter_jsonl(path):
+                ts = _iso_to_epoch(obj.get("timestamp"))
+                typ = obj.get("type")
+                if typ == "assistant":
+                    msg = obj.get("message") or {}
+                    mid = msg.get("id") or obj.get("uuid")
+                    if not mid:
+                        continue
+                    g = groups.get(mid)
+                    if g is None:
+                        g = {
+                            "start": prev_ts or ts,
+                            "end": ts,
+                            "model": msg.get("model") or "",
+                            "usage": msg.get("usage") or {},
+                            "stop": msg.get("stop_reason"),
+                            "err": pending_err,
+                        }
+                        pending_err = None
+                        groups[mid] = g
+                        order.append(mid)
+                    g["end"] = ts or g["end"]
+                    u = msg.get("usage") or {}
+                    if u.get("output_tokens") is not None:
+                        g["usage"] = u
+                    if msg.get("stop_reason"):
+                        g["stop"] = msg["stop_reason"]
+                elif typ == "system" and obj.get("subtype") == "api_error":
+                    msg_err = _short_err(obj.get("error") or obj)
+                    # A retry loop can emit api_error records before the first
+                    # assistant record exists; hold it for the next response
+                    # instead of dropping it (this is how 429s got lost).
+                    if order and groups[order[-1]].get("err") is None:
+                        groups[order[-1]]["err"] = msg_err
+                    else:
+                        pending_err = msg_err
+                if ts is not None:
+                    prev_ts = ts
+
+            for mid in order:
+                g = groups[mid]
+                if g["end"] is None or g["end"] < since:
+                    continue
+                u = g["usage"] or {}
+                req = Request(
+                    harness="claude-code",
+                    session=session,
+                    model=g["model"],
+                    provider="",
+                    start=g["start"],
+                    end=g["end"],
+                    out_tokens=int(u.get("output_tokens") or 0),
+                    in_tokens=int(u.get("input_tokens") or 0),
+                    stop_reason=g["stop"],
+                    error_message=g["err"],
+                    response_id=mid,
+                )
+                req.tier, req.demoted = tier_of(req.model)
+                req.outcome = classify(asdict(req))
+                out.append(req)
+    return out
+
+
+def discover(verbose: bool = False) -> dict:
+    """What stores exist, how big, over what range. Never modifies them."""
+    found = {}
+    for name, root in (("pi", PI_STORE), ("claude-code", CLAUDE_STORE), ("codex", CODEX_STORE)):
+        r = os.path.expanduser(root)
+        files = glob.glob(os.path.join(r, "**", "*.jsonl*"), recursive=True) if os.path.isdir(r) else []
+        size = 0
+        newest = oldest = None
+        for p in files[:: max(1, len(files) // 400)] if files else []:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            size += st.st_size
+            newest = max(newest or st.st_mtime, st.st_mtime)
+            oldest = min(oldest or st.st_mtime, st.st_mtime)
+        found[name] = {
+            "root": r,
+            "present": os.path.isdir(r),
+            "files": len(files),
+            "bytes_sampled": size,
+            "newest": datetime.fromtimestamp(newest, timezone.utc).isoformat() if newest else None,
+            "oldest": datetime.fromtimestamp(oldest, timezone.utc).isoformat() if oldest else None,
+        }
+    found["lunaroute_config"] = {"path": os.path.expanduser(LR_CONFIG),
+                                 "present": os.path.isfile(os.path.expanduser(LR_CONFIG))}
+    return found
+
+
+# ---- metrics ----------------------------------------------------------------
+def pct(vals: list[float], p: float) -> float | None:
+    if not vals:
+        return None
+    s = sorted(vals)
+    if len(s) == 1:
+        return round(s[0], 1)
+    k = min(len(s) - 1, max(0, int(round((p / 100.0) * (len(s) - 1)))))
+    return round(s[k], 1)
+
+
+def fmt(v, unit: str = "") -> str:
+    """Never print None into a report."""
+    return "n/a" if v is None else f"{v}{unit}"
+
+
+def human_window(hours: float) -> str:
+    if hours * 60 < 60:
+        return f"{round(hours * 60)}m"
+    if hours < 24:
+        return f"{round(hours)}h"
+    return f"{hours / 24:g}d"
+
+
+def max_concurrency(reqs: list[Request]) -> tuple[int, float | None]:
+    events = []
+    for r in reqs:
+        if r.start is None or r.end is None:
+            continue
+        events.append((r.start, 1))
+        events.append((r.end, -1))
+    events.sort()
+    cur = peak = 0
+    at = None
+    for ts, delta in events:
+        cur += delta
+        if cur > peak:
+            peak, at = cur, ts
+    return peak, at
+
+
+def concurrency_at(reqs: list[Request], ts: float) -> int:
+    return sum(1 for r in reqs if r.start is not None and r.end is not None and r.start <= ts <= r.end)
+
+
+def _short_err(err) -> str:
+    if isinstance(err, dict):
+        inner = err.get("error") if isinstance(err.get("error"), dict) else None
+        msg = (inner or err).get("message") if isinstance(inner or err, dict) else None
+        return str(msg or err)[:400]
+    return str(err)[:400]
+
+
+def pressure_windows(reqs: list[Request], threshold: int) -> list[dict]:
+    """Contiguous stretches where more than `threshold` requests were in flight.
+
+    This is overlap-based on purpose. An earlier version grouped requests whose
+    *starts* fell within 15s, which chained sequential traffic into a "burst of
+    72" while true concurrency was 4 - and then gave advice based on it.
+    """
+    events: list[tuple[float, int]] = []
+    for r in reqs:
+        if r.start is None or r.end is None or r.end < r.start:
+            continue
+        events.append((r.start, 1))
+        events.append((r.end, -1))
+    events.sort()
+    out: list[dict] = []
+    cur = 0
+    opened: float | None = None
+    peak = 0
+    for ts, delta in events:
+        cur += delta
+        if cur > threshold and opened is None:
+            opened, peak = ts, cur
+        elif opened is not None:
+            peak = max(peak, cur)
+            if cur <= threshold:
+                out.append({
+                    "start": datetime.fromtimestamp(opened, timezone.utc).isoformat(),
+                    "end": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+                    "seconds": round(ts - opened, 1),
+                    "max_concurrent": peak,
+                })
+                opened, peak = None, 0
+    return out
+
+
+def analyse(reqs: list[Request], window_hours: float) -> dict:
+    n = len(reqs)
+    by_outcome: dict[str, int] = {}
+    by_tier: dict[str, int] = {}
+    by_harness: dict[str, int] = {}
+    for r in reqs:
+        by_outcome[r.outcome] = by_outcome.get(r.outcome, 0) + 1
+        by_tier[r.tier] = by_tier.get(r.tier, 0) + 1
+        by_harness[r.harness] = by_harness.get(r.harness, 0) + 1
+
+    done = [r for r in reqs if r.outcome == "completed" and r.duration is not None]
+    durs = [r.duration for r in done]
+    lat = {}
+    for tier in ("interactive", "background"):
+        sub = [r.duration for r in done if r.tier == tier and r.duration is not None]
+        lat[tier] = {
+            "n": len(sub),
+            "p50": pct(sub, 50),
+            "p90": pct(sub, 90),
+            "max": round(max(sub), 1) if sub else None,
+        }
+
+    sat = [r for r in reqs if r.saturated]
+    adm = [r for r in reqs if r.outcome == "admission_timeout"]
+    peak, peak_at = max_concurrency(reqs)
+
+    # starved-peer test: a saturated request whose model completed elsewhere
+    # inside its own window => the endpoint was fine, this request was not served.
+    starved = 0
+    for r in sat:
+        if r.start is None or r.end is None:
+            continue
+        for o in done:
+            if o is r or o.model != r.model:
+                continue
+            if o.start is None or o.end is None:
+                continue
+            if o.start >= r.start and o.end <= r.end:
+                starved += 1
+                break
+
+    win = pressure_windows(reqs, ADVISE_FANOUT_MAX)
+    longest = max(win, key=lambda w: w["seconds"]) if win else None
+    by_harness_peak = {}
+    for h in sorted(by_harness):
+        sub = [r for r in reqs if r.harness == h]
+        by_harness_peak[h] = max_concurrency(sub)[0]
+
+    conv = {}
+    for tier in ("interactive", "background"):
+        served = sum(1 for r in reqs if r.tier == tier and r.outcome == "completed")
+        dead = sum(1 for r in reqs if r.tier == tier and r.outcome == "admission_timeout")
+        tot = served + dead
+        conv[tier] = {"completed": served, "admission_timeout": dead,
+                      "admitted_pct": round(100.0 * served / tot, 1) if tot else None}
+
+    return {
+        "window_hours": window_hours,
+        "requests": n,
+        "by_outcome": by_outcome,
+        "by_tier": by_tier,
+        "by_harness": by_harness,
+        "latency_s": lat,
+        "saturated": len(sat),
+        "starved_peer_evidence": starved,
+        "peak_concurrency": peak,
+        "peak_at": datetime.fromtimestamp(peak_at, timezone.utc).isoformat() if peak_at else None,
+        "peak_by_harness": by_harness_peak,
+        "admission_conversion": conv,
+        "pressure_windows": len(win),
+        "longest_pressure_window": longest,
+        "totals": {"completed": len(done), "admission_deaths": len(adm)},
+    }
+
+
+# ---- verdict ----------------------------------------------------------------
+def verdict(m: dict) -> tuple[str, list[str], int]:
+    """Return (headline, adjustments, exit_code)."""
+    adj: list[str] = []
+    n = m["requests"]
+    if n == 0:
+        return "No requests found in the window.", ["Widen the window with --since, or run `luna-doctor discover`."], 2
+
+    dead = m["by_outcome"].get("admission_timeout", 0)
+    idle = m["by_outcome"].get("client_idle_timeout", 0)
+    bg = m["by_tier"].get("background", 0)
+    pressure = False
+
+    if dead:
+        pressure = True
+        conv = m["admission_conversion"]["interactive"]["admitted_pct"]
+        adj.append(
+            f"{dead} request(s) died at the ~{ADMISSION_DEADLINE_S:.0f}s admission deadline "
+            f"(`scheduler admission timeout`). Of the interactive requests that finished or died "
+            f"on admission, {conv}% were admitted."
+        )
+    if idle:
+        pressure = True
+        adj.append(
+            f"{idle} request(s) stalled until the harness's own ~{CLIENT_IDLE_TIMEOUT_S:.0f}s idle "
+            f"budget killed them. That is the silent-overflow signature: the request was likely "
+            f"demoted to the background tier, which streams only SSE keep-alives for minutes."
+        )
+    if m["pressure_windows"]:
+        pressure = True
+        w = m["longest_pressure_window"] or {}
+        adj.append(
+            f"{m['pressure_windows']} window(s) had more than {ADVISE_FANOUT_MAX} requests in flight "
+            f"at once; the longest lasted {fmt(w.get('seconds'), 's')} and peaked at "
+            f"{fmt(w.get('max_concurrent'))} concurrent. The interactive burst cap is "
+            f"{INTERACTIVE_BURST_CAP}: past it, requests are demoted to background rather than failing."
+        )
+    if bg:
+        adj.append(
+            f"{bg} request(s) already ran on the -background tier. That is the right home for wide "
+            f"fan-out, but its SLA is minutes, not seconds: budget for it and do not put a short "
+            f"client timeout in front of it."
+        )
+    rl = m["by_outcome"].get("rate_limited", 0)
+    if rl:
+        pressure = True
+        adj.append(
+            f"{rl} request(s) hit an account rate limit (429 rate_limit_error). That is the "
+            f"subscription quota, not concurrency: narrowing fan-out will not fix it."
+        )
+
+    lat = m["latency_s"]["interactive"]
+    if lat["p50"] is not None and lat["p50"] > 60:
+        adj.append(
+            f"Even admitted interactive requests have a p50 of {lat['p50']}s end to end; a fixed "
+            f"~{PRE_HEADER_WAIT_S:.0f}s of that is the gateway sending headers. Treat a minute of "
+            f"wait as the floor, not as a fault."
+        )
+    if m["starved_peer_evidence"]:
+        adj.append(
+            f"{m['starved_peer_evidence']} stalled request(s) had another request to the same model "
+            f"complete inside their own window, so the model was healthy - the request was not "
+            f"served, not slow."
+        )
+
+    if not pressure and not adj:
+        return f"No concurrency pressure across {n} requests.", ["Nothing to adjust."], 0
+
+    head = (
+        f"Concurrency pressure across {n} requests: {dead} admission death(s), "
+        f"{idle} silent stall(s), peak concurrency {m['peak_concurrency']}."
+        if pressure
+        else f"{n} requests, no admission deaths, peak concurrency {m['peak_concurrency']}."
+    )
+    adj.append(
+        f"Adjust: keep interactive fan-out at or under {ADVISE_FANOUT_MAX}, and move any wider "
+        f"fan-out to the -background variant of the same model."
+    )
+    return head, adj, (1 if pressure else 0)
+
+
+def render(m: dict, head: str, adj: list[str], as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"headline": head, "adjustments": adj, "metrics": m}, indent=2))
+        return
+    print(head)
+    print()
+    print(f"window            last {human_window(m['window_hours'])}")
+    print(f"requests          {m['requests']}  ({', '.join(f'{k} {v}' for k, v in sorted(m['by_harness'].items()))})")
+    print(f"tiers             {', '.join(f'{k} {v}' for k, v in sorted(m['by_tier'].items()))}")
+    print(f"outcomes          {', '.join(f'{k} {v}' for k, v in sorted(m['by_outcome'].items()))}")
+    peaks = ', '.join(f"{k} {v}" for k, v in sorted(m["peak_by_harness"].items()))
+    print(f"peak concurrency  {m['peak_concurrency']} ({peaks})" + (f" at {m['peak_at']}" if m["peak_at"] else ""))
+    for tier in ("interactive", "background"):
+        l = m["latency_s"][tier]
+        if l["n"]:
+            print(f"latency {tier:<12} n={l['n']} p50={fmt(l['p50'], 's')} p90={fmt(l['p90'], 's')} max={fmt(l['max'], 's')}")
+    c = m["admission_conversion"]["interactive"]
+    if c["completed"] or c["admission_timeout"]:
+        print(f"admission         {c['admitted_pct']}% of interactive served ({c['completed']} served, {c['admission_timeout']} dead)")
+    if "claude-code" in m["by_harness"]:
+        print("note              claude-code span starts are inferred from record gaps; treat its")
+        print("                  concurrency as a lower bound.")
+    print()
+    for line in adj:
+        print("  - " + line)
+
+
+# ---- live probe -------------------------------------------------------------
+def routing_key() -> str:
+    k = os.environ.get("LUNAROUTE_KEY")
+    if k:
+        return k.strip()
+    with open(os.path.expanduser(LR_CONFIG)) as fh:
+        return json.load(fh)["profiles"]["default"]["routing_key"]
+
+
+PROBE_PROMPT = (
+    "Write a thorough 2500-word technical essay about distributed systems backpressure. "
+    "Cover bounded queues, admission control, credit-based flow control, load shedding, and "
+    "tail latency amplification. Do not stop early."
+)
+
+
+def probe_one(idx: int, key: str, model: str, max_tokens: int, timeout: float,
+              rec: dict, socks: list, lock: threading.Lock) -> None:
+    body = json.dumps({
+        "model": model, "stream": True, "max_tokens": max_tokens, "temperature": 0.7,
+        "messages": [{"role": "user", "content": PROBE_PROMPT}],
+    })
+    conn = None
+    t0 = time.monotonic()
+    try:
+        conn = http.client.HTTPSConnection(GATEWAY_HOST, 443, timeout=timeout,
+                                           context=ssl.create_default_context())
+        conn.request("POST", "/v1/chat/completions", body=body, headers={
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": f"luna-doctor/{VERSION}",
+        })
+        with lock:
+            socks.append(conn.sock)
+        resp = conn.getresponse()
+        t_hdr = time.monotonic()
+        rec["status"] = resp.status
+        hdrs = {k.lower(): v for k, v in resp.getheaders()}
+        rec["headers"] = hdrs
+        rec["wait_headers"] = round(t_hdr - t0, 2)
+        rec["class"] = hdrs.get("x-lunaroute-service-class")
+        rec["warning"] = hdrs.get("x-lunaroute-warning")
+        rec["tier"], rec["demoted"] = tier_of(model, rec["warning"])
+        if resp.status != 200:
+            rec["error"] = f"http {resp.status}: " + resp.read().decode("utf-8", "replace")[:300]
+            rec["duration"] = round(time.monotonic() - t0, 2)
+            return
+        while True:
+            line = resp.readline()
+            if not line:
+                break
+            txt = line.decode("utf-8", "replace").rstrip("\r\n")
+            if not txt:
+                continue
+            if txt.startswith(":"):
+                rec["keepalives"] += 1
+                continue
+            if not txt.startswith("data:"):
+                continue
+            payload = txt[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload)
+            except Exception:
+                continue
+            if obj.get("error"):
+                rec["error"] = str(obj["error"])[:300]
+                continue
+            for ch in obj.get("choices") or []:
+                delta = ch.get("delta") or {}
+                if delta.get("content") or delta.get("reasoning_content"):
+                    rec["chunks"] += 1
+                    if rec["ttfb"] is None:
+                        rec["ttfb"] = round(time.monotonic() - t0, 2)
+                if ch.get("finish_reason"):
+                    rec["finish"] = ch["finish_reason"]
+        rec["duration"] = round(time.monotonic() - t0, 2)
+        rec["outcome"] = "streamed" if rec["chunks"] else "silent"
+    except Exception as e:
+        rec["error"] = f"{type(e).__name__}: {e}"
+        rec["duration"] = round(time.monotonic() - t0, 2)
+        low = str(e).lower()
+        if "scheduler admission timeout" in low:
+            rec["outcome"] = "admission_timeout"
+        elif rec["chunks"]:
+            rec["outcome"] = "streamed"
+        else:
+            rec["outcome"] = "error"
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+
+def run_probe(n: int, model: str, max_tokens: int, timeout: float,
+              hard_limit: float) -> dict:
+    """Fire n concurrent streams. `hard_limit` is a true wall clock: when it is
+    reached the sockets are shut down and whatever each request had reached is
+    reported. A request that never terminated is counted as `cut`, never as a
+    success."""
+    if n < 1:
+        raise SystemExit("luna-doctor: --n must be at least 1")
+    if hard_limit <= 0:
+        raise SystemExit("luna-doctor: --max-seconds must be positive")
+    key = routing_key()
+    # A socket timeout longer than the wall clock is a lie: derive it.
+    timeout = hard_limit if timeout <= 0 else min(timeout, max(5.0, hard_limit))
+    results = [
+        {"idx": i, "model": model, "status": None, "tier": None, "warning": None,
+         "class": None, "wait_headers": None, "ttfb": None, "chunks": 0,
+         "keepalives": 0, "duration": None, "finish": None, "error": None,
+         "headers": {}, "outcome": "budget_exceeded", "cut": False}
+        for i in range(n)
+    ]
+    socks: list = []
+    lock = threading.Lock()
+    threads = [
+        threading.Thread(target=probe_one, daemon=True,
+                         args=(i, key, model, max_tokens, timeout, results[i], socks, lock))
+        for i in range(n)
+    ]
+    t0 = time.monotonic()
+    deadline = t0 + hard_limit
+    for t in threads:
+        t.start()
+    for t in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        t.join(remaining)
+    for s in list(socks):
+        try:
+            s.shutdown(2)
+        except Exception:
+            pass
+    for r in results:
+        if r["outcome"] == "budget_exceeded":
+            r["cut"] = True
+            r["outcome"] = "streamed" if r["chunks"] else "silent"
+            r["error"] = r["error"] or f"cut at the {hard_limit:.0f}s budget"
+    live = results
+    wait = [r["wait_headers"] for r in live if r["wait_headers"] is not None]
+    ttfb = [r["ttfb"] for r in live if r["ttfb"] is not None]
+    return {
+        "n": n,
+        "model": model,
+        "wall_s": round(time.monotonic() - t0, 1),
+        "budget_s": hard_limit,
+        "socket_timeout_s": timeout,
+        "tiers": {t: sum(1 for r in live if r["class"] == t) for t in ("interactive", "background")},
+        "demoted": sum(1 for r in live if r["warning"]),
+        "streamed": sum(1 for r in live if r["outcome"] == "streamed"),
+        "silent": sum(1 for r in live if r["outcome"] == "silent"),
+        "admission_deaths": sum(1 for r in live if r["outcome"] == "admission_timeout"),
+        "errors": sum(1 for r in live if r["outcome"] == "error"),
+        "cut": sum(1 for r in live if r["cut"]),
+        "wait_headers": pct(wait, 50),
+        "ttfb": pct(ttfb, 50),
+        "keepalives": sum(r["keepalives"] for r in live),
+        "direct": live,
+    }
+
+
+def cmd_probe(args) -> int:
+    stream = sys.stderr if args.json else sys.stdout
+    print(f"probing {args.n} x {args.model} (max_tokens {args.max_tokens}, budget {args.max_seconds:.0f}s)",
+          file=stream, flush=True)
+    r = run_probe(args.n, args.model, args.max_tokens, args.timeout, args.max_seconds)
+    if args.json:
+        print(json.dumps(r, indent=2))
+        return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
+    print(f"  tier header      interactive {r['tiers']['interactive']}  background {r['tiers']['background']}  demoted {r['demoted']}")
+    print(f"  outcome          streamed {r['streamed']}  no first token {r['silent']}  "
+          f"admission deaths {r['admission_deaths']}  errors {r['errors']}  cut {r['cut']}")
+    print(f"  wait to headers  p50 {fmt(r['wait_headers'], 's')}")
+    print(f"  first token      p50 {fmt(r['ttfb'], 's')}")
+    print(f"  keep-alives      {r['keepalives']}")
+    print()
+    if r["cut"]:
+        print(f"  - {r['cut']} request(s) had no terminal outcome inside the {r['budget_s']:.0f}s budget and "
+              f"were cut. That is not a failure: the background tier can take ~600s to first token. "
+              f"Raise --max-seconds before judging it.")
+    if r["admission_deaths"]:
+        print(f"  - {r['admission_deaths']}/{r['n']} died at the ~{ADMISSION_DEADLINE_S:.0f}s admission deadline. "
+              f"For this width of fan-out, use the -background variant of the same model.")
+    if r["demoted"]:
+        print(f"  - {r['demoted']} request(s) carried `overflowed-to-background`: the burst exceeded the "
+              f"interactive cap of {INTERACTIVE_BURST_CAP}.")
+    if r["streamed"] == r["n"] and not r["cut"]:
+        print("  - all requests streamed; no pressure at this width.")
+    return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
+
+
+def cmd_compare(args) -> int:
+    base = args.model
+    bg = base if base.endswith("-background") else base + "-background"
+    rows = []
+    stream = sys.stderr if args.json else sys.stdout
+    for model in (base, bg):
+        print(f"running {args.n} x {model} ...", file=stream, flush=True)
+        r = run_probe(args.n, model, args.max_tokens, args.timeout, args.max_seconds)
+        rows.append(r)
+    bad = any(r["cut"] or r["admission_deaths"] or r["silent"] for r in rows)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 1 if bad else 0
+    print()
+    print(f"{'model':<28} {'class':<12} {'streamed':>9} {'no token':>9} {'adm.dead':>9} {'cut':>5} {'ttfb p50':>9}")
+    for r in rows:
+        klass = ",".join(f"{k}" for k, v in r["tiers"].items() if v) or "n/a"
+        print(f"{r['model']:<28} {klass:<12} {r['streamed']:>9} {r['silent']:>9} "
+              f"{r['admission_deaths']:>9} {r['cut']:>5} {fmt(r['ttfb'], 's'):>9}")
+    print()
+    print("  - the interactive tier admits fewer parallel requests but answers in tens of seconds;")
+    print("    the -background tier admits more and answers in minutes. Pick the tier by fan-out width,")
+    print("    not by impatience.")
+    if bad:
+        print()
+        print("  - at least one row did not stream cleanly at this width. Read the two rows against each")
+        print("    other before changing models: `cut` means the budget was too small to judge the tier.")
+    return 1 if bad else 0
+
+
+# ---- cli --------------------------------------------------------------------
+def window_hours(spec: str | None, now: bool) -> float:
+    """Parse 24h/90m/7d. Raises ValueError; the caller turns that into exit 2."""
+    if now:
+        return 0.25
+    if not spec:
+        return 24.0
+    s = spec.strip().lower()
+    unit = s[-1]
+    try:
+        val = float(s[:-1] or 0) if unit in "hmd" else float(s)
+    except ValueError:
+        raise ValueError(f"bad --since value: {spec!r} (use e.g. 90m, 24h, 7d)")
+    if val <= 0:
+        raise ValueError(f"bad --since value: {spec!r} (must be positive)")
+    return {"m": val / 60.0, "h": val, "d": val * 24.0}.get(unit, val)
+
+
+def collect(since_hours: float, harnesses: list[str]) -> list[Request]:
+    since = time.time() - since_hours * 3600
+    reqs: list[Request] = []
+    if "pi" in harnesses:
+        reqs += iter_pi([os.path.expanduser(PI_STORE)], since)
+    if "claude-code" in harnesses:
+        reqs += iter_claude([os.path.expanduser(CLAUDE_STORE)], since)
+    return reqs
+
+
+def cmd_discover(args) -> int:
+    d = discover()
+    print(json.dumps(d, indent=2) if args.json else _render_discover(d))
+    return 0 if any(v.get("present") for k, v in d.items() if isinstance(v, dict)) else 2
+
+
+def _render_discover(d: dict) -> str:
+    lines = ["stores"]
+    for name in ("pi", "claude-code", "codex"):
+        s = d[name]
+        state = "present" if s["present"] else "absent"
+        lines.append(f"  {name:<12} {state:<8} {s['files']:>6} files"
+                     + (f"  newest {s['newest']}" if s["newest"] else ""))
+    lines.append(f"  lunaroute    {'present' if d['lunaroute_config']['present'] else 'absent'}  {d['lunaroute_config']['path']}")
+    lines.append("")
+    lines.append("luna-doctor reads these stores read-only. codex rollouts are mostly zstd and are")
+    lines.append("not LunaRoute traffic on most machines, so tier analysis skips them for now.")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="luna-doctor", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"luna-doctor {VERSION}")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    d = sub.add_parser("discover", help="what log stores exist on this machine")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(func=cmd_discover)
+
+    a = sub.add_parser("analyze", help="explain what your traffic is doing to your concurrency")
+    a.add_argument("--since", default=None, help="window, e.g. 24h, 90m, 7d (default 24h)")
+    a.add_argument("--now", action="store_true", help="last 15 minutes")
+    a.add_argument("--harness", default="pi,claude-code")
+    a.add_argument("--json", action="store_true")
+    a.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("probe", help="measure the gateway at a chosen burst width")
+    p.add_argument("--n", type=int, default=10)
+    p.add_argument("--model", default="glm-5.3")
+    p.add_argument("--max-tokens", type=int, default=800)
+    p.add_argument("--timeout", type=float, default=320.0)
+    p.add_argument("--max-seconds", type=float, default=170.0)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_probe)
+
+    c = sub.add_parser("compare", help="run the same burst on a model and its -background twin")
+    c.add_argument("--n", type=int, default=10)
+    c.add_argument("--model", default="glm-5.3")
+    c.add_argument("--max-tokens", type=int, default=800)
+    c.add_argument("--timeout", type=float, default=320.0)
+    c.add_argument("--max-seconds", type=float, default=170.0)
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(func=cmd_compare)
+
+    args = ap.parse_args(argv)
+    if args.cmd in ("probe", "compare") and getattr(args, "n", 1) < 1:
+        print("luna-doctor: --n must be at least 1", file=sys.stderr)
+        return 2
+    if args.cmd == "analyze":
+        return cmd_analyze(args)
+    return args.func(args)
+
+
+def cmd_analyze(args) -> int:
+    try:
+        hours = window_hours(args.since, args.now)
+    except ValueError as e:
+        print(f"luna-doctor: {e}", file=sys.stderr)
+        return 2
+    harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
+    reqs = collect(hours, harnesses)
+    m = analyse(reqs, hours)
+    head, adj, code = verdict(m)
+    render(m, head, adj, args.json)
+    return code
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
