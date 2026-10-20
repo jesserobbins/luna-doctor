@@ -19,6 +19,7 @@ luna-doctor analyze            # what the machine has been doing for 24h
 luna-doctor analyze --since 7d --json
 luna-doctor fix                # copy-paste config per agent, justified by the numbers
 luna-doctor fix --agent pi     # one agent at a time
+luna-doctor chart --since 24h  # SVG: fan-out over time + every request's latency
 luna-doctor discover           # when the analysis says "no data"
 luna-doctor compare --n 8 --model <model>   # tier facts, costs tokens
 ```
@@ -45,6 +46,19 @@ Two metrics carry most of the diagnosis:
 - **starved-peer evidence** — stalled requests where another request to the same
   model completed inside their own window. When this is non-zero the model was
   healthy and the request was simply not served.
+
+## Reading the chart
+
+`luna-doctor chart` draws the same window as two stacked panels. Top: requests in
+flight, split by tier, with the advised fan-out (8) and the burst cap (10) as
+dashed rules. Bottom: every request end to end on a log axis, with the 120.2s
+admission deadline and the 300s client idle budget as dashed walls — failures sit
+on the wall that killed them (red crosses at 120.2s, amber dots at 300s).
+
+Use it before quoting numbers: a burst in the top panel at the same x as a
+cluster of red crosses below is the diagnosis in one picture. When the top panel
+never reaches the dashed rules, say that plainly — on a quiet machine the honest
+answer is that fan-out is not the problem.
 
 ## What to recommend
 

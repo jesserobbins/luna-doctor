@@ -16,6 +16,18 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
+### Added
+
+- `luna-doctor chart` writes a standalone SVG: requests in flight over time,
+  split by tier with the burst cap and advised fan-out drawn in, and every
+  request's end-to-end latency on a log axis with the 120.2s admission deadline
+  and the 300s client idle budget as reference walls. Failures are plotted on the
+  wall that killed them, so a burst's tail is visible pushing into it.
+- `--width`, `--height`, `--out` and `--open` for the chart; `--json` reports the
+  written path plus the metrics.
+
 ### Changed
 
 - License changed from MIT to Apache-2.0.

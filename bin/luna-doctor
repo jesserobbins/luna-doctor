@@ -35,7 +35,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-VERSION = "0.1.0"          # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+VERSION = "0.2.0"          # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 1         # bump when the --json shape changes
 
 # ---- measured constants -----------------------------------------------------
@@ -954,6 +954,17 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--json", action="store_true")
     f.set_defaults(func=None)
 
+    ch = sub.add_parser("chart", help="write a standalone SVG of concurrency and latency")
+    ch.add_argument("--since", default=None)
+    ch.add_argument("--now", action="store_true")
+    ch.add_argument("--harness", default="pi,claude-code")
+    ch.add_argument("--out", default=None, help="path for the .svg (default: ./luna-doctor-<ts>.svg)")
+    ch.add_argument("--width", type=int, default=1120)
+    ch.add_argument("--height", type=int, default=640)
+    ch.add_argument("--open", action="store_true", help="open the SVG when it is written")
+    ch.add_argument("--json", action="store_true")
+    ch.set_defaults(func=None)
+
     args = ap.parse_args(argv)
     if args.cmd in ("probe", "compare") and getattr(args, "n", 1) < 1:
         print("luna-doctor: --n must be at least 1", file=sys.stderr)
@@ -962,6 +973,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_analyze(args)
     if args.cmd == "fix":
         return cmd_fix(args)
+    if args.cmd == "chart":
+        return cmd_chart(args)
     return args.func(args)
 
 
@@ -989,6 +1002,16 @@ if os.path.isfile(_FIX_PATH):
 else:  # pragma: no cover
     def cmd_fix(args):  # type: ignore
         print("luna-doctor: fix support missing (bin/_fix_block.py not found)", file=sys.stderr)
+        return 2
+
+
+_CHART_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_chart_block.py")
+if os.path.isfile(_CHART_PATH):
+    with open(_CHART_PATH, "r") as _fh:
+        exec(compile(_fh.read(), _CHART_PATH, "exec"), globals())
+else:  # pragma: no cover
+    def cmd_chart(args):  # type: ignore
+        print("luna-doctor: chart support missing (bin/_chart_block.py not found)", file=sys.stderr)
         return 2
 
 

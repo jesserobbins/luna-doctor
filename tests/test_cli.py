@@ -14,7 +14,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "bin", "luna-doctor")
@@ -112,6 +114,45 @@ class ExitCodes(unittest.TestCase):
     def test_no_data_for_a_harness_we_do_not_read(self):
         code, _, _ = run("analyze", "--harness", "codex", "--since", "1m")
         self.assertEqual(code, 2)
+
+
+class Chart(unittest.TestCase):
+    def _chart(self, *extra):
+        d = tempfile.mkdtemp()
+        out = os.path.join(d, "chart.svg")
+        code, stdout, err = run("chart", "--since", "24h", "--out", out, *extra)
+        self.assertEqual(code, 0, f"chart failed: {err}")
+        self.assertTrue(os.path.exists(out), f"no file written: {stdout}")
+        with open(out) as fh:
+            return fh.read()
+
+    def test_svg_is_self_contained(self):
+        svg = self._chart()
+        self.assertTrue(svg.startswith("<svg"), svg[:40])
+        ET.fromstring(svg)                      # well-formed XML, not just text
+        for forbidden in ("<script", "<image", "@font-face", "xlink:href", "REPLACE_ME"):
+            self.assertNotIn(forbidden, svg)
+        # the only absolute URL may be the SVG namespace
+        self.assertEqual(svg.count("http://") + svg.count("https://"), 1)
+
+    def test_svg_carries_the_data(self):
+        svg = self._chart()
+        self.assertIn("<circle", svg)
+        self.assertIn("admission deadline", svg)
+        self.assertIn("idle budget", svg)
+        self.assertNotIn("nan", svg.lower())
+        self.assertNotIn("None", svg)
+
+    def test_chart_json_envelope(self):
+        d = tempfile.mkdtemp()
+        out = os.path.join(d, "chart.svg")
+        code, stdout, _ = run("chart", "--since", "24h", "--out", out, "--json")
+        self.assertEqual(code, 0)
+        doc = json.loads(stdout)
+        self.assertEqual(doc["command"], "chart")
+        self.assertEqual(doc["schema"], 1)
+        self.assertEqual(doc["path"], out)
+        self.assertIn("contract", doc)
 
 
 class Sources(unittest.TestCase):

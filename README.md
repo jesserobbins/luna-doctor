@@ -39,12 +39,41 @@ luna-doctor analyze --now     # last 15 minutes
 luna-doctor analyze --since 7d --json
 luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # ... or one agent at a time
+luna-doctor chart --since 24h # SVG: fan-out over time + every request's latency
 luna-doctor probe --n 10 --model glm-5.3
 luna-doctor compare --n 10 --model glm-5.3   # model vs its -background twin
 ```
 
 Exit codes: `0` no pressure, `1` pressure found, `2` no data. That makes
 `analyze` usable from a shell prompt, a skill, or cron.
+
+## The chart
+
+```bash
+luna-doctor chart --since 24h --open     # writes luna-doctor-<ts>.svg
+luna-doctor chart --now                  # the last 15 minutes
+luna-doctor chart --out day.svg --width 1400 --height 800
+```
+
+One self-contained SVG, no fonts or scripts or CDN, so it opens anywhere and
+pastes into a doc or a ticket.
+
+The top panel is **requests in flight over time**, split into interactive and
+background. The line is the busiest moment in each bucket, the fill is the
+average load, and the two dashed rules are the advised fan-out (8) and the
+burst cap (10) — past the cap the gateway demotes you to background instead of
+failing. If your line never reaches those rules, the chart says so, because
+that is the finding.
+
+The bottom panel is **every request end to end** on a log axis. The 120.2s
+admission deadline and the 300s client idle budget are drawn as dashed walls,
+and every failure is plotted on the wall that killed it: admission deaths as
+red crosses at 120.2s, silent stalls as amber dots at 300s. The dark line is
+the per-bucket median latency, broken where nothing ran.
+
+What it is for: the two panels put cause above symptom. A burst in the top
+panel at the same x as a cluster of red crosses below is the whole diagnosis in
+one picture.
 
 ## What it reads
 
