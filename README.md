@@ -37,6 +37,8 @@ luna-doctor discover          # which log stores exist, how big, how fresh
 luna-doctor analyze           # last 24h: what happened and what to adjust
 luna-doctor analyze --now     # last 15 minutes
 luna-doctor analyze --since 7d --json
+luna-doctor fix               # per-agent copy-paste config, from the evidence
+luna-doctor fix --agent pi    # ... or one agent at a time
 luna-doctor probe --n 10 --model glm-5.3
 luna-doctor compare --n 10 --model glm-5.3   # model vs its -background twin
 ```
@@ -53,6 +55,11 @@ Read-only, offline, no credentials needed for `analyze`:
 | pi | `~/.pi/agent/sessions/**/*.jsonl` |
 | claude-code | `~/.claude/projects/**/*.jsonl` |
 | codex | detected and reported, not analysed (zstd rollouts, usually not LunaRoute traffic) |
+
+`fix` prints per-agent blocks: the exact file, the snippet, and a command that
+backs the file up, validates it, merges the key, and prints `ok`. It never writes
+anything itself. Every key it emits was verified against the installed harness
+bundles or their shipped docs; anything unverifiable is not emitted.
 
 `probe` and `compare` are the only commands that touch the network, and they use
 the routing key already stored by `lunaroute login`.

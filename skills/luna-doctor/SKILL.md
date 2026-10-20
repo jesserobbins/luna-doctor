@@ -17,8 +17,10 @@ Run the tool before theorising:
 luna-doctor analyze --now      # if the user says "it is slow right now"
 luna-doctor analyze            # what the machine has been doing for 24h
 luna-doctor analyze --since 7d --json
+luna-doctor fix                # copy-paste config per agent, justified by the numbers
+luna-doctor fix --agent pi     # one agent at a time
 luna-doctor discover           # when the analysis says "no data"
-luna-doctor compare --n 10 --model <model>   # tier facts, costs tokens
+luna-doctor compare --n 8 --model <model>   # tier facts, costs tokens
 ```
 
 `analyze` exits `1` when it finds pressure, `0` when it does not, `2` when the
@@ -46,13 +48,17 @@ Two metrics carry most of the diagnosis:
 
 ## What to recommend
 
-1. **Keep interactive fan-out at or under 5.** The interactive burst cap is 10,
+1. **Keep interactive fan-out at or under 8.** The interactive burst cap is 10,
    and anything past it is demoted to background, where the first token can take
    ten minutes.
 2. **Move wide fan-out to the `-background` variant** of the same model. More
    concurrency, much slower SLA. That is the trade, and it is deliberate.
+   `luna-doctor fix` emits the exact key for whichever agent the user runs.
 3. **Never put a short client timeout in front of a background request.** pi's
-   default idle budget is 300s; a background stream may not speak for 600s.
+   default idle budget is 300s (set `httpIdleTimeoutMs` to `0` or `900000`);
+   claude-code's stream idle floor is 300s (raise
+   `CLAUDE_STREAM_IDLE_TIMEOUT_MS` in the `env` block). A background stream may
+   not speak for 600s.
 4. **Expect a minute of latency as the floor.** ~25.2s is spent before the
    gateway even sends headers.
 5. **Do not trust `x-lunaroute-queue-ms`.** It reads `0` on requests that waited

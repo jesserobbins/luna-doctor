@@ -44,7 +44,7 @@ CLIENT_IDLE_TIMEOUT_S = 300.0   # pi DEFAULT_HTTP_IDLE_TIMEOUT_MS
 UPSTREAM_HOLD_S = 10.1          # 503 INFERENCE_UNAVAILABLE hold
 KEEPALIVE_S = 10.0              # SSE keep-alive cadence in background tier
 INTERACTIVE_BURST_CAP = 10      # per-burst interactive class cap: min(n, 10)
-ADVISE_FANOUT_MAX = 5           # our recommendation, half the observed cap
+ADVISE_FANOUT_MAX = 8           # our recommendation: below the cap, with headroom
 
 PI_STORE = "~/.pi/agent/sessions"
 CLAUDE_STORE = "~/.claude/projects"
@@ -921,12 +921,23 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--json", action="store_true")
     c.set_defaults(func=cmd_compare)
 
+    f = sub.add_parser("fix", help="print per-agent copy-paste instructions")
+    f.add_argument("--since", default=None)
+    f.add_argument("--now", action="store_true")
+    f.add_argument("--harness", default="pi,claude-code")
+    f.add_argument("--agent", default=None,
+                   help="which agents to emit fixes for: pi,claude-code,codex (default all)")
+    f.add_argument("--json", action="store_true")
+    f.set_defaults(func=None)
+
     args = ap.parse_args(argv)
     if args.cmd in ("probe", "compare") and getattr(args, "n", 1) < 1:
         print("luna-doctor: --n must be at least 1", file=sys.stderr)
         return 2
     if args.cmd == "analyze":
         return cmd_analyze(args)
+    if args.cmd == "fix":
+        return cmd_fix(args)
     return args.func(args)
 
 
@@ -942,6 +953,19 @@ def cmd_analyze(args) -> int:
     head, adj, code = verdict(m)
     render(m, head, adj, args.json)
     return code
+
+
+# The `fix` command lives in a sibling file so its snippets can be reviewed and
+# verified on their own. It is executed in this module's namespace so it can
+# reuse Request/collect/analyse without a package import (this file is a script).
+_FIX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_fix_block.py")
+if os.path.isfile(_FIX_PATH):
+    with open(_FIX_PATH, "r") as _fh:
+        exec(compile(_fh.read(), _FIX_PATH, "exec"), globals())
+else:  # pragma: no cover
+    def cmd_fix(args):  # type: ignore
+        print("luna-doctor: fix support missing (bin/_fix_block.py not found)", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
