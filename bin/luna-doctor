@@ -35,7 +35,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-VERSION = "0.2.0"          # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+VERSION = "0.1.0"          # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 1         # bump when the --json shape changes
 
 # ---- measured constants -----------------------------------------------------

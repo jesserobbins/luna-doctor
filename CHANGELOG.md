@@ -13,10 +13,10 @@ Versioning policy:
   change the interface.
 - `schema` in the `--json` envelope is bumped independently when the document
   shape changes, so a stored report can be read back correctly.
+- Work in progress accumulates under **Unreleased**. The version is bumped
+  only when a release is deliberately cut.
 
 ## [Unreleased]
-
-## [0.2.0] - 2026-10-20
 
 ### Added
 
