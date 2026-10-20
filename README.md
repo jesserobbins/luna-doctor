@@ -76,7 +76,44 @@ the routing key already stored by `lunaroute login`.
 ## Install
 
 ```bash
+# no packaging step needed
 ln -s "$PWD/bin/luna-doctor" ~/.local/bin/luna-doctor
+
+# or as a proper script install
+pipx install .        # uses pyproject.toml; installs the script, no library
 ```
 
-Python 3.9+, standard library only.
+Python 3.9+, standard library only. The `fix` block for codex prefers Python
+3.11+ (it validates TOML with `tomllib`) and falls back to a key-presence check
+when `tomllib` is unavailable.
+
+## Versioning
+
+Semantic versioning, single source of truth:
+
+| what | where |
+|---|---|
+| version number | `VERSION`, mirrored in `bin/luna-doctor` |
+| history | `CHANGELOG.md` (Keep a Changelog) |
+| releases | annotated git tags, `vX.Y.Z` |
+| JSON document shape | `"schema": 1` in every `--json` envelope |
+| measured gateway facts | `"contract": {...}` in every `--json` envelope |
+
+Every `--json` document carries `schema`, `version` and `command`. The
+reporting commands (`discover`, `analyze`, `fix`, `probe`, `compare`) also carry
+`contract`, the measured gateway facts they were judged against, so a saved
+report stays readable after the tool moves on. A usage error emits no document
+at all: it prints to stderr and exits 2.
+
+Bumping a version updates the number in both places, opens a dated changelog
+section, and prints the tag and push commands. It never pushes:
+
+```bash
+scripts/release.sh patch    # or minor | major | x.y.z
+```
+
+Tests are stdlib-only and read-only (they never call `probe`, which costs credits):
+
+```bash
+python3 -m unittest discover -s tests -v
+```

@@ -35,9 +35,20 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-VERSION = "0.1.0"
+VERSION = "0.1.0"          # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+SCHEMA_VERSION = 1         # bump when the --json shape changes
 
 # ---- measured constants -----------------------------------------------------
+CONTRACT = {
+    "pre_header_wait_s": 25.2,
+    "admission_deadline_s": 120.2,
+    "client_idle_timeout_s": 300.0,
+    "upstream_hold_s": 10.1,
+    "keepalive_s": 10.0,
+    "interactive_burst_cap": 10,
+    "advised_fanout_max": 8,
+}
+
 PRE_HEADER_WAIT_S = 25.2        # fixed wait before SSE headers, load-independent
 ADMISSION_DEADLINE_S = 120.2    # `scheduler admission timeout`
 CLIENT_IDLE_TIMEOUT_S = 300.0   # pi DEFAULT_HTTP_IDLE_TIMEOUT_MS
@@ -356,6 +367,14 @@ def fmt(v, unit: str = "") -> str:
     return "n/a" if v is None else f"{v}{unit}"
 
 
+def envelope(command: str, payload: dict, **extra) -> dict:
+    """Every --json document is attributable: which build, which schema."""
+    doc = {"schema": SCHEMA_VERSION, "version": VERSION, "command": command}
+    doc.update(extra)
+    doc.update(payload)
+    return doc
+
+
 def human_window(hours: float) -> str:
     if hours * 60 < 60:
         return f"{round(hours * 60)}m"
@@ -586,7 +605,11 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
 
 def render(m: dict, head: str, adj: list[str], as_json: bool) -> None:
     if as_json:
-        print(json.dumps({"headline": head, "adjustments": adj, "metrics": m}, indent=2))
+        print(json.dumps(envelope("analyze", {
+            "headline": head,
+            "adjustments": adj,
+            "metrics": m,
+        }, contract=CONTRACT), indent=2))
         return
     print(head)
     print()
@@ -784,7 +807,7 @@ def cmd_probe(args) -> int:
           file=stream, flush=True)
     r = run_probe(args.n, args.model, args.max_tokens, args.timeout, args.max_seconds)
     if args.json:
-        print(json.dumps(r, indent=2))
+        print(json.dumps(envelope("probe", {"run": r}, contract=CONTRACT), indent=2))
         return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
     print(f"  tier header      interactive {r['tiers']['interactive']}  background {r['tiers']['background']}  demoted {r['demoted']}")
     print(f"  outcome          streamed {r['streamed']}  no first token {r['silent']}  "
@@ -819,7 +842,7 @@ def cmd_compare(args) -> int:
         rows.append(r)
     bad = any(r["cut"] or r["admission_deaths"] or r["silent"] for r in rows)
     if args.json:
-        print(json.dumps(rows, indent=2))
+        print(json.dumps(envelope("compare", {"runs": rows}, contract=CONTRACT), indent=2))
         return 1 if bad else 0
     print()
     print(f"{'model':<28} {'class':<12} {'streamed':>9} {'no token':>9} {'adm.dead':>9} {'cut':>5} {'ttfb p50':>9}")
@@ -868,7 +891,8 @@ def collect(since_hours: float, harnesses: list[str]) -> list[Request]:
 
 def cmd_discover(args) -> int:
     d = discover()
-    print(json.dumps(d, indent=2) if args.json else _render_discover(d))
+    print(json.dumps(envelope("discover", {"stores": d}, contract=CONTRACT), indent=2)
+          if args.json else _render_discover(d))
     return 0 if any(v.get("present") for k, v in d.items() if isinstance(v, dict)) else 2
 
 

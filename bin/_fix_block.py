@@ -381,6 +381,10 @@ def _val(v) -> str:
 def render_fix(recs, m, as_json: bool) -> None:
     if as_json:
         print(json.dumps({
+            "schema": SCHEMA_VERSION,
+            "version": VERSION,
+            "command": "fix",
+            "contract": CONTRACT,
             "findings": {
                 "peak_concurrency": m["peak_concurrency"],
                 "admission_deaths": m["by_outcome"].get("admission_timeout", 0),

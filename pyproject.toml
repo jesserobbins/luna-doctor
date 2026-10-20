@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "luna-doctor"
+dynamic = ["version"]
+description = "Diagnose LunaRoute concurrency problems from local agent logs, and emit per-agent config fixes"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Jesse Robbins", email = "jesse.robbins@openaid.org" }]
+keywords = ["lunaroute", "concurrency", "agents", "diagnostics", "pi", "claude-code", "codex"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://jesserobbins.com"
+
+[tool.setuptools]
+# The tool is a single dependency-free script; install it as a script rather
+# than pretending it is an importable library.
+script-files = ["bin/luna-doctor"]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
