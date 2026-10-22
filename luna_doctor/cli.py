@@ -43,6 +43,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from luna_doctor import report
+
 VERSION = "0.1.1-alpha.1"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 3         # 3: additive swamp contribution (metrics.swamp) + combined-pressure warning
 
@@ -1907,6 +1909,101 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     return head, adj, (1 if pressure else 0)
 
 
+def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
+    """Turn analyse() metrics into the Report every renderer prints.
+
+    The rows keep the analysis order - traffic first, then the admission and
+    saturation evidence, then the caveats - so the plain renderer says what
+    the old inline printer said, from data instead of prints. Admission
+    deaths and saturation inflation carry "bad" emphasis, unclassified
+    errors "warn", and a clean admission wall "good".
+    """
+    traffic: list[report.Row] = [
+        report.Row("window", f"last {human_window(m['window_hours'])}"),
+        report.Row("requests",
+                   f"{m['requests']}  ({', '.join(f'{k} {v}' for k, v in sorted(m['by_harness'].items()))})"),
+        report.Row("tiers", ', '.join(f"{k} {v}" for k, v in sorted(m["by_tier"].items()))),
+        report.Row("outcomes", ', '.join(f"{k} {v}" for k, v in sorted(m["by_outcome"].items()))),
+    ]
+    peaks = ', '.join(f"{k} {v}" for k, v in sorted(m["peak_by_harness"].items()))
+    traffic.append(report.Row(
+        "peak concurrency",
+        f"{m['peak_concurrency']} ({peaks})" + (f" at {m['peak_at']}" if m["peak_at"] else "")))
+    bm = m.get("by_minute") or []
+    dead_minutes = [x for x in bm if x["admission_deaths"]]
+    if dead_minutes:
+        traffic.append(report.Row("minute-level", f"{len(bm)} active minute(s); deaths in:"))
+        for x in dead_minutes[:6]:
+            traffic.append(report.Row(
+                x["minute"],
+                f"max {x['max_concurrent']} in flight, {x['started']} started, "
+                f"{x['admission_deaths']} died on admission", "bad"))
+    elif bm:
+        busy = max(bm, key=lambda x: (x["max_concurrent"], x["started"]))
+        traffic.append(report.Row(
+            "minute-level",
+            f"{len(bm)} active minute(s); busiest {busy['minute']} "
+            f"(max {busy['max_concurrent']} in flight, {busy['started']} started)"))
+    for tier in ("interactive", "background"):
+        l = m["latency_s"][tier]
+        if l["n"]:
+            traffic.append(report.Row(
+                f"latency {tier}",
+                f"n={l['n']} p50={fmt(l['p50'], 's')} p90={fmt(l['p90'], 's')} "
+                f"max={fmt(l['max'], 's')}"))
+
+    pressure: list[report.Row] = []
+    pm = m.get("per_model_deadlines") or {}
+    if pm:
+        bits = []
+        for model, d in sorted(pm.items()):
+            bits.append(f"{model} {d['deadline_s']}s (n={d['n']})"
+                        if d.get("deadline_s")
+                        else f"{model} unknown ({d.get('seen_n', d['n'])} death(s), "
+                             f"{d['n']} usable)")
+        pressure.append(report.Row("admission wall", ', '.join(bits)))
+    storms = m.get("timeout_storms") or []
+    if storms:
+        w = max(storms, key=lambda x: x["cohort"])
+        pressure.append(report.Row(
+            "timeout cohorts",
+            f"{len(storms)}; largest {w['cohort']}x {w['outcome']} "
+            f"at {w['duration_s']}s (blocked {fmt(w['blocked_s'], 's')})"))
+    bands = m.get("saturation_bands") or {}
+    if bands.get("bands"):
+        shown = ", ".join(f"{b['band']}:{b['n']}" + (f"/p90 {fmt(b['p90'], 's')}" if b["p90"] else "")
+                          for b in bands["bands"] if b["n"])
+        emphasis = "normal"
+        if bands.get("top_inflation_flagged"):
+            shown += f"\ntop band p90 is {bands['top_inflation']}x the mid bands"
+            emphasis = "bad"
+        elif bands.get("note"):
+            shown += "\n" + bands["note"]
+        pressure.append(report.Row("saturation", shown, emphasis))
+    for u in (m.get("unknown_errors") or [])[:3]:
+        pressure.append(report.Row(
+            "unclassified",
+            f"{u['count']}x `{u['signature'][:70]}` ({u['first']} .. {u['last']})", "warn"))
+    c = m["admission_conversion"]["interactive"]
+    if c["completed"] or c["admission_timeout"]:
+        pressure.append(report.Row(
+            "admission",
+            f"{c['admitted_pct']}% of interactive served ({c['completed']} served, "
+            f"{c['admission_timeout']} dead)",
+            "bad" if c["admission_timeout"] else "good"))
+
+    notes: list[report.Row] = []
+    if "claude-code" in m["by_harness"]:
+        notes.append(report.Row(
+            "note", "claude-code span starts are inferred from record gaps; treat its\n"
+                    "concurrency as a lower bound."))
+
+    sections = [report.Section(title, rows)
+                for title, rows in (("traffic", traffic), ("pressure", pressure),
+                                    ("notes", notes)) if rows]
+    return report.Report(headline=head, sections=sections, adjustments=list(adj))
+
+
 def render(m: dict, head: str, adj: list[str], as_json: bool,
            stored: dict | None = None) -> None:
     if as_json:
@@ -1920,61 +2017,7 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
                             "findings": len(stored["findings"])}
         print(json.dumps(doc, indent=2))
         return
-    print(head)
-    print()
-    print(f"window            last {human_window(m['window_hours'])}")
-    print(f"requests          {m['requests']}  ({', '.join(f'{k} {v}' for k, v in sorted(m['by_harness'].items()))})")
-    print(f"tiers             {', '.join(f'{k} {v}' for k, v in sorted(m['by_tier'].items()))}")
-    print(f"outcomes          {', '.join(f'{k} {v}' for k, v in sorted(m['by_outcome'].items()))}")
-    peaks = ', '.join(f"{k} {v}" for k, v in sorted(m["peak_by_harness"].items()))
-    print(f"peak concurrency  {m['peak_concurrency']} ({peaks})" + (f" at {m['peak_at']}" if m["peak_at"] else ""))
-    bm = m.get("by_minute") or []
-    dead_minutes = [x for x in bm if x["admission_deaths"]]
-    if dead_minutes:
-        print(f"minute-level      {len(bm)} active minute(s); deaths in:")
-        for x in dead_minutes[:6]:
-            print(f"  {x['minute']}  max {x['max_concurrent']} in flight, {x['started']} started, {x['admission_deaths']} died on admission")
-    elif bm:
-        busy = max(bm, key=lambda x: (x["max_concurrent"], x["started"]))
-        print(f"minute-level      {len(bm)} active minute(s); busiest {busy['minute']} (max {busy['max_concurrent']} in flight, {busy['started']} started)")
-    for tier in ("interactive", "background"):
-        l = m["latency_s"][tier]
-        if l["n"]:
-            print(f"latency {tier:<12} n={l['n']} p50={fmt(l['p50'], 's')} p90={fmt(l['p90'], 's')} max={fmt(l['max'], 's')}")
-    pm = m.get("per_model_deadlines") or {}
-    if pm:
-        bits = []
-        for model, d in sorted(pm.items()):
-            bits.append(f"{model} {d['deadline_s']}s (n={d['n']})"
-                        if d.get("deadline_s")
-                        else f"{model} unknown ({d.get('seen_n', d['n'])} death(s), "
-                             f"{d['n']} usable)")
-        print(f"admission wall    {', '.join(bits)}")
-    storms = m.get("timeout_storms") or []
-    if storms:
-        w = max(storms, key=lambda x: x["cohort"])
-        print(f"timeout cohorts   {len(storms)}; largest {w['cohort']}x {w['outcome']} "
-              f"at {w['duration_s']}s (blocked {fmt(w['blocked_s'], 's')})")
-    bands = m.get("saturation_bands") or {}
-    if bands.get("bands"):
-        shown = ", ".join(f"{b['band']}:{b['n']}" + (f"/p90 {fmt(b['p90'], 's')}" if b["p90"] else "")
-                          for b in bands["bands"] if b["n"])
-        print(f"saturation        {shown}")
-        if bands.get("top_inflation_flagged"):
-            print(f"                  top band p90 is {bands['top_inflation']}x the mid bands")
-        elif bands.get("note"):
-            print(f"                  {bands['note']}")
-    for u in (m.get("unknown_errors") or [])[:3]:
-        print(f"unclassified      {u['count']}x `{u['signature'][:70]}` ({u['first']} .. {u['last']})")
-    c = m["admission_conversion"]["interactive"]
-    if c["completed"] or c["admission_timeout"]:
-        print(f"admission         {c['admitted_pct']}% of interactive served ({c['completed']} served, {c['admission_timeout']} dead)")
-    if "claude-code" in m["by_harness"]:
-        print("note              claude-code span starts are inferred from record gaps; treat its")
-        print("                  concurrency as a lower bound.")
-    print()
-    for line in adj:
-        print("  - " + line)
+    print(report.render_plain(build_report(m, head, adj)), end="")
 
 
 # ---- live probe -------------------------------------------------------------

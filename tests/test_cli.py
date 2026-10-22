@@ -1711,5 +1711,29 @@ class SeventhReviewRegressions(unittest.TestCase):
         self.assertAlmostEqual(storms[0]["duration_s"], 10.0)
 
 
+class ReportModel(unittest.TestCase):
+    def test_render_is_built_from_a_report_object(self):
+        m = _load_cli()
+        reqs = [m.Request(harness="pi", session="s", model="glm-5.3",
+                          start=1_700_000_000.0, end=1_700_000_030.0, outcome="completed")]
+        metrics = m.analyse(reqs, window_hours=24)
+        rep = m.build_report(metrics, "No pressure in this window.", ["Narrow to 8."])
+        from luna_doctor.report import Report
+        self.assertIsInstance(rep, Report)
+        self.assertEqual(rep.headline, "No pressure in this window.")
+        labels = [row.label for s in rep.sections for row in s.rows]
+        self.assertIn("requests", labels)
+        self.assertIn("peak concurrency", labels)
+
+    def test_zero_requests_yields_no_nan_or_none(self):
+        m = _load_cli()
+        metrics = m.analyse([], window_hours=24)
+        rep = m.build_report(metrics, "No data.", [])
+        from luna_doctor.report import render_plain
+        out = render_plain(rep)
+        self.assertNotIn("nan", out.lower())
+        self.assertNotIn("None", out)
+
+
 if __name__ == "__main__":
     unittest.main()
