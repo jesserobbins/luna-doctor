@@ -19,3 +19,9 @@ venv/
 # editors / os
 .DS_Store
 *.swp
+
+# ~/.gitignore_global ignores bin/ everywhere, which would drop the repo-local
+# launcher `bin/luna-doctor` and break the symlink install path in the README.
+# Re-include it explicitly, and keep any other bin/ contents ignored.
+!bin/
+!bin/luna-doctor

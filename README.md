@@ -85,13 +85,24 @@ Read-only and offline for `discover` / `analyze` / `fix` / `chart`:
 - Error records zero their token usage, so input size is unavailable on failures.
 - Concurrency reconstructed from one machine is a lower bound; other machines and other tenants are invisible.
 
+## Repo layout
+
+| path | what |
+|---|---|
+| `luna_doctor/cli.py` | the CLI, the log readers and the analyser |
+| `luna_doctor/_fix_block.py` | the `fix` command, kept apart so its snippets can be read and verified on their own |
+| `luna_doctor/_chart_block.py` | the `chart` command (SVG) |
+| `bin/luna-doctor` | launcher for the no-packaging path; resolves its own symlink and imports the package |
+
+The three package files ship together. `cli` loads the other two off disk from its own directory, so a partial install is the one thing that breaks `fix` and `chart`.
+
 ## Versioning
 
 Semantic versioning with prerelease identifiers (`0.1.1-alpha.1`, `0.1.1-beta.1`, …), single source of truth:
 
 | what | where |
 |---|---|
-| version number | `VERSION`, mirrored in `bin/luna-doctor` |
+| version number | `VERSION`, mirrored in `luna_doctor/cli.py` |
 | history | `CHANGELOG.md` (Keep a Changelog) |
 | releases | annotated git tags, `vX.Y.Z` and `vX.Y.Z-prerelease` (e.g. `v0.1.1-alpha.1`) |
 | JSON document shape | `"schema": 3` in every `--json` envelope — bumped independently when the shape changes |

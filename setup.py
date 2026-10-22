@@ -1,6 +1,6 @@
 """Normalize a semver prerelease (0.1.1-alpha.1) to PEP 440 (0.1.1a1) for packaging.
 
-The canonical version lives in VERSION as semver, and `bin/luna-doctor --version`
+The canonical version lives in VERSION as semver, and `luna_doctor/cli.py --version`
 reports it verbatim. Python packaging requires PEP 440, which uses no hyphen
 for prereleases. This shim bridges the two so `pip install .` keeps working
 during the alpha without duplicating the version number.

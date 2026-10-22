@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`chart` command for luna-doctor.
 
-Executed inside bin/luna-doctor's namespace (see the loader at the bottom of
+Executed inside luna_doctor.cli's namespace (see the loader at the bottom of
 that script), so it can use Request, collect, analyse, window_hours and the
 measured constants directly.
 

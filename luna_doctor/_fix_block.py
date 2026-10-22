@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`fix` command for luna-doctor.
 
-Executed inside bin/luna-doctor's namespace, so it may use Request, collect,
+Executed inside luna_doctor.cli's namespace, so it may use Request, collect,
 analyse, window_hours, ADVISE_FANOUT_MAX and friends.
 
 Design rules, learned from verification:

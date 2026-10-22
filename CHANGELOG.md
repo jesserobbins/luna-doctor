@@ -17,6 +17,10 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Fixed
+
+- Installed copies can run `fix` and `chart` again. The CLI was packaged as a single script, so the two command files it loads from its own directory were left behind in the checkout and both commands answered `support missing` (exit 2). The CLI is now a proper package (`luna_doctor/`) with a console-script entry point, and `bin/luna-doctor` is a launcher that resolves its own symlink for the no-packaging install path. Tests now cover the pipx, package and symlink layouts instead of only the checkout.
+
 ## [0.1.1-alpha.1] - 2026-10-22
 
 ### Added

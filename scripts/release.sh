@@ -59,12 +59,11 @@ today="$(date -u +%Y-%m-%d)"
 printf '%s\n' "$new" > VERSION
 
 # the constant in the script (single line, so a targeted replace is safe)
-sed "s/^VERSION = \"[0-9][0-9.]*\"\( *\)#/VERSION = \"$new\"\1#/" bin/luna-doctor > bin/luna-doctor.new
-mv bin/luna-doctor.new bin/luna-doctor
-chmod +x bin/luna-doctor
+sed "s/^VERSION = \"[0-9][0-9.]*\"\( *\)#/VERSION = \"$new\"\1#/" luna_doctor/cli.py > luna_doctor/cli.py.new
+mv luna_doctor/cli.py.new luna_doctor/cli.py
 
-if ! grep -q "^VERSION = \"$new\"" bin/luna-doctor; then
-  echo "failed to update VERSION in bin/luna-doctor" >&2
+if ! grep -q "^VERSION = \"$new\"" luna_doctor/cli.py; then
+  echo "failed to update VERSION in luna_doctor/cli.py" >&2
   exit 1
 fi
 

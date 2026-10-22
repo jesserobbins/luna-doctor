@@ -24,14 +24,18 @@ classifiers = [
 [project.urls]
 Homepage = "https://jesserobbins.com"
 
+[project.scripts]
+luna-doctor = "luna_doctor.cli:main"
+
 [tool.setuptools]
-# The tool is a single dependency-free script; install it as a script rather
-# than pretending it is an importable library.
-script-files = ["bin/luna-doctor"]
+# The CLI, `fix` and `chart` all ship as one package. They have to be installed
+# together: `cli` loads its two sibling command files off disk, so installing it
+# as a lone script left `fix` and `chart` reporting "support missing".
+packages = ["luna_doctor"]
 
 # VERSION holds a semver string (e.g. 0.1.1-alpha.1); normalize to PEP 440 for
 # packaging so `pip install .` does not choke on the hyphenated prerelease.
-# Keep the mapping trivial (alpha.1 -> a1) — `bin/luna-doctor --version`
-# always reports the semver form, which is the canonical one.
+# Keep the mapping trivial (alpha.1 -> a1) — `luna-doctor --version` always
+# reports the semver form, which is the canonical one.
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

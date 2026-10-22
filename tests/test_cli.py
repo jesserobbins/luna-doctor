@@ -12,6 +12,7 @@ real store or to a log store.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,7 +57,7 @@ class VersionContract(unittest.TestCase):
         with open(os.path.join(ROOT, "VERSION")) as fh:
             file_version = fh.read().strip()
         self.assertEqual(script_version, file_version,
-                         "VERSION and bin/luna-doctor disagree; run scripts/release.sh")
+                         "VERSION and luna_doctor/cli.py disagree; run scripts/release.sh")
 
     def test_version_matches_newest_git_tag(self):
         try:
@@ -172,17 +173,69 @@ class Chart(unittest.TestCase):
         self.assertIn("contract", doc)
 
 
+class InstallShape(unittest.TestCase):
+    """`fix` and `chart` load their code from sibling files, so they only work
+    when those files sit beside the CLI.
+
+    Shipping the CLI as a lone script broke exactly that: `pipx install .` put
+    one file in the venv's bin/ and both commands answered "support missing"
+    (exit 2). Running from a checkout hid it. These tests cover each install
+    path the README documents.
+    """
+
+    def _env(self, **extra):
+        env = dict(os.environ)
+        env["LUNA_DOCTOR_STORE"] = _TEST_STORE
+        env.pop("PYTHONPATH", None)
+        env["SWAMP_ROOT"] = os.path.join(_TEST_STORE, "no-such-swamp")
+        env.update(extra)
+        return env
+
+    def _assert_loaded(self, proc, what):
+        self.assertNotIn("support missing", proc.stderr, f"{what}: {proc.stderr}")
+        self.assertNotIn("Traceback", proc.stderr, f"{what}: {proc.stderr}")
+
+    def test_package_import_loads_both_commands_from_disk(self):
+        cli = _load_cli()
+        for name, path in (("cmd_fix", cli._FIX_PATH), ("cmd_chart", cli._CHART_PATH)):
+            fn = getattr(cli, name)
+            self.assertEqual(os.path.abspath(fn.__code__.co_filename), os.path.abspath(path),
+                             f"{name} came from the missing-support stub, not {path}")
+
+    def test_installed_layout_runs_fix_and_chart(self):
+        """A copy of the package with no checkout around it: what pip installs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            site = os.path.join(tmp, "site-packages")
+            os.makedirs(site)
+            shutil.copytree(os.path.join(ROOT, "luna_doctor"),
+                            os.path.join(site, "luna_doctor"),
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            env = self._env(PYTHONPATH=site)
+            for args in (("fix", "--since", "1h"),
+                         ("chart", "--since", "1h", "--out", os.path.join(tmp, "c.svg"))):
+                proc = subprocess.run([sys.executable, "-m", "luna_doctor.cli", *args],
+                                      capture_output=True, text=True, cwd=tmp, env=env,
+                                      timeout=180)
+                self.assertIn(proc.returncode, (0, 1, 2), f"{args[0]}: {proc.stderr}")
+                self._assert_loaded(proc, args[0])
+
+    def test_symlink_install_runs_fix_and_chart(self):
+        """The no-packaging path: a symlink on PATH pointing into a checkout."""
+        with tempfile.TemporaryDirectory() as tmp:
+            link = os.path.join(tmp, "luna-doctor")
+            os.symlink(CLI, link)
+            env = self._env()
+            for args in (("fix", "--since", "1h"),
+                         ("chart", "--since", "1h", "--out", os.path.join(tmp, "c.svg"))):
+                proc = subprocess.run([link, *args], capture_output=True, text=True,
+                                      cwd=tmp, env=env, timeout=180)
+                self.assertIn(proc.returncode, (0, 1, 2), f"{args[0]}: {proc.stderr}")
+                self._assert_loaded(proc, args[0])
+
+
 class Sources(unittest.TestCase):
     def _module(self):
-        import importlib.util
-        import sys
-        from importlib.machinery import SourceFileLoader
-        loader = SourceFileLoader("luna_doctor", CLI)
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[loader.name] = mod     # dataclass annotations resolve via sys.modules
-        loader.exec_module(mod)
-        return mod
+        return _load_cli()
 
     def test_concurrency_by_minute_bins_and_carries_over(self):
         """Minute series: per-minute max in-flight, boundary-spanning requests counted."""
@@ -217,7 +270,8 @@ class Sources(unittest.TestCase):
         self.assertEqual(m.concurrency_by_minute([]), [])
 
     def test_both_files_compile(self):
-        for rel in ("bin/luna-doctor", "bin/_fix_block.py"):
+        for rel in ("luna_doctor/cli.py", "luna_doctor/_fix_block.py",
+                    "luna_doctor/_chart_block.py", "bin/luna-doctor"):
             path = os.path.join(ROOT, rel)
             proc = subprocess.run([sys.executable, "-m", "py_compile", path],
                                   capture_output=True, text=True)
@@ -231,16 +285,11 @@ class Sources(unittest.TestCase):
 
 
 def _load_cli():
-    """Import bin/luna-doctor as a module (it is a script, not a package)."""
-    import importlib.util
-    import sys as _sys
-    from importlib.machinery import SourceFileLoader
-    loader = SourceFileLoader("luna_doctor", CLI)
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    mod = importlib.util.module_from_spec(spec)
-    _sys.modules[loader.name] = mod          # dataclass annotations resolve here
-    loader.exec_module(mod)
-    return mod
+    """Import the CLI the way the installed console script does: as a package."""
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    from luna_doctor import cli
+    return cli
 
 
 def _pi_line(ts, model, start_ms, end_ms, err=None, stop="stop", out=100):
