@@ -117,6 +117,44 @@ FONT = {
     '~': (".....", ".....", ".#...", "#.#.#", "...#.", ".....", "....."),
 }
 
+# The PNG renderer can only draw the glyphs above, but the chart's copy uses
+# real typography: middle dots between summary numbers, an em dash in the
+# title, "\u2264 8" in the legend, curly quotes in prose. `ascii_fold`
+# rewrites each of those to ASCII the font has, so a PNG says what the SVG
+# of the same scene says. It is a plain table on purpose -- no unicodedata
+# normalisation, nothing that would surprise a reader -- and anything it
+# does not know (emoji, CJK, other symbols) folds to '?', which reads as
+# "something was here" rather than the hollow box of a missing glyph.
+
+ASCII_FOLD = {
+    "\u00b7": "-",    # MIDDLE DOT joins the chart's summary line
+    "\u2014": "-",    # EM DASH
+    "\u2013": "-",    # EN DASH
+    "\u2264": "<=",
+    "\u2265": ">=",
+    "\u00d7": "x",    # MULTIPLICATION SIGN
+    "\u2192": "->",   # RIGHTWARDS ARROW
+    "\u2026": "...",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u00b0": "deg",  # DEGREE SIGN
+    "\u00a0": " ",   # NO-BREAK SPACE
+    "\u2715": "x",    # the chart's admission-death legend mark
+    "\u25cf": "o",    # the chart's silent-stall legend mark
+}
+
+
+def ascii_fold(s: str) -> str:
+    """Fold `s` down to the printable ASCII the bitmap font can draw.
+
+    Table entries rewrite to their ASCII spelling; characters already in
+    FONT pass through untouched; everything else (emoji, symbols the table
+    does not know) becomes '?'.
+    """
+    return "".join(ASCII_FOLD.get(ch, ch if ch in FONT else "?") for ch in s)
+
 
 def text_width(s: str, scale: int = 1) -> int:
     """Pixel width of `s` at an integer `scale`: glyphs plus 1px tracking."""

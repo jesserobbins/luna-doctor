@@ -12,6 +12,11 @@ Two deliberate divergences from the SVG, each noted where it happens:
   so they are ignored.
 * SVG places text by its baseline; a bitmap font has no baseline metrics,
   so (x, y) is the top-left corner of the glyph block instead.
+* A browser drawing the SVG substitutes a real Unicode font, but a PNG has
+  only the 95-glyph ASCII font it carries, so `png_from` folds every Text
+  string through `font.ascii_fold` (middle dot to '-', em dash to '-',
+  '\u2264' to '<=', and so on) before rasterising. The scene and the SVG
+  keep the original characters.
 
 Everything is drawn with integer pixels: coordinates are rounded once at
 the door, every write is clipped to the canvas, and opacity blends against
@@ -24,11 +29,13 @@ import struct
 import zlib
 from math import isqrt
 
-from luna_doctor.font import ADVANCE, FONT, GLYPH_H, text_width
+from luna_doctor.font import ADVANCE, FONT, GLYPH_H, ascii_fold, text_width
 from luna_doctor.scene import Circle, Line, Rect, Text
 
-# Characters outside the font's ASCII range (the chart legend marks use
-# \u2715 and \u25cf) draw as a hollow box rather than as nothing at all.
+# Last-resort glyph for a character the font lacks. `png_from` folds every
+# Text through `font.ascii_fold` first, so this should never be reached from
+# a scene; the canvas keeps it so a direct `text()` call still leaves a
+# visible trace instead of silently skipping the character.
 _UNKNOWN_GLYPH = (
     "#####",
     "#...#",
@@ -251,8 +258,10 @@ def _draw_circle(canvas: _Canvas, sh: Circle) -> None:
 
 def _draw_text(canvas: _Canvas, sh: Text) -> None:
     # sh.title is an SVG tooltip; a raster has no hover, so it is ignored.
-    canvas.text(int(round(sh.x)), int(round(sh.y)), sh.s, _rgb(sh.fill),
-                sh.size, sh.anchor)
+    # The font is ASCII-only, so fold typographic characters before drawing;
+    # this is a PNG-only divergence, noted in the module docstring.
+    canvas.text(int(round(sh.x)), int(round(sh.y)), ascii_fold(sh.s),
+                _rgb(sh.fill), sh.size, sh.anchor)
 
 
 def _scanlines(canvas: _Canvas) -> bytes:

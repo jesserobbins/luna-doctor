@@ -10,7 +10,7 @@ import struct
 import unittest
 import zlib
 
-from luna_doctor.font import FONT, text_width
+from luna_doctor.font import FONT, ascii_fold, text_width
 from luna_doctor.png import png_from
 from luna_doctor.scene import Circle, Line, Rect, Scene, Text
 
@@ -147,11 +147,41 @@ class PngWriter(unittest.TestCase):
                                        [Text(0, 0, "A", size=21)])), 60, 30)
         self.assertEqual(_dark_count(rows), 18 * 9)    # 'A' has 18 ink cells
 
-    def test_text_outside_the_font_draws_a_box_rather_than_crashing(self):
-        # the chart legend uses \u2715 and \u25cf; the font stops at ASCII 126
-        rows = _pixels(png_from(Scene(30, 10, "#ffffff",
-                                       [Text(0, 0, "\u2715", size=7)])), 30, 10)
-        self.assertGreater(_dark_count(rows), 0)
+    def test_text_outside_the_font_folds_instead_of_drawing_a_box(self):
+        # the chart legend uses \u2715 and \u25cf; both fold to ASCII glyphs
+        # before rasterising, so the raster shows letters, not hollow boxes
+        for mark, folded in (("\u2715", "x"), ("\u25cf", "o")):
+            marked = png_from(Scene(30, 10, "#ffffff", [Text(0, 0, mark, size=7)]))
+            plain = png_from(Scene(30, 10, "#ffffff", [Text(0, 0, folded, size=7)]))
+            self.assertEqual(marked, plain)
+
+    def test_canvas_text_falls_back_to_a_box_for_a_missing_glyph(self):
+        # ascii_fold runs before the canvas, so png_from cannot reach this
+        # fallback; it stays as a last resort for direct canvas.text calls
+        from luna_doctor.png import _Canvas
+        canvas = _Canvas(6, 7, b"\xff" * (6 * 7 * 3))
+        canvas.text(0, 0, "\u2605", b"\x00\x00\x00", 7, "start")
+        self.assertEqual(canvas.buf.count(0), 20 * 3)    # the box outline, in ink
+
+    def test_folded_text_rasterises_identically_to_its_ascii_spelling(self):
+        # the copy says "a\u00b7b"; the raster must be the one "a-b" draws
+        dotted = png_from(Scene(60, 30, "#ffffff", [Text(0, 0, "a\u00b7b", size=21)]))
+        dashed = png_from(Scene(60, 30, "#ffffff", [Text(0, 0, "a-b", size=21)]))
+        self.assertEqual(dotted, dashed)
+
+    def test_unmapped_character_draws_a_question_mark_not_the_box(self):
+        # \u2605 BLACK STAR has no fold entry: it must draw the '?' glyph
+        star = png_from(Scene(30, 10, "#ffffff", [Text(0, 0, "\u2605", size=7)]))
+        asked = png_from(Scene(30, 10, "#ffffff", [Text(0, 0, "?", size=7)]))
+        self.assertEqual(star, asked)                      # never the box glyph
+
+    def test_emoji_in_text_does_not_raise_and_leaves_ink(self):
+        data = png_from(Scene(30, 10, "#ffffff",
+                              [Text(0, 0, "\U0001f680", size=7)]))   # ROCKET
+        rows = _pixels(data, 30, 10)
+        self.assertGreater(_dark_count(rows), 0)           # folded to '?', which has ink
+        self.assertEqual(data, png_from(Scene(30, 10, "#ffffff",
+                                              [Text(0, 0, "?", size=7)])))
 
     def test_every_primitive_clips_to_the_canvas(self):
         scene = Scene(8, 8, "#ffffff", [
@@ -186,6 +216,38 @@ class Font(unittest.TestCase):
 
     def test_width_of_nothing_is_zero(self):
         self.assertEqual(text_width("", 1), 0)
+
+
+class AsciiFold(unittest.TestCase):
+    def test_typographic_characters_map_to_font_drawable_ascii(self):
+        cases = {
+            "\u00b7": "-",     # MIDDLE DOT joins the chart's summary line
+            "\u2014": "-",     # EM DASH
+            "\u2013": "-",     # EN DASH
+            "\u2264": "<=",
+            "\u2265": ">=",
+            "\u00d7": "x",
+            "\u2192": "->",
+            "\u2026": "...",
+            "\u2018": "'",
+            "\u2019": "'",
+            "\u201c": '"',
+            "\u201d": '"',
+            "\u00b0": "deg",
+            "\u00a0": " ",    # NO-BREAK SPACE
+        }
+        for src, want in cases.items():
+            self.assertEqual(ascii_fold(src), want, f"{src!r} should fold to {want!r}")
+        self.assertEqual(ascii_fold("a\u00b7b\u2014c \u2264 8"), "a-b-c <= 8")
+
+    def test_plain_ascii_passes_through_untouched(self):
+        for i in range(32, 127):
+            self.assertEqual(ascii_fold(chr(i)), chr(i))
+
+    def test_unmapped_characters_become_a_question_mark(self):
+        self.assertEqual(ascii_fold("\u2605"), "?")       # BLACK STAR: no entry
+        self.assertEqual(ascii_fold("a\u2605b"), "a?b")
+        self.assertEqual(ascii_fold("\U0001f680"), "?")    # emoji: no entry either
 
 
 if __name__ == "__main__":
