@@ -1735,5 +1735,26 @@ class ReportModel(unittest.TestCase):
         self.assertNotIn("None", out)
 
 
+class OtherSurfacesUseReports(unittest.TestCase):
+    def test_discover_report_has_a_row_per_store(self):
+        m = _load_cli()
+        rep = m.build_discover_report({"stores": [{"name": "pi", "path": "/x", "exists": True,
+                                                   "files": 3, "bytes": 10, "newest": None}]})
+        self.assertEqual(len(rep.sections), 1)
+        self.assertTrue(any(r.label == "pi" for r in rep.sections[0].rows))
+
+    def test_probe_report_keeps_the_admission_line(self):
+        m = _load_cli()
+        # A run_probe() result: wait_headers/ttfb are the p50 floats pct() returns.
+        r = {"n": 8, "tiers": {"interactive": 8, "background": 0}, "demoted": 0,
+             "streamed": 8, "silent": 0, "admission_deaths": 0, "errors": 0,
+             "keepalives": 0, "wait_headers": 25.2, "ttfb": 30.0, "cut": 0, "budget_s": 170}
+        rep = m.build_probe_report(r, 8, "glm-5.3")
+        from luna_doctor.report import render_plain
+        out = render_plain(rep)
+        self.assertIn("glm-5.3", out)
+        self.assertIn("admission deaths 0", out)
+
+
 if __name__ == "__main__":
     unittest.main()

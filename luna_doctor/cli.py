@@ -2225,6 +2225,41 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
     )
 
 
+def build_probe_report(r: dict, n: int, model: str) -> report.Report:
+    """One probe run as rows, with the run's own advice as adjustments.
+
+    The rows keep the old inline printer's order and labels; the bullets
+    that printer printed conditionally become `adjustments` so every
+    renderer can carry them.
+    """
+    burst = [
+        report.Row("tier header",
+                   f"interactive {r['tiers']['interactive']} · background {r['tiers']['background']} "
+                   f"· demoted {r['demoted']}"),
+        report.Row("outcome",
+                   f"streamed {r['streamed']} · no first token {r['silent']} · "
+                   f"admission deaths {r['admission_deaths']} · errors {r['errors']} · cut {r['cut']}"),
+        report.Row("wait to headers", f"p50 {fmt(r['wait_headers'], 's')}"),
+        report.Row("first token", f"p50 {fmt(r['ttfb'], 's')}"),
+        report.Row("keep-alives", f"{r['keepalives']}"),
+    ]
+    adj: list[str] = []
+    if r["cut"]:
+        adj.append(f"{r['cut']} request(s) had no terminal outcome inside the {r['budget_s']:.0f}s budget "
+                   f"and were cut. That is not a failure: the background tier can take ~600s to first "
+                   f"token. Raise --max-seconds before judging it.")
+    if r["admission_deaths"]:
+        adj.append(f"{r['admission_deaths']}/{n} died on admission (`scheduler admission timeout`). "
+                   f"For this width of fan-out, use the -background variant of the same model.")
+    if r["demoted"]:
+        adj.append(f"{r['demoted']} request(s) carried `overflowed-to-background`: the burst exceeded "
+                   f"the interactive cap of {INTERACTIVE_BURST_CAP}.")
+    if r["streamed"] == r["n"] and not r["cut"]:
+        adj.append("all requests streamed; no pressure at this width.")
+    return report.Report(headline=f"probe: {n} x {model}",
+                         sections=[report.Section("burst", burst)], adjustments=adj)
+
+
 def cmd_probe(args) -> int:
     stream = sys.stderr if args.json else sys.stdout
     print(f"probing {args.n} x {args.model} (max_tokens {args.max_tokens}, budget {args.max_seconds:.0f}s)",
@@ -2238,28 +2273,36 @@ def cmd_probe(args) -> int:
             payload["swamp_headroom"] = headroom
         print(json.dumps(envelope("probe", payload, contract=CONTRACT), indent=2))
         return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
-    print(f"  tier header      interactive {r['tiers']['interactive']}  background {r['tiers']['background']}  demoted {r['demoted']}")
-    print(f"  outcome          streamed {r['streamed']}  no first token {r['silent']}  "
-          f"admission deaths {r['admission_deaths']}  errors {r['errors']}  cut {r['cut']}")
-    print(f"  wait to headers  p50 {fmt(r['wait_headers'], 's')}")
-    print(f"  first token      p50 {fmt(r['ttfb'], 's')}")
-    print(f"  keep-alives      {r['keepalives']}")
-    print()
-    if r["cut"]:
-        print(f"  - {r['cut']} request(s) had no terminal outcome inside the {r['budget_s']:.0f}s budget and "
-              f"were cut. That is not a failure: the background tier can take ~600s to first token. "
-              f"Raise --max-seconds before judging it.")
-    if r["admission_deaths"]:
-        print(f"  - {r['admission_deaths']}/{r['n']} died on admission (`scheduler admission timeout`). "
-              f"For this width of fan-out, use the -background variant of the same model.")
-    if r["demoted"]:
-        print(f"  - {r['demoted']} request(s) carried `overflowed-to-background`: the burst exceeded the "
-              f"interactive cap of {INTERACTIVE_BURST_CAP}.")
-    if r["streamed"] == r["n"] and not r["cut"]:
-        print("  - all requests streamed; no pressure at this width.")
+    rep = build_probe_report(r, args.n, args.model)
     if headroom:
-        print(f"  - {headroom}.")
+        rep.adjustments.append(headroom + ".")
+    print(report.render_plain(rep), end="")
     return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
+
+
+def build_compare_report(rows: list) -> report.Report:
+    """Both runs side by side: one row per model, its statistics inside the value.
+
+    The old printer's class column leads each value so a demoted burst still
+    shows which tier answered; the fixed tier advice and the dirty-run note
+    ride along as adjustments.
+    """
+    runs = []
+    for r in rows:
+        klass = ", ".join(k for k, v in r["tiers"].items() if v) or "n/a"
+        runs.append(report.Row(
+            r["model"],
+            f"{klass} · streamed {r['streamed']} · no token {r['silent']} · "
+            f"adm.dead {r['admission_deaths']} · cut {r['cut']} · ttfb p50 {fmt(r['ttfb'], 's')}"))
+    adj = ["the interactive tier admits fewer parallel requests but answers in tens of seconds; "
+           "the -background tier admits more and answers in minutes. Pick the tier by fan-out "
+           "width, not by impatience."]
+    if any(r["cut"] or r["admission_deaths"] or r["silent"] for r in rows):
+        adj.append("at least one row did not stream cleanly at this width. Read the two rows against "
+                   "each other before changing models: `cut` means the budget was too small to judge "
+                   "the tier.")
+    return report.Report(headline=f"compare at width {rows[0]['n']}",
+                         sections=[report.Section("runs", runs)], adjustments=adj)
 
 
 def cmd_compare(args) -> int:
@@ -2275,20 +2318,7 @@ def cmd_compare(args) -> int:
     if args.json:
         print(json.dumps(envelope("compare", {"runs": rows}, contract=CONTRACT), indent=2))
         return 1 if bad else 0
-    print()
-    print(f"{'model':<28} {'class':<12} {'streamed':>9} {'no token':>9} {'adm.dead':>9} {'cut':>5} {'ttfb p50':>9}")
-    for r in rows:
-        klass = ",".join(f"{k}" for k, v in r["tiers"].items() if v) or "n/a"
-        print(f"{r['model']:<28} {klass:<12} {r['streamed']:>9} {r['silent']:>9} "
-              f"{r['admission_deaths']:>9} {r['cut']:>5} {fmt(r['ttfb'], 's'):>9}")
-    print()
-    print("  - the interactive tier admits fewer parallel requests but answers in tens of seconds;")
-    print("    the -background tier admits more and answers in minutes. Pick the tier by fan-out width,")
-    print("    not by impatience.")
-    if bad:
-        print()
-        print("  - at least one row did not stream cleanly at this width. Read the two rows against each")
-        print("    other before changing models: `cut` means the budget was too small to judge the tier.")
+    print(report.render_plain(build_compare_report(rows)), end="")
     return 1 if bad else 0
 
 
@@ -2345,37 +2375,69 @@ def collect(since_hours: float, harnesses: list[str],
 
 def cmd_discover(args) -> int:
     d = discover()
-    print(json.dumps(envelope("discover", {"stores": d}, contract=CONTRACT), indent=2)
-          if args.json else _render_discover(d))
+    if args.json:
+        print(json.dumps(envelope("discover", {"stores": d}, contract=CONTRACT), indent=2))
+    else:
+        print(report.render_plain(build_discover_report(_discover_stores(d))), end="")
     return 0 if any(v.get("present") for k, v in d.items() if isinstance(v, dict)) else 2
 
 
-def _render_discover(d: dict) -> str:
-    lines = ["stores"]
+def _discover_stores(d: dict) -> dict:
+    """Flatten discover()'s result into the store list a report is built from.
+
+    discover() keeps one nested dict per store because --json prints it that
+    way; the report builder takes the same facts as a flat `stores` list plus
+    the swamp and LunaRoute stanzas it already knows the shapes of.
+    """
+    stores = []
     for name in ("pi", "claude-code", "codex"):
         s = d[name]
-        state = "present" if s["present"] else "absent"
-        lines.append(f"  {name:<12} {state:<8} {s['files']:>6} files"
-                     + (f"  newest {s['newest']}" if s["newest"] else ""))
+        stores.append({"name": name, "path": s["root"], "exists": s["present"],
+                       "files": s["files"], "bytes": s["bytes_sampled"],
+                       "newest": s["newest"]})
+    out = {"stores": stores, "lunaroute_config": d["lunaroute_config"]}
+    if d.get("swamp") is not None:
+        out["swamp"] = d["swamp"]
+    return out
+
+
+def build_discover_report(d: dict) -> report.Report:
+    """One row per readable store: what state, how many files, how fresh.
+
+    Swamp and the LunaRoute config ride along as rows of their own so the
+    plain output still names everything the old inline printer named.
+    """
+    rows: list[report.Row] = []
+    for s in d.get("stores") or []:
+        bits = ["present" if s.get("exists") else "absent",
+                f"{s.get('files', 0)} files", f"{s.get('bytes', 0)} bytes"]
+        if s.get("newest"):
+            bits.append(f"newest {s['newest']}")
+        rows.append(report.Row(s["name"], " · ".join(bits)))
     sw = d.get("swamp")
     if sw is not None:
         if sw.get("present"):
             fp = sw.get("bundleFingerprint") or "\u2014"
-            env_tag = " .env.swamp" if sw.get("envPresence") else ""
             files = sw.get("files") or {}
-            bh = files.get("behaviorHistory", 0)
-            wf = files.get("workflowRuns", 0)
-            lines.append(
-                f"  swamp        present  {bh} behavior  {wf} workflow  bundle {fp}{env_tag}  {sw.get('repoDir', '')}"
-            )
+            bits = ["present",
+                    f"{files.get('behaviorHistory', 0)} behavior",
+                    f"{files.get('workflowRuns', 0)} workflow",
+                    f"bundle {fp}"]
+            if sw.get("envPresence"):
+                bits.append(".env.swamp")
+            if sw.get("repoDir"):
+                bits.append(sw["repoDir"])
+            rows.append(report.Row("swamp", " · ".join(bits)))
         else:
-            lines.append("  swamp        absent")
-    lines.append(f"  lunaroute    {'present' if d['lunaroute_config']['present'] else 'absent'}  {d['lunaroute_config']['path']}")
-
-    lines.append("")
-    lines.append("luna-doctor reads these stores read-only. codex rollouts are mostly zstd and are")
-    lines.append("not LunaRoute traffic on most machines, so tier analysis skips them for now.")
-    return "\n".join(lines)
+            rows.append(report.Row("swamp", "absent"))
+    lr = d.get("lunaroute_config")
+    if lr is not None:
+        state = "present" if lr.get("present") else "absent"
+        rows.append(report.Row("lunaroute", f"{state} · {lr.get('path', '')}"))
+    footnote = ("luna-doctor reads these stores read-only. codex rollouts are mostly zstd and are\n"
+                "not LunaRoute traffic on most machines, so tier analysis skips them for now.")
+    return report.Report(headline="stores", sections=[report.Section("", rows)],
+                         footnote=footnote)
 
 
 PRERELEASE_NOTE = "alpha — not for production" if "-" in VERSION else ""
