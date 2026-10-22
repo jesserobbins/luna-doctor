@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "bin", "luna-doctor")
-SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")  # semver, prerelease allowed (0.1.1-alpha.1)
 
 
 # Every CLI invocation in this suite gets its own store directory: the real
@@ -38,16 +38,21 @@ def run(*args, timeout=180, store=None):
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def _version_from_output(out: str) -> str:
+    """Parse 'luna-doctor 0.1.1-alpha.1 (alpha — …)' -> '0.1.1-alpha.1'."""
+    m = re.search(r"luna-doctor\s+(\S+)", out)
+    return m.group(1) if m else out.strip().split()[1] if len(out.strip().split()) > 1 else out.strip()
+
 class VersionContract(unittest.TestCase):
     def test_version_is_semver(self):
         code, out, _ = run("--version")
         self.assertEqual(code, 0)
-        version = out.strip().split()[-1]
+        version = _version_from_output(out)
         self.assertRegex(version, SEMVER)
 
     def test_version_matches_version_file(self):
         _, out, _ = run("--version")
-        script_version = out.strip().split()[-1]
+        script_version = _version_from_output(out)
         with open(os.path.join(ROOT, "VERSION")) as fh:
             file_version = fh.read().strip()
         self.assertEqual(script_version, file_version,
@@ -61,14 +66,17 @@ class VersionContract(unittest.TestCase):
             self.skipTest("git unavailable")
         if tags.returncode != 0 or not tags.stdout.strip():
             self.skipTest("no release tags yet")
-        newest = sorted(tags.stdout.split(), key=lambda t: [int(p) for p in t.lstrip("v").split(".")])[-1]
+        def _semver_key(t):
+            core = t.lstrip("v").split("-")[0]
+            return [int(p) for p in core.split(".")]
+        newest = sorted(tags.stdout.split(), key=_semver_key)[-1]
         _, out, _ = run("--version")
-        self.assertEqual(out.strip().split()[-1], newest.lstrip("v"),
+        self.assertEqual(_version_from_output(out), newest.lstrip("v"),
                          "the newest tag and the code disagree; tag the released version")
 
     def test_changelog_has_the_current_version(self):
         _, out, _ = run("--version")
-        version = out.strip().split()[-1]
+        version = _version_from_output(out)
         with open(os.path.join(ROOT, "CHANGELOG.md")) as fh:
             text = fh.read()
         self.assertIn(f"## [{version}]", text)

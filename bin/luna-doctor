@@ -23,8 +23,6 @@ Exit codes: 0 no pressure, 1 pressure found, 2 no data.
 
 from __future__ import annotations
 
-# Captured before the sibling blocks are exec'd into this namespace: they define
-# their own __doc__, which would otherwise become this program's --help text.
 DESCRIPTION = __doc__
 
 import argparse
@@ -45,7 +43,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-VERSION = "0.1.0"          # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+VERSION = "0.1.1-alpha.1"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 3         # 3: additive swamp contribution (metrics.swamp) + combined-pressure warning
 
 # ---- measured constants -----------------------------------------------------
@@ -2337,10 +2335,16 @@ def _render_discover(d: dict) -> str:
     return "\n".join(lines)
 
 
+PRERELEASE_NOTE = "alpha — not for production" if "-" in VERSION else ""
+
+def _version_string() -> str:
+    return f"luna-doctor {VERSION}" + (f" ({PRERELEASE_NOTE})" if PRERELEASE_NOTE else "")
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="luna-doctor", description=DESCRIPTION,
+    desc = DESCRIPTION + (f"\n\n\033[33m⚠ This is a prerelease ({PRERELEASE_NOTE}) — not recommended for production.\033[0m" if PRERELEASE_NOTE else "")
+    ap = argparse.ArgumentParser(prog="luna-doctor", description=desc,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"luna-doctor {VERSION}")
+    ap.add_argument("--version", action="version", version=_version_string())
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("discover", help="what log stores exist on this machine")
