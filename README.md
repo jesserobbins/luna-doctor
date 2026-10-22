@@ -41,7 +41,8 @@ luna-doctor chart --since 24h --open  # …and open it in your browser
 
 Exit codes: `0` no pressure, `1` pressure found, `2` no data — usable from a shell prompt, a skill, or cron.
 
-To measure the gateway itself (costs credits, needs `lunaroute login`):
+To measure the gateway itself (this is a live burst — it burns concurrent
+sessions on your account, and needs `lunaroute login`):
 
 ```bash
 luna-doctor probe --n 8 --model <model>     # live burst measurement at width 8
@@ -96,6 +97,15 @@ Read-only and offline for `discover` / `analyze` / `fix` / `chart`:
 
 The three package files ship together. `cli` loads the other two off disk from its own directory, so a partial install is the one thing that breaks `fix` and `chart`.
 
+## How this project is built
+
+This project is developed using a **Greenroom** — this public repo beside a private one that holds the design docs, drafts and review notes, so work can be shaped before it takes the stage. If you want to read the private greenroom repo, reach out and ask.
+
+Greenroom is a skill you can use on your own projects:
+
+- how it works: [Announcing Greenroom](https://jesserobbins.com/blog/greenroom/)
+- the skill: [github.com/jesserobbins/greenroom](https://github.com/jesserobbins/greenroom) — `npx skills add jesserobbins/greenroom`
+
 ## Versioning
 
 Semantic versioning with prerelease identifiers (`0.1.1-alpha.1`, `0.1.1-beta.1`, …), single source of truth:
@@ -117,7 +127,8 @@ scripts/release.sh patch       # 0.1.1 -> 0.1.2
 scripts/release.sh 0.1.1-beta.1 # explicit
 ```
 
-Tests are stdlib-only and read-only (they never call `probe`, which costs credits):
+Tests are stdlib-only and read-only (they never call `probe`, which burns
+concurrent sessions on the gateway):
 
 ```bash
 python3 -m unittest discover -s tests -v

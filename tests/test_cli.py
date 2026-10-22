@@ -4,7 +4,8 @@ Stdlib only, no fixtures to maintain. Run from the repo root:
 
     python3 -m unittest discover -s tests -v
 
-The suite never calls `probe`/`compare`, which spend credits, and every CLI run
+The suite never calls `probe`/`compare`, which burn concurrent sessions on the
+gateway, and every CLI run
 points `LUNA_DOCTOR_STORE` at a throwaway directory: nothing here writes to your
 real store or to a log store.
 """
