@@ -1756,5 +1756,60 @@ class OtherSurfacesUseReports(unittest.TestCase):
         self.assertIn("admission deaths 0", out)
 
 
+class StyleAndJson(unittest.TestCase):
+    def test_json_wins_over_style(self):
+        code, out, _ = run("analyze", "--since", "1h", "--json", "--style", "pretty")
+        self.assertIn(code, (0, 1, 2))
+        self.assertNotIn("\033", out)
+        json.loads(out) if out.strip() else None
+
+    def test_plain_style_has_no_escapes(self):
+        code, out, _ = run("analyze", "--since", "1h", "--style", "plain")
+        self.assertIn(code, (0, 1, 2))
+        self.assertNotIn("\033", out)
+        self.assertNotIn("🌙", out)
+
+    def test_no_color_leaves_no_escapes_even_when_pretty_is_explicit(self):
+        env = dict(os.environ)
+        env["NO_COLOR"] = "1"
+        proc = subprocess.run(
+            [sys.executable, CLI, "analyze", "--since", "1h", "--style", "pretty"],
+            capture_output=True, text=True, timeout=180, cwd=ROOT,
+            env={**env, "LUNA_DOCTOR_STORE": _TEST_STORE})
+        self.assertIn(proc.returncode, (0, 1, 2))
+        self.assertNotIn("\033", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_share_degrades_to_plain_with_a_note_on_stderr(self):
+        code, out, err = run("analyze", "--since", "1h", "--style", "share")
+        self.assertIn(code, (0, 1, 2))
+        self.assertEqual(len([l for l in err.splitlines() if "share" in l]), 1)
+        self.assertNotIn("\033", out)
+        self.assertNotIn("🌙", out)
+
+    def test_non_utf8_stdout_degrades_instead_of_raising(self):
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "cp1252"
+        proc = subprocess.run(
+            [sys.executable, CLI, "analyze", "--since", "1h", "--style", "pretty"],
+            capture_output=True, timeout=180, cwd=ROOT,
+            env={**env, "LUNA_DOCTOR_STORE": _TEST_STORE})
+        self.assertIn(proc.returncode, (0, 1, 2))
+        self.assertNotIn(b"Traceback", proc.stderr)
+        proc.stdout.decode("cp1252")            # must not raise
+        self.assertNotIn("🌙".encode("utf-8"), proc.stdout)
+
+    def test_ascii_stdout_still_prints_a_report(self):
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "ascii"
+        proc = subprocess.run(
+            [sys.executable, CLI, "discover"],
+            capture_output=True, timeout=60, cwd=ROOT,
+            env={**env, "LUNA_DOCTOR_STORE": _TEST_STORE})
+        self.assertIn(proc.returncode, (0, 2))
+        self.assertNotIn(b"Traceback", proc.stderr)
+        proc.stdout.decode("ascii")              # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

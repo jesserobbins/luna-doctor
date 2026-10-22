@@ -44,6 +44,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 from luna_doctor import report
+from luna_doctor.render_pretty import render_pretty, reveal, style_for
 
 VERSION = "0.1.1-alpha.1"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 3         # 3: additive swamp contribution (metrics.swamp) + combined-pressure warning
@@ -2004,8 +2005,42 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
     return report.Report(headline=head, sections=sections, adjustments=list(adj))
 
 
+def write_out(text: str) -> None:
+    """Write `text` to stdout without ever dying on the stream's codec.
+
+    A `LANG=C` terminal cannot encode `·` or an em dash; the report still
+    prints, with each unencodable character replaced, instead of crashing
+    part way through. The moon is handled earlier - `style_for` degrades it
+    before rendering - so this backstop is for the characters that ride
+    inside row values.
+    """
+    try:
+        sys.stdout.write(text)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        sys.stdout.write(text.encode(enc, "replace").decode(enc, "replace"))
+
+
+def print_report(rep: report.Report, args) -> None:
+    """Render `rep` to stdout the way this run's `--style` asked for.
+
+    `--json` never reaches here - it prints its own envelope, and no Style
+    is ever constructed on that path. `plain` and `share` render undecorated
+    (`share` waits for the share renderer; `main` prints that note at parse
+    time), `pretty` always takes the pretty layout - with the gate closed
+    the same layout prints bare - and `auto` picks pretty only when the
+    gate opened for this stream.
+    """
+    style = getattr(args, "_style", None)
+    requested = getattr(args, "style", None)
+    if style is not None and (requested == "pretty" or style.color or style.emoji):
+        write_out(render_pretty(rep, style))
+        return
+    write_out(report.render_plain(rep))
+
+
 def render(m: dict, head: str, adj: list[str], as_json: bool,
-           stored: dict | None = None) -> None:
+           stored: dict | None = None, args=None) -> None:
     if as_json:
         doc = envelope("analyze", {
             "headline": head,
@@ -2017,7 +2052,7 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
                             "findings": len(stored["findings"])}
         print(json.dumps(doc, indent=2))
         return
-    print(report.render_plain(build_report(m, head, adj)), end="")
+    print_report(build_report(m, head, adj), args)
 
 
 # ---- live probe -------------------------------------------------------------
@@ -2261,9 +2296,12 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
 
 
 def cmd_probe(args) -> int:
-    stream = sys.stderr if args.json else sys.stdout
-    print(f"probing {args.n} x {args.model} (max_tokens {args.max_tokens}, budget {args.max_seconds:.0f}s)",
-          file=stream, flush=True)
+    # Progress is not report: it goes to stderr whenever stdout is spoken for
+    # (--json or a pipe), and to stdout only on a terminal, where motion may
+    # redraw it.
+    stream = sys.stderr if args.json or not sys.stdout.isatty() else sys.stdout
+    reveal(f"probing {args.n} x {args.model} (max_tokens {args.max_tokens}, budget {args.max_seconds:.0f}s)",
+           getattr(args, "_style", None), stream)
     r = run_probe(args.n, args.model, args.max_tokens, args.timeout, args.max_seconds)
     headroom = _probe_swamp_headroom(args.n)
     if args.json:
@@ -2276,7 +2314,7 @@ def cmd_probe(args) -> int:
     rep = build_probe_report(r, args.n, args.model)
     if headroom:
         rep.adjustments.append(headroom + ".")
-    print(report.render_plain(rep), end="")
+    print_report(rep, args)
     return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
 
 
@@ -2309,16 +2347,16 @@ def cmd_compare(args) -> int:
     base = args.model
     bg = base if base.endswith("-background") else base + "-background"
     rows = []
-    stream = sys.stderr if args.json else sys.stdout
+    stream = sys.stderr if args.json or not sys.stdout.isatty() else sys.stdout
     for model in (base, bg):
-        print(f"running {args.n} x {model} ...", file=stream, flush=True)
+        reveal(f"running {args.n} x {model} ...", getattr(args, "_style", None), stream)
         r = run_probe(args.n, model, args.max_tokens, args.timeout, args.max_seconds)
         rows.append(r)
     bad = any(r["cut"] or r["admission_deaths"] or r["silent"] for r in rows)
     if args.json:
         print(json.dumps(envelope("compare", {"runs": rows}, contract=CONTRACT), indent=2))
         return 1 if bad else 0
-    print(report.render_plain(build_compare_report(rows)), end="")
+    print_report(build_compare_report(rows), args)
     return 1 if bad else 0
 
 
@@ -2378,7 +2416,7 @@ def cmd_discover(args) -> int:
     if args.json:
         print(json.dumps(envelope("discover", {"stores": d}, contract=CONTRACT), indent=2))
     else:
-        print(report.render_plain(build_discover_report(_discover_stores(d))), end="")
+        print_report(build_discover_report(_discover_stores(d)), args)
     return 0 if any(v.get("present") for k, v in d.items() if isinstance(v, dict)) else 2
 
 
@@ -2445,8 +2483,21 @@ PRERELEASE_NOTE = "alpha — not for production" if "-" in VERSION else ""
 def _version_string() -> str:
     return f"luna-doctor {VERSION}" + (f" ({PRERELEASE_NOTE})" if PRERELEASE_NOTE else "")
 
+def _add_style(sp) -> None:
+    """The renderer selector every report-producing command takes."""
+    sp.add_argument("--style", choices=("auto", "pretty", "plain", "share"),
+                    default=None,
+                    help="how to render the report: auto picks pretty on a color "
+                         "terminal and plain otherwise (default)")
+
+
 def main(argv: list[str] | None = None) -> int:
-    desc = DESCRIPTION + (f"\n\n\033[33m⚠ This is a prerelease ({PRERELEASE_NOTE}) — not recommended for production.\033[0m" if PRERELEASE_NOTE else "")
+    # The gate is not resolved yet when argparse builds help text, so the
+    # prerelease banner decides inline: no ANSI when NO_COLOR is set or
+    # stdout is not a terminal someone is reading.
+    desc = DESCRIPTION
+    if PRERELEASE_NOTE and not os.environ.get("NO_COLOR", "") and sys.stdout.isatty():
+        desc += f"\n\n\033[33m⚠ This is a prerelease ({PRERELEASE_NOTE}) — not recommended for production.\033[0m"
     ap = argparse.ArgumentParser(prog="luna-doctor", description=desc,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=_version_string())
@@ -2454,6 +2505,7 @@ def main(argv: list[str] | None = None) -> int:
 
     d = sub.add_parser("discover", help="what log stores exist on this machine")
     d.add_argument("--json", action="store_true")
+    _add_style(d)
     d.set_defaults(func=cmd_discover)
 
     a = sub.add_parser("analyze", help="explain what your traffic is doing to your concurrency")
@@ -2468,6 +2520,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="where run extractions are written (default ~/.luna-doctor/store)")
     a.add_argument("--no-store", action="store_true", help="do not persist this run")
     a.add_argument("--json", action="store_true")
+    _add_style(a)
     a.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("probe", help="measure the gateway at a chosen burst width")
@@ -2477,6 +2530,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=float, default=320.0)
     p.add_argument("--max-seconds", type=float, default=170.0)
     p.add_argument("--json", action="store_true")
+    _add_style(p)
     p.set_defaults(func=cmd_probe)
 
     c = sub.add_parser("compare", help="run the same burst on a model and its -background twin")
@@ -2486,6 +2540,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--timeout", type=float, default=320.0)
     c.add_argument("--max-seconds", type=float, default=170.0)
     c.add_argument("--json", action="store_true")
+    _add_style(c)
     c.set_defaults(func=cmd_compare)
 
     f = sub.add_parser("fix", help="print per-agent copy-paste instructions")
@@ -2514,12 +2569,23 @@ def main(argv: list[str] | None = None) -> int:
     ch.add_argument("--claude-root", action="append", default=None, metavar="DIR",
                     help="claude-code store to read instead of the default (repeatable)")
     ch.add_argument("--json", action="store_true")
+    _add_style(ch)
     ch.set_defaults(func=None)
 
     args = ap.parse_args(argv)
     if args.cmd in ("probe", "compare") and getattr(args, "n", 1) < 1:
         print("luna-doctor: --n must be at least 1", file=sys.stderr)
         return 2
+    # One style resolution per command. `--json` bypasses styling entirely:
+    # no Style is constructed on that path, so no code can reach the envelope.
+    if hasattr(args, "style") and not args.json:
+        args._style = style_for(args.style, sys.stdout)
+        if args.style == "share":
+            print("luna-doctor: --style share prints a WhatsApp-ready card and message; "
+                  "that renderer is not in this release yet, so this run shows plain output.",
+                  file=sys.stderr)
+    else:
+        args._style = None
     if args.cmd == "analyze":
         return cmd_analyze(args)
     if args.cmd == "fix":
@@ -2567,7 +2633,7 @@ def cmd_analyze(args) -> int:
         except (OSError, ValueError, OverflowError) as e:
             # A read-only or unwritable store must not lose the report.
             print(f"luna-doctor: could not persist run: {e}", file=sys.stderr)
-    render(m, head, adj, args.json, stored=stored)
+    render(m, head, adj, args.json, stored=stored, args=args)
     return code
 
 
