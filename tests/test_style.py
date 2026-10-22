@@ -1,5 +1,5 @@
 # tests/test_style.py
-import io, os, unittest
+import unittest
 from luna_doctor.style import resolve_style
 
 class _Stream:
@@ -17,6 +17,11 @@ class StyleGate(unittest.TestCase):
 
     def test_clicolor_force_colors_a_pipe(self):
         self.assertTrue(resolve_style(None, _Stream(False), {"CLICOLOR_FORCE": "1"}).color)
+
+    def test_clicolor_force_zero_counts_as_unset(self):
+        s = resolve_style(None, _Stream(False), {"CLICOLOR_FORCE": "0"})
+        self.assertFalse(s.color)
+        self.assertFalse(s.emoji)
 
     def test_auto_off_when_not_a_tty(self):
         s = resolve_style(None, _Stream(False), {})

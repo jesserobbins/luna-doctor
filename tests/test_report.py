@@ -24,11 +24,12 @@ class PlainRenderer(unittest.TestCase):
         self.assertIn("requests: 1661", out)
         self.assertIn("peak concurrency: 17", out)
 
-    def test_long_values_wrap_instead_of_padding(self):
+    def test_inline_label_value_without_column_padding(self):
         out = render_plain(self._report())
         line = [l for l in out.splitlines() if l.startswith("model: ")][0]
-        self.assertLess(len(line), 200)
-        self.assertTrue(line.startswith("model: very-long-model-name"))
+        self.assertEqual(
+            line, "model: very-long-model-name-with-an-unwrap-friendly-suffix-0123456789"
+        )
 
     def test_adjustments_and_footnote_present(self):
         out = render_plain(self._report())
@@ -38,3 +39,18 @@ class PlainRenderer(unittest.TestCase):
     def test_empty_report_still_renders(self):
         out = render_plain(Report(headline="no data", sections=[]))
         self.assertIn("no data", out)
+
+    def test_value_newlines_become_indented_continuation_lines(self):
+        report = Report(
+            headline="note",
+            sections=[Section("state", [Row("detail", "first line\nsecond line")])],
+        )
+        lines = render_plain(report).splitlines()
+        self.assertIn("detail: first line", lines)
+        self.assertIn("  second line", lines)
+
+    def test_output_ends_with_exactly_one_newline(self):
+        out = render_plain(self._report())
+        self.assertTrue(out.endswith("\n"))
+        self.assertFalse(out.endswith("\n\n"))
+        self.assertNotEqual(out.splitlines()[-1], "")

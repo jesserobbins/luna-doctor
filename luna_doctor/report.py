@@ -39,34 +39,27 @@ class Report:
     footnote: Optional[str] = None
 
 
-def render_plain(report: Report, style=None) -> str:
-    """Render `report` as plain text ending in a newline.
+def render_plain(report: Report) -> str:
+    """Render `report` as plain, undecorated text ending in a single newline.
 
-    With no `style`, or one whose `color` is False, the output carries no ANSI
-    escapes and no emoji, so it is safe to paste into a ticket or a chat. A
-    style that allows color may paint headlines and emphasised rows.
+    Output carries no ANSI escapes and no emoji, so it is safe to paste into a
+    ticket or a chat. Decoration is not this renderer's job: `render_pretty`
+    owns it, so a caller that wants color uses that instead. A value with
+    embedded newlines keeps them, with each continuation line indented two
+    spaces under its label.
     """
-    paint = _painter(style)
-
-    blocks = [paint(report.headline, "headline")]
+    blocks = [report.headline]
     for section in report.sections:
         lines = []
         if section.title:
-            lines.append(paint(section.title.upper(), "muted"))
-        lines.extend(
-            "{}: {}".format(paint(row.label, "normal"), paint(row.value, row.emphasis))
-            for row in section.rows
-        )
+            lines.append(section.title.upper())
+        for row in section.rows:
+            first, *continuation = row.value.split("\n")
+            lines.append("{}: {}".format(row.label, first))
+            lines.extend("  " + line for line in continuation)
         blocks.append("\n".join(lines))
     if report.adjustments:
         blocks.append("\n".join("- " + a for a in report.adjustments))
     if report.footnote:
-        blocks.append(paint(report.footnote, "muted"))
+        blocks.append(report.footnote)
     return "\n\n".join(block for block in blocks if block) + "\n"
-
-
-def _painter(style):
-    """Return a (text, emphasis) -> text function honouring the style gate."""
-    if style is not None and getattr(style, "color", False):
-        return style.paint
-    return lambda text, emphasis="normal": text
