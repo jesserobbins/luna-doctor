@@ -1,4 +1,6 @@
-# luna-doctor
+# luna-doctor — `0.1.1-alpha.1` · prerelease
+
+> **Alpha.** The CLI, JSON schema, and measured contract may change without a major bump until `1.0.0`. Pin to an exact tag if you embed this in automation.
 
 Explain what your local agent traffic is doing to your LunaRoute concurrency, and
 what to adjust.
@@ -118,14 +120,14 @@ when `tomllib` is unavailable.
 
 ## Versioning
 
-Semantic versioning, single source of truth:
+Semantic versioning with prerelease identifiers (`0.1.1-alpha.1`, `0.1.1-beta.1`, …), single source of truth:
 
 | what | where |
 |---|---|
 | version number | `VERSION`, mirrored in `bin/luna-doctor` |
 | history | `CHANGELOG.md` (Keep a Changelog) |
-| releases | annotated git tags, `vX.Y.Z` |
-| JSON document shape | `"schema": 1` in every `--json` envelope |
+| releases | annotated git tags, `vX.Y.Z` and `vX.Y.Z-prerelease` (e.g. `v0.1.1-alpha.1`) |
+| JSON document shape | `"schema": 3` in every `--json` envelope — bumped independently when the document shape changes |
 | measured gateway facts | `"contract": {...}` in every `--json` envelope |
 
 Every `--json` document carries `schema`, `version` and `command`. The

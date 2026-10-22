@@ -8,14 +8,23 @@ Design rules, learned from verification:
   * Never write. Print only.
   * A config the tool cannot parse is a config the tool refuses to touch.
   * Every emitted key must be VERIFIED in
-    luna-doctor-private/research/2026-10-21-agent-concurrency-knobs.md.
+    its own documentation and code path.
   * Say plainly when a recommendation cannot change current behaviour.
   * Do not re-compress a value the user already set more permissively
     (`httpIdleTimeoutMs: 0` means disabled).
 """
 
 RAISE_TIMEOUT_MS = 900000       # 15 min: past the ~633s background first token
-KNOWN_AGENTS = ("pi", "claude-code", "codex")
+KNOWN_AGENTS = ("pi", "claude-code", "codex", "swamp")
+
+# Swamp env paths — citations point to extension source for defaults and
+# ~/.swamp.yaml + .env.swamp for live values.
+SWAMP_ENV_FILE = "~/.swamp.yaml"
+SWAMP_ENV_SWAMP = ".env.swamp"  # repo-local variant
+SWAMP_ENV_GLOBAL_SOURCES = "~/.swamp-sources.yaml"
+SWAMP_CITATION_DEFAULT = "extensions/models/obsidian_ideas.ts"
+SWAMP_DEFAULT_EXTRACT = 12   # extensions/models/obsidian_ideas.ts phase extractMany
+SWAMP_DEFAULT_LLM = 8        # extensions/models/obsidian_ideas.ts runVerifyPass
 
 # Verified paths (research/2026-10-21-agent-concurrency-knobs.md).
 PI_SETTINGS = "~/.pi/agent/settings.json"
@@ -38,6 +47,243 @@ def _read_text(path: str) -> str:
             return fh.read()
     except Exception:
         return ""
+
+
+def _swamp_repo_dir() -> str | None:
+    """Resolve the swamp repo dir for fix, mirroring task-1 discover logic."""
+    env_root = os.environ.get("SWAMP_ROOT")
+    if env_root is not None and env_root != "":
+        expanded = os.path.expanduser(env_root)
+        if os.path.isdir(expanded):
+            return expanded
+        return None
+    wrapper = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sibling = os.path.join(os.path.dirname(wrapper), "swamp-tracker")
+    if os.path.isdir(sibling) and os.path.isfile(os.path.join(sibling, ".swamp.yaml")):
+        return sibling
+    cwd = os.path.abspath(".")
+    cur = cwd
+    for _ in range(6):
+        if os.path.isfile(os.path.join(cur, ".swamp.yaml")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    global_swamp = os.path.expanduser("~/.swamp")
+    if os.path.isdir(global_swamp):
+        return global_swamp
+    return None
+
+
+def _swamp_present() -> tuple[bool, str | None]:
+    repo = _swamp_repo_dir()
+    if repo is None:
+        return False, None
+    return True, repo
+
+
+def resolve_swamp_knobs(repo_dir: str | None = None) -> dict:
+    """Effective swamp concurrency knobs with provenance.
+
+    Precedence: env var > repo .env.swamp > extension source default.
+    Each knob carries {value, source} where source in {env, .env.swamp, default}.
+    """
+    if repo_dir is None:
+        _, repo_dir = _swamp_present()
+    env_swamp_values: dict[str, str] = {}
+    if repo_dir:
+        env_path = os.path.join(repo_dir, ".env.swamp")
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            env_swamp_values[k.strip()] = v.strip().strip('"\'')
+            except Exception:
+                pass
+    swamp_yaml_values: dict[str, str] = {}
+    for yaml_path in (os.path.expanduser(SWAMP_ENV_FILE),
+                      os.path.expanduser(SWAMP_ENV_GLOBAL_SOURCES)):
+        if os.path.isfile(yaml_path):
+            try:
+                with open(yaml_path) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line or line.startswith("#") or ":" not in line:
+                            continue
+                        k, v = line.split(":", 1)
+                        k, v = k.strip(), v.strip().strip('"\'')
+                        if k in ("SWAMP_EXTRACT_CONCURRENCY", "SWAMP_LLM_CONCURRENCY",
+                                  "SWAMP_LLM_MODEL", "SWAMP_LLM_PROVIDER"):
+                            swamp_yaml_values[k] = v
+            except Exception:
+                pass
+
+    def _resolve(key: str, default: int | str) -> dict:
+        if key in os.environ:
+            raw = os.environ[key].strip()
+            try:
+                return {"value": int(raw) if isinstance(default, int) else raw, "source": "env", "raw": raw}
+            except ValueError:
+                return {"value": raw, "source": "env", "raw": raw}
+        if key in swamp_yaml_values:
+            raw = swamp_yaml_values[key]
+            try:
+                return {"value": int(raw) if isinstance(default, int) else raw, "source": "~/.swamp.yaml", "raw": raw}
+            except ValueError:
+                return {"value": raw, "source": "~/.swamp.yaml", "raw": raw}
+        if key in env_swamp_values:
+            raw = env_swamp_values[key]
+            try:
+                return {"value": int(raw) if isinstance(default, int) else raw, "source": ".env.swamp", "raw": raw}
+            except ValueError:
+                return {"value": raw, "source": ".env.swamp", "raw": raw}
+        return {"value": default, "source": "default", "raw": str(default)}
+
+    return {
+        "extractConcurrency": _resolve("SWAMP_EXTRACT_CONCURRENCY", SWAMP_DEFAULT_EXTRACT),
+        "llmConcurrency": _resolve("SWAMP_LLM_CONCURRENCY", SWAMP_DEFAULT_LLM),
+        "model": _resolve("SWAMP_LLM_MODEL", "deepseek-4.1-flash-background"),
+        "provider": _resolve("SWAMP_LLM_PROVIDER", "lunaroute"),
+    }
+
+
+def _swamp_split() -> tuple[int, int, int]:
+    """Recommended split with pi+extract+llm <= INTERACTIVE_BURST_CAP. Never 8+8+12=28."""
+    cap = INTERACTIVE_BURST_CAP
+    pi_rec, sw_extract, sw_llm = 4, 3, 2
+    total = pi_rec + sw_extract + sw_llm
+    if total > cap:
+        over = total - cap
+        take_extract = min(over, max(0, sw_extract - 1))
+        sw_extract -= take_extract
+        over -= take_extract
+        if over > 0:
+            take_llm = min(over, max(0, sw_llm - 1))
+            sw_llm -= take_llm
+            over -= take_llm
+        if over > 0:
+            pi_rec = max(2, pi_rec - over)
+    return pi_rec, sw_extract, sw_llm
+
+
+def _swamp_env_apply(repo_dir: str | None, key: str, value: str) -> str:
+    """Copy-paste block for swamp env vars with mkdir -p + cp backup parity plus .env.swamp variant."""
+    shell_path = "~/.config/swamp/env" if repo_dir is None else os.path.join(repo_dir, ".env.swamp")
+    lines = [
+        f"f={shell_path}",
+        'mkdir -p "$(dirname "$f")"',
+        '[ -f "$f" ] || : > "$f"',
+        'cp "$f" "$f.bak.$(date +%Y%m%d%H%M%S)"',
+        f"# export {key}={value} — add to {shell_path} or export in your shell profile",
+        f'grep -q "^{key}=" "$f" 2>/dev/tty && sed -i.bak "s|^{key}=.*|{key}={value}|" "$f" || echo "{key}={value}" >> "$f"   # swamp {key}',
+    ]
+    if repo_dir:
+        lines.append(f"# repo-local variant also works: {os.path.join(repo_dir, '.env.swamp')}")
+    return "\n".join(lines)
+
+
+def recommendations_swamp(m: dict, agents: list[str]) -> list:
+    """Swamp block — only when agents includes swamp and swamp is present."""
+    if "swamp" not in agents:
+        return []
+    present, repo_dir = _swamp_present()
+    if not present:
+        return []
+    knobs = resolve_swamp_knobs(repo_dir)
+    extract_val = knobs["extractConcurrency"]["value"]
+    llm_val = knobs["llmConcurrency"]["value"]
+    try:
+        extract_n = int(extract_val)
+        llm_n = int(llm_val)
+    except (TypeError, ValueError):
+        extract_n = SWAMP_DEFAULT_EXTRACT
+        llm_n = SWAMP_DEFAULT_LLM
+    pi_budget = ADVISE_FANOUT_MAX
+    swamp_total = extract_n + llm_n
+    combined = pi_budget + swamp_total
+    cap = INTERACTIVE_BURST_CAP
+    extract_src = knobs["extractConcurrency"]["source"]
+    llm_src = knobs["llmConcurrency"]["source"]
+    def _citation(source: str) -> str:
+        if source == "default":
+            return f"{SWAMP_CITATION_DEFAULT} (default)"
+        if source == "env":
+            return "env var (live)"
+        if source == "~/.swamp.yaml":
+            return "~/.swamp.yaml (live)"
+        if source == ".env.swamp":
+            loc = os.path.join(repo_dir, ".env.swamp") if repo_dir else ".env.swamp"
+            return f"{loc} (live)"
+        return source
+    extract_cite = _citation(extract_src)
+    llm_cite = _citation(llm_src)
+    if combined <= cap:
+        return [{
+            "agent": "swamp",
+            "note": (f"swamp already within budget: pi {pi_budget} + swamp extract {extract_n} + "
+                     f"swamp phase-6 {llm_n} = {combined} <= cap {cap}. No change needed."),
+            "changes": [{
+                "key": "SWAMP_EXTRACT_CONCURRENCY + SWAMP_LLM_CONCURRENCY",
+                "file": os.path.join(repo_dir or "~", ".env.swamp") if repo_dir else "~/.swamp.yaml",
+                "from": f"extract={extract_n} ({extract_cite}), llm={llm_n} ({llm_cite})",
+                "to": f"extract={extract_n}, llm={llm_n} (within cap)",
+                "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + llm {llm_n} = {combined} "
+                        f"is within INTERACTIVE_BURST_CAP {cap}. No adjustment needed, but keep the "
+                        f"combined total under {cap} when tuning swamp concurrency. "
+                        f"Defaults: {SWAMP_CITATION_DEFAULT} extract={SWAMP_DEFAULT_EXTRACT}, "
+                        f"llm={SWAMP_DEFAULT_LLM}. Live: ~/.swamp.yaml + .env.swamp."),
+                "impact": "no change needed; swamp is already within the combined burst cap.",
+                "apply": f"true   # within budget: {combined} <= {cap}",
+                "snippet": f"SWAMP_EXTRACT_CONCURRENCY={extract_n}\nSWAMP_LLM_CONCURRENCY={llm_n}",
+            }],
+        }]
+    pi_rec, extract_rec, llm_rec = _swamp_split()
+    assert pi_rec + extract_rec + llm_rec <= cap, f"split {pi_rec}+{extract_rec}+{llm_rec} exceeds cap {cap}"
+    combined_rec = pi_rec + extract_rec + llm_rec
+    return [{
+        "agent": "swamp",
+        "changes": [
+            {
+                "key": "SWAMP_EXTRACT_CONCURRENCY",
+                "file": os.path.join(repo_dir, ".env.swamp") if repo_dir else "~/.swamp.yaml",
+                "from": f"{extract_n} ({extract_cite})",
+                "to": str(extract_rec),
+                "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + phase-6 {llm_n} = {combined} "
+                        f"> cap {cap}: swamp alone would overflow the interactive burst cap even before "
+                        f"pi traffic. Default {SWAMP_DEFAULT_EXTRACT} from {SWAMP_CITATION_DEFAULT} "
+                        f"(extractMany worker count). Live value from {extract_cite}."),
+                "impact": (f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = "
+                           f"{combined_rec} <= {cap}."),
+                "apply": _swamp_env_apply(repo_dir, "SWAMP_EXTRACT_CONCURRENCY", str(extract_rec)),
+                "snippet": f"SWAMP_EXTRACT_CONCURRENCY={extract_rec}",
+            },
+            {
+                "key": "SWAMP_LLM_CONCURRENCY",
+                "file": os.path.join(repo_dir, ".env.swamp") if repo_dir else "~/.swamp.yaml",
+                "from": f"{llm_n} ({llm_cite})",
+                "to": str(llm_rec),
+                "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + phase-6 {llm_n} = {combined} "
+                        f"> cap {cap} (INTERACTIVE_BURST_CAP): swamp phase-6 alone overfills the "
+                        f"interactive burst cap without headroom for pi. Default {SWAMP_DEFAULT_LLM} from "
+                        f"{SWAMP_CITATION_DEFAULT} (runVerifyPass batch concurrency). Live value from {llm_cite}."),
+                "impact": (f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = "
+                           f"{combined_rec} <= {cap}."),
+                "apply": _swamp_env_apply(repo_dir, "SWAMP_LLM_CONCURRENCY", str(llm_rec)),
+                "snippet": f"SWAMP_LLM_CONCURRENCY={llm_rec}",
+            },
+        ],
+        "combined_budget": {
+            "pi": pi_budget, "extract": extract_n, "phase6": llm_n,
+            "combined": combined, "cap": cap,
+            "recommended": {"pi": pi_rec, "extract": extract_rec, "phase6": llm_rec, "combined": combined_rec},
+        },
+    }]
 
 
 def catalog() -> list:
@@ -344,6 +590,12 @@ def recommendations(m, reqs, agents) -> list:
         if changes:
             out.append({"agent": "claude-code", "changes": changes, "note": note})
 
+    # ---------------- swamp ----------------
+    if "swamp" in agents:
+        swamp_recs = recommendations_swamp(m, agents)
+        for grp in swamp_recs:
+            out.append(grp)
+
     # ---------------- codex ----------------
     if "codex" in agents:
         text = _read_text(CODEX_CONFIG)
@@ -466,7 +718,8 @@ def cmd_fix(args) -> int:
         print(f"luna-doctor: {e}", file=sys.stderr)
         return 2
     harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
-    reqs = collect(hours, harnesses)
+    reqs = collect(hours, harnesses, getattr(args, "pi_root", None),
+                   getattr(args, "claude_root", None))
     m = analyse(reqs, hours)
     recs = recommendations(m, reqs, agents)
     render_fix(recs, m, args.json)

@@ -29,5 +29,9 @@ Homepage = "https://jesserobbins.com"
 # than pretending it is an importable library.
 script-files = ["bin/luna-doctor"]
 
+# VERSION holds a semver string (e.g. 0.1.1-alpha.1); normalize to PEP 440 for
+# packaging so `pip install .` does not choke on the hyphenated prerelease.
+# Keep the mapping trivial (alpha.1 -> a1) — `bin/luna-doctor --version`
+# always reports the semver form, which is the canonical one.
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

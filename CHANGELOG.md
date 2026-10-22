@@ -18,6 +18,21 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.1.1-alpha.1] - 2026-10-22
+
+### Added
+
+- `--pi-root` / `--claude-root` (repeatable): read pi-format or claude-code stores from mirrored archives instead of the live defaults. Fixes burst-forensics against offline mirrors where mtime pruning hid the window.
+- Per-model admission deadlines (median over `admission_timeout` durations, `unknown` when n<3); removes the single `admission_deadline_s` constant from `contract`.
+- Timeout-storm detector, saturation bands (with ≥5-sample minimum), unknown-error surfacing, wall counts + slow completions, and extraction persistence with an append-only `findings.jsonl` ledger.
+- New outcome classes (`org_concurrency_limit`, `model_not_found`, `context_length_exceeded`, `payload_too_large`, `harness_deadline`, `message_limit`) and `w`/`y` duration units for `--since`.
+- Swamp visibility: `discover` reports `stores.swamp`, `analyze` emits `metrics.swamp` with combined-pressure warning, `fix --agent swamp` advises `SWAMP_EXTRACT_CONCURRENCY` / `SWAMP_LLM_CONCURRENCY` with a combined budget, `probe` adds a swamp headroom note. Schema → 3.
+
+### Changed
+
+- License changed from MIT to Apache-2.0.
+- Releases use prerelease tags (`v0.1.1-alpha.1`); documentation reflects the alpha status.
+
 ### Added
 
 - `luna-doctor chart` writes a standalone SVG: requests in flight over time,

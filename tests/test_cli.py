@@ -4,9 +4,9 @@ Stdlib only, no fixtures to maintain. Run from the repo root:
 
     python3 -m unittest discover -s tests -v
 
-Everything here is read-only: it runs the CLI against the local log stores and
-checks the contract (exit codes, JSON envelope, version consistency). The live
-`probe`/`compare` commands spend credits, so they are not exercised.
+The suite never calls `probe`/`compare`, which spend credits, and every CLI run
+points `LUNA_DOCTOR_STORE` at a throwaway directory: nothing here writes to your
+real store or to a log store.
 """
 
 import json
@@ -15,30 +15,44 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+import datetime
 import unittest
 import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "bin", "luna-doctor")
-SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")  # semver, prerelease allowed (0.1.1-alpha.1)
 
 
-def run(*args, timeout=180):
+# Every CLI invocation in this suite gets its own store directory: the real
+# ~/.luna-doctor/store is the user's repeat history, not a test artifact.
+_TEST_STORE = tempfile.mkdtemp(prefix="luna-doctor-tests-")
+
+
+def run(*args, timeout=180, store=None):
+    env = dict(os.environ)
+    env["LUNA_DOCTOR_STORE"] = store or _TEST_STORE
     proc = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True,
-                          timeout=timeout, cwd=ROOT)
+                          timeout=timeout, cwd=ROOT, env=env)
     return proc.returncode, proc.stdout, proc.stderr
 
+
+def _version_from_output(out: str) -> str:
+    """Parse 'luna-doctor 0.1.1-alpha.1 (alpha — …)' -> '0.1.1-alpha.1'."""
+    m = re.search(r"luna-doctor\s+(\S+)", out)
+    return m.group(1) if m else out.strip().split()[1] if len(out.strip().split()) > 1 else out.strip()
 
 class VersionContract(unittest.TestCase):
     def test_version_is_semver(self):
         code, out, _ = run("--version")
         self.assertEqual(code, 0)
-        version = out.strip().split()[-1]
+        version = _version_from_output(out)
         self.assertRegex(version, SEMVER)
 
     def test_version_matches_version_file(self):
         _, out, _ = run("--version")
-        script_version = out.strip().split()[-1]
+        script_version = _version_from_output(out)
         with open(os.path.join(ROOT, "VERSION")) as fh:
             file_version = fh.read().strip()
         self.assertEqual(script_version, file_version,
@@ -52,14 +66,17 @@ class VersionContract(unittest.TestCase):
             self.skipTest("git unavailable")
         if tags.returncode != 0 or not tags.stdout.strip():
             self.skipTest("no release tags yet")
-        newest = sorted(tags.stdout.split(), key=lambda t: [int(p) for p in t.lstrip("v").split(".")])[-1]
+        def _semver_key(t):
+            core = t.lstrip("v").split("-")[0]
+            return [int(p) for p in core.split(".")]
+        newest = sorted(tags.stdout.split(), key=_semver_key)[-1]
         _, out, _ = run("--version")
-        self.assertEqual(out.strip().split()[-1], newest.lstrip("v"),
+        self.assertEqual(_version_from_output(out), newest.lstrip("v"),
                          "the newest tag and the code disagree; tag the released version")
 
     def test_changelog_has_the_current_version(self):
         _, out, _ = run("--version")
-        version = out.strip().split()[-1]
+        version = _version_from_output(out)
         with open(os.path.join(ROOT, "CHANGELOG.md")) as fh:
             text = fh.read()
         self.assertIn(f"## [{version}]", text)
@@ -70,7 +87,7 @@ class JsonEnvelope(unittest.TestCase):
         code, out, err = run(*args)
         self.assertIn(code, (0, 1, 2), f"unexpected exit {code}: {err}")
         doc = json.loads(out)          # must be pure JSON on stdout
-        self.assertEqual(doc["schema"], 1)
+        self.assertEqual(doc["schema"], 3)
         self.assertRegex(doc["version"], SEMVER)
         self.assertIn("command", doc)
         return code, doc
@@ -150,7 +167,7 @@ class Chart(unittest.TestCase):
         self.assertEqual(code, 0)
         doc = json.loads(stdout)
         self.assertEqual(doc["command"], "chart")
-        self.assertEqual(doc["schema"], 1)
+        self.assertEqual(doc["schema"], 3)
         self.assertEqual(doc["path"], out)
         self.assertIn("contract", doc)
 
@@ -211,6 +228,1437 @@ class Sources(unittest.TestCase):
         code, out, _ = run("fix", "--since", "24h")
         self.assertIn(code, (0, 1))
         self.assertIn("Nothing below runs on its own", out)
+
+
+def _load_cli():
+    """Import bin/luna-doctor as a module (it is a script, not a package)."""
+    import importlib.util
+    import sys as _sys
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader("luna_doctor", CLI)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[loader.name] = mod          # dataclass annotations resolve here
+    loader.exec_module(mod)
+    return mod
+
+
+def _pi_line(ts, model, start_ms, end_ms, err=None, stop="stop", out=100):
+    """One pi assistant record, the shape iter_pi reads."""
+    rec = {
+        "type": "message",
+        "id": f"id-{ts}",
+        "timestamp": ts,
+        "message": {
+            "role": "assistant",
+            "model": model,
+            "provider": "lunaroute",
+            "timestamp": start_ms,
+            "usage": {"input": 10, "output": out},
+            "stopReason": "error" if err else stop,
+            "errorMessage": err,
+            "content": [{"type": "text", "text": "x"}],
+            "responseId": f"r-{ts}",
+        },
+    }
+    return json.dumps(rec)
+
+
+class OutcomeClasses(unittest.TestCase):
+    """Every string below was seen in real traffic; the class decides the advice."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def classify(self, err):
+        return self.m.classify({"error_message": err, "stop_reason": "error"})
+
+    def test_org_concurrency_limit_is_not_generic_rate_limit(self):
+        err = ('lunaroute API error (429): {"code":"CONCURRENT_REQUEST_LIMIT_EXCEEDED",'
+               '"message":"Organization has reached its maximum number of concurrent requests."}')
+        self.assertEqual(self.classify(err), "org_concurrency_limit")
+
+    def test_model_not_found(self):
+        err = ('lunaroute API error (404): {"code":404,"message":"The model '
+               "'glm-5.3-vision' does not exist\",\"param\":\"model\"}")
+        self.assertEqual(self.classify(err), "model_not_found")
+
+    def test_context_length_exceeded(self):
+        err = ('400: {"message":"This model\'s maximum context length is 524288 tokens. '
+               'However, you requested 131072 output tokens"}')
+        self.assertEqual(self.classify(err), "context_length_exceeded")
+
+    def test_payload_too_large(self):
+        err = ('413: {"code":"PAYLOAD_TOO_LARGE","declared_bytes":18970123,'
+               '"max_bytes":16777216}')
+        self.assertEqual(self.classify(err), "payload_too_large")
+
+    def test_harness_deadline(self):
+        err = "request deadline exceeded after 1195s before the response completed"
+        self.assertEqual(self.classify(err), "harness_deadline")
+        err2 = "provider unhealthy after 4 stream failures (2m18.7s)"
+        self.assertEqual(self.classify(err2), "harness_deadline")
+
+    def test_backend_unavailable_folds_into_upstream_unavailable(self):
+        self.assertEqual(self.classify('503: {"error":{"message":"backend unavailable"}}'),
+                         "upstream_unavailable")
+
+    def test_admission_timeout_still_wins(self):
+        self.assertEqual(self.classify("504: scheduler admission timeout"),
+                         "admission_timeout")
+
+    def test_unknown_string_is_still_other_error(self):
+        self.assertEqual(self.classify("kernel panic in the tensor router"), "other_error")
+
+
+class PerModelDeadlines(unittest.TestCase):
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _dead(self, model, start, dur, outcome="admission_timeout"):
+        r = self.m.Request(harness="pi", session="s", model=model,
+                           start=start, end=start + dur, outcome=outcome)
+        return r
+
+    def test_median_and_spread_per_model(self):
+        base = 1_700_000_000.0
+        reqs = ([self._dead("glm-5.3", base + i * 500, 120.2 + i * 0.1) for i in range(5)]
+                + [self._dead("deepseek-4.1-flash", base + i * 900, 60.3) for i in range(3)])
+        d = self.m.per_model_deadlines(reqs)
+        self.assertAlmostEqual(d["glm-5.3"]["deadline_s"], 120.4, places=1)
+        self.assertEqual(d["glm-5.3"]["n"], 5)
+        self.assertAlmostEqual(d["deepseek-4.1-flash"]["deadline_s"], 60.3, places=1)
+
+    def test_unknown_below_three_samples(self):
+        """A deadline borrowed from one observation is a guess with a number on it."""
+        base = 1_700_000_000.0
+        reqs = [self._dead("new-model", base, 90.0), self._dead("new-model", base + 500, 90.1)]
+        d = self.m.per_model_deadlines(reqs)
+        self.assertIsNone(d["new-model"]["deadline_s"])
+        self.assertEqual(d["new-model"]["status"], "unknown")
+
+    def test_completed_requests_are_not_deadline_evidence(self):
+        base = 1_700_000_000.0
+        reqs = [self._dead("glm-5.3", base + i, 120.2, outcome="completed") for i in range(5)]
+        self.assertEqual(self.m.per_model_deadlines(reqs), {})
+
+
+class TimeoutStorms(unittest.TestCase):
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _r(self, start, dur, outcome="client_idle_timeout"):
+        return self.m.Request(harness="pi", session="s", model="glm-5.3",
+                              start=start, end=start + dur, outcome=outcome)
+
+    def test_three_same_duration_within_a_minute_is_a_cohort(self):
+        base = 1_700_000_000.0
+        reqs = [self._r(base, 300.0), self._r(base + 10, 300.0), self._r(base + 20, 300.0)]
+        storms = self.m.timeout_storms(reqs)
+        self.assertEqual(len(storms), 1)
+        self.assertEqual(storms[0]["cohort"], 3)
+        self.assertAlmostEqual(storms[0]["duration_s"], 300.0)
+
+    def test_two_is_not_a_cohort(self):
+        base = 1_700_000_000.0
+        self.assertEqual(self.m.timeout_storms([self._r(base, 300.0), self._r(base + 5, 300.0)]), [])
+
+    def test_different_durations_do_not_merge(self):
+        base = 1_700_000_000.0
+        reqs = [self._r(base, 300.0), self._r(base + 5, 120.2, "admission_timeout"),
+                self._r(base + 10, 300.0)]
+        self.assertEqual(self.m.timeout_storms(reqs), [])
+
+    def test_a_cohort_spread_beyond_the_window_is_split(self):
+        base = 1_700_000_000.0
+        reqs = ([self._r(base, 300.0), self._r(base + 5, 300.0), self._r(base + 10, 300.0)]
+                + [self._r(base + 900, 300.0), self._r(base + 905, 300.0),
+                   self._r(base + 910, 300.0)])
+        self.assertEqual(len(self.m.timeout_storms(reqs)), 2)
+
+
+class SaturationBands(unittest.TestCase):
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _cluster(self, base, n, dur, outcome="completed"):
+        """n requests all overlapping, so each sees concurrency n."""
+        return [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + dur, outcome=outcome)
+                for _ in range(n)]
+
+    def test_bands_bucket_by_concurrency_during_the_window(self):
+        base = 1_700_000_000.0
+        reqs = self._cluster(base, 3, 10.0) + self._cluster(base + 600, 11, 10.0)
+        b = self.m.saturation_bands(reqs)
+        widths = {row["band"]: row["n"] for row in b["bands"]}
+        self.assertEqual(widths["3-5"], 3)
+        self.assertEqual(widths["10+"], 11)
+
+    def test_inflation_needs_five_samples_in_the_top_band(self):
+        base = 1_700_000_000.0
+        slow = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 60.0, outcome="completed")
+                for i in range(11)]           # concurrency 11 -> top band, all 60s
+        fast = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + 5000 + i * 100, end=base + 5000 + i * 100 + 5.0,
+                               outcome="completed") for i in range(3)]
+        b = self.m.saturation_bands(slow + fast)
+        self.assertTrue(b["top_inflation_flagged"])
+
+    def test_thin_top_band_does_not_claim_a_gradient(self):
+        """Ten requests overlap, but only two of them completed: the band is real
+        and thin, which is exactly the case a min-sample guard exists for."""
+        base = 1_700_000_000.0
+        cluster = self._cluster(base, 10, 60.0)
+        for r in cluster[2:]:
+            r.outcome = "aborted"          # still concurrent, not a latency sample
+        fast = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + 5000 + i * 100, end=base + 5000 + i * 100 + 5.0,
+                               outcome="completed") for i in range(4)]
+        b = self.m.saturation_bands(cluster + fast)
+        self.assertEqual(b["bands"][-1]["n"], 2, "the top band must actually hold samples")
+        self.assertFalse(b["top_inflation_flagged"], "two samples cannot establish a gradient")
+        self.assertIsNotNone(b["note"])
+
+
+class UnknownErrors(unittest.TestCase):
+    def setUp(self):
+        self.m = _load_cli()
+
+    def test_signature_normalizes_variable_parts(self):
+        a = self.m.error_signature("Provider returned 503 for request 9f8a7b6c at 12:30")
+        b = self.m.error_signature("provider returned 500 for request deadbeef at 14:02")
+        self.assertEqual(a, b)
+        self.assertLessEqual(len(a), 120)
+
+    def test_signature_lowercases(self):
+        self.assertEqual(self.m.error_signature("Backend Unavailable"),
+                         self.m.error_signature("backend unavailable"))
+
+    def test_unknown_errors_are_surfaced_with_timing(self):
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 5.0, outcome="other_error",
+                               error_message=f"weird gateway string variant {i}")
+                for i in range(3)]
+        u = self.m.unknown_errors(reqs)
+        self.assertEqual(len(u), 1)
+        self.assertEqual(u[0]["count"], 3)
+        self.assertIn("first", u[0])
+        self.assertIn("last", u[0])
+
+    def test_known_classes_are_not_unknown(self):
+        reqs = [self.m.Request(harness="pi", session="s", model="m", start=1.0, end=2.0,
+                               outcome="admission_timeout",
+                               error_message="scheduler admission timeout")]
+        self.assertEqual(self.m.unknown_errors(reqs), [])
+
+
+class RootsAndPruning(unittest.TestCase):
+    """R1 from the builder check: mirrors keep source mtimes, so mtime pruning
+    silently hides months-old data that is the whole point of --pi-root."""
+
+    def _store(self, tmp, mtime_epoch, records):
+        proj = os.path.join(tmp, "proj", "--rat-run--")
+        os.makedirs(proj, exist_ok=True)
+        path = os.path.join(proj, "2026-08-13T06-41-17-867Z_abc.jsonl")
+        with open(path, "w") as fh:
+            fh.write("\n".join(records) + "\n")
+        os.utime(path, (mtime_epoch, mtime_epoch))
+        return path
+
+    def test_old_mtime_does_not_hide_recent_records(self):
+        m = _load_cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            now = time.time()
+            start_ms = int((now - 900) * 1000)
+            ts = datetime.datetime.fromtimestamp(now - 800, datetime.timezone.utc)
+            rec = _pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "sentinel-model", start_ms, None)
+            self._store(tmp, now - 90 * 86400, [rec])   # mtime 3 months old
+            reqs = m.collect(24, ["pi"], pi_roots=[tmp])
+            self.assertEqual(len(reqs), 1, "record timestamps must decide, not file mtime")
+            self.assertEqual(reqs[0].model, "sentinel-model")
+
+    def test_explicit_root_suppresses_the_default_store(self):
+        m = _load_cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            now = time.time()
+            start_ms = int((now - 900) * 1000)
+            ts = datetime.datetime.fromtimestamp(now - 800, datetime.timezone.utc)
+            rec = _pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "sentinel-model", start_ms, None)
+            self._store(tmp, now, [rec])
+            code, out, err = run("analyze", "--since", "1h", "--json",
+                                 "--pi-root", tmp, "--harness", "pi")
+            self.assertEqual(code, 0, err)
+            doc = json.loads(out)
+            models = {r["model"] for r in doc["metrics"].get("requests_by_model", [])}
+            self.assertEqual(models, {"sentinel-model"},
+                             "an explicit --pi-root must not also sweep ~/.pi/agent/sessions")
+
+
+class ExtractionStore(unittest.TestCase):
+    def setUp(self):
+        self.m = _load_cli()
+
+    def test_store_dir_env_override(self):
+        os.environ["LUNA_DOCTOR_STORE"] = "/tmp/luna-doctor-test-store"
+        try:
+            self.assertEqual(self.m.store_dir(), "/tmp/luna-doctor-test-store")
+        finally:
+            del os.environ["LUNA_DOCTOR_STORE"]
+        self.assertTrue(self.m.store_dir().endswith(".luna-doctor/store"))
+
+    def test_run_is_persisted_and_findings_appended_once_per_signature(self):
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 300.0,
+                               outcome="client_idle_timeout",
+                               error_message="Stream ended without finish_reason")
+                for i in range(3)]
+        with tempfile.TemporaryDirectory() as tmp:
+            m = self.m.analyse(reqs, 1.0)
+            first = self.m.persist_run(m, window_hours=1.0, store=tmp)
+            self.assertTrue(os.path.isfile(first["path"]))
+            with open(first["path"]) as fh:
+                doc = json.load(fh)
+            self.assertEqual(doc["schema"], 3)
+            with open(first["ledger"]) as fh:
+                lines = [json.loads(x) for x in fh if x.strip()]
+                events = self.m.ledger_rows(m, "stores:default")
+            self.assertEqual(len(lines), len(events),
+                             "the ledger holds one row per event; the report holds every finding")
+            second = self.m.persist_run(m, window_hours=1.0, store=tmp)
+            with open(second["ledger"]) as fh:
+                lines2 = [json.loads(x) for x in fh if x.strip()]
+            self.assertEqual(len(lines2), len(lines), "the ledger is append-only, not duplicated")
+
+
+class SchemaTwo(unittest.TestCase):
+    def test_analyze_envelope_is_schema_2_and_drops_the_borrowed_deadline(self):
+        code, out, err = run("analyze", "--since", "1h", "--json")
+        self.assertIn(code, (0, 1, 2), err)
+        doc = json.loads(out)
+        self.assertEqual(doc["schema"], 3)
+        self.assertNotIn("admission_deadline_s", doc["contract"],
+                         "per-model deadlines replace the borrowed constant")
+        for key in ("pre_header_wait_s", "client_idle_timeout_s", "interactive_burst_cap"):
+            self.assertIn(key, doc["contract"])
+
+
+# The reproduction store is supplied by the environment: the path names a private
+# project, and this test file ships in a public repo.
+MIRROR = os.environ.get("LUNA_DOCTOR_RAT_MIRROR", "")
+
+
+@unittest.skipUnless(MIRROR and os.path.isdir(os.path.join(MIRROR, "pi")),
+                     "set LUNA_DOCTOR_RAT_MIRROR to a pi+claude mirror to run the reproduction")
+class RatRunReproduction(unittest.TestCase):
+    """The success test from the design doc, run against the real stores.
+
+    Three August runs, three measurements each. Numbers below were measured by
+    this implementation against those stores, and the one that differs from the
+    hand sweep is explained rather than smoothed over: pooled-c10 shows 28
+    timeout-class wall deaths plus one *completed* request at 298.5s, which a
+    looser "it ran about 300s" count folds into 29. The completion did not die
+    on a wall, so it is reported separately.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        code, out, err = run("analyze", "--since", "100y", "--json",
+                             "--pi-root", os.path.join(MIRROR, "pi"),
+                             "--claude-root", os.path.join(MIRROR, "claude"),
+                             "--store-dir", tempfile.mkdtemp(prefix="ld-test-"))
+        assert code in (0, 1), err
+        cls.doc = json.loads(out)
+        cls.m = cls.doc["metrics"]
+
+    def _run(self, needle):
+        found = [r for r in self.m["by_run"] if needle in r["run"]]
+        self.assertEqual(len(found), 1, f"expected exactly one run matching {needle}")
+        return found[0]
+
+    def test_wall_300s_counts_per_run(self):
+        expected = {
+            "--rat-glm-litellm-background-6arm-n100-c10": 21,
+            "--rat-glm-litellm-pooled-6arm-n100-c10": 28,
+            "--rat-glm-litellm-pooled-6arm-n100-c14-restart2": 40,
+        }
+        for needle, n in expected.items():
+            r = self._run(needle)
+            self.assertEqual(r["wall_counts_s"].get("300.0"), n, r["run"])
+
+    def test_the_29th_request_was_a_completion_not_a_wall_death(self):
+        r = self._run("--rat-glm-litellm-pooled-6arm-n100-c10")
+        self.assertEqual(r["slow_completions_over_290s"], 1)
+
+    def test_peak_concurrency_is_10_not_higher(self):
+        for needle in ("background-6arm-n100-c10", "pooled-6arm-n100-c10",
+                       "pooled-6arm-n100-c14-restart2"):
+            self.assertEqual(self._run(needle)["peak_concurrency"], 10)
+
+    def test_lockstep_storms_are_ten_packs(self):
+        packs = [s for s in self.m["timeout_storms"] if s["cohort"] >= 10]
+        self.assertGreaterEqual(len(packs), 3, "the restart produced at least three 10-packs")
+        for s in packs:
+            self.assertAlmostEqual(s["duration_s"], 300.0, delta=1.0)
+
+    def test_saturation_gradient_inflates_at_the_ceiling(self):
+        b = self.m["saturation_bands"]
+        self.assertTrue(b["top_inflation_flagged"])
+        self.assertGreaterEqual(b["top_inflation"], 2.0)
+
+    def test_message_limit_is_its_own_class(self):
+        self.assertGreater(self.m["by_outcome"].get("message_limit", 0), 100)
+        self.assertNotIn("message limit", json.dumps(self.m["unknown_errors"]).lower())
+
+
+class ReviewerRegressions(unittest.TestCase):
+    """Each test here closes a specific roborev finding from iteration 1."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def test_zero_length_request_does_not_inflate_later_bands(self):
+        """codex: a zero-length interval stayed active forever, poisoning the sweep."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="m",
+                               start=base, end=base, outcome="completed")]
+        reqs += [self.m.Request(harness="pi", session="s", model="m",
+                                start=base + 100 + i * 50, end=base + 105 + i * 50,
+                                outcome="completed") for i in range(3)]
+        peaks = self.m.peak_concurrency_during(reqs)
+        self.assertEqual(max(peaks.values()), 1, "a zero-length request overlapped nothing")
+
+    def test_interleaved_duration_does_not_flush_a_cohort(self):
+        """codex: three 120s timeouts were split by an interleaved 60s timeout."""
+        base = 1_700_000_000.0
+        r = lambda start, dur, oc="admission_timeout": self.m.Request(
+            harness="pi", session="s", model="glm-5.3", start=start, end=start + dur, outcome=oc)
+        reqs = [r(base, 120.0), r(base + 5, 60.0), r(base + 10, 120.0), r(base + 20, 120.0)]
+        storms = self.m.timeout_storms(reqs)
+        self.assertEqual([s["cohort"] for s in storms], [3])
+        self.assertAlmostEqual(storms[0]["duration_s"], 120.0)
+
+    def test_claude_run_attribution(self):
+        """codex: iter_claude computed `run` and then dropped it."""
+        import datetime as _dt
+        with tempfile.TemporaryDirectory() as tmp:
+            now = time.time()
+            for proj in ("proj-a", "proj-b"):
+                d = os.path.join(tmp, proj)
+                os.makedirs(d)
+                tss = (_dt.datetime.fromtimestamp(now - 60, _dt.timezone.utc)
+                       .strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+                recs = [
+                    json.dumps({"type": "user", "timestamp": tss}),
+                    json.dumps({"type": "assistant", "timestamp": tss,
+                                "message": {"id": f"m-{proj}", "model": "glm-5.3",
+                                            "stop_reason": "end_turn",
+                                            "usage": {"input_tokens": 1, "output_tokens": 2}}}),
+                ]
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write("\n".join(recs) + "\n")
+            reqs = self.m.collect(1, ["claude-code"], claude_roots=[tmp])
+            # root-qualified: the store label precedes the project directory
+            self.assertEqual({r.run.split("/")[-1] for r in reqs}, {"proj-a", "proj-b"})
+
+    def test_ledger_records_one_row_per_signature_per_window(self):
+        """both reviewers: same-signature cohorts duplicated, `seen` never updated."""
+        base = 1_700_000_000.0
+        reqs = []
+        for round_ in range(3):
+            start = base + round_ * 3600
+            reqs += [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                                    start=start + i, end=start + i + 300.0,
+                                    outcome="client_idle_timeout",
+                                    error_message="Stream ended without finish_reason")
+                     for i in range(10)]
+        m = self.m.analyse(reqs, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.m.persist_run(m, 1.0, store=tmp)
+            with open(out["ledger"]) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        storm_rows = [r for r in rows if r["kind"] == "timeout_storm"]
+        self.assertEqual(len(storm_rows), 3, "a cohort is the event")
+        self.assertEqual({r["count"] for r in storm_rows}, {10})
+        self.assertEqual(len({r["event_start"] for r in storm_rows}), 3)
+
+    def test_different_sources_do_not_share_a_file_or_a_ledger_key(self):
+        """codex: a mirror run and a local run collided on window identity."""
+        m = {"requests": 1, "by_outcome": {}, "per_model_deadlines": {},
+             "timeout_storms": [{"outcome": "client_idle_timeout", "duration_s": 300.0,
+                                 "cohort": 3, "start": "2026-01-01T00:00:00+00:00",
+                                 "end": "2026-01-01T00:05:00+00:00", "blocked_s": 300.0,
+                                 "models": ["m"]}],
+             "saturation_bands": {}, "unknown_errors": [], "by_run": []}
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.m.persist_run(m, 1.0, store=tmp, sources="pi:/mirror")
+            b = self.m.persist_run(m, 1.0, store=tmp, sources="stores:default")
+            self.assertNotEqual(a["path"], b["path"])
+            with open(a["ledger"]) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        self.assertEqual(len({r["sources"] for r in rows}), 2)
+
+    def test_window_recorded_is_the_window_analysed(self):
+        """claude-code: a 24h window was recorded as ending at the previous midnight."""
+        m = {"requests": 1, "by_outcome": {}, "per_model_deadlines": {},
+             "timeout_storms": [], "saturation_bands": {}, "unknown_errors": [], "by_run": []}
+        now = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.m.persist_run(m, 24.0, store=tmp, since=now - 86400, until=now)
+            with open(out["path"]) as fh:
+                doc = json.load(fh)
+        self.assertEqual(doc["window"]["end"],
+                         datetime.datetime.fromtimestamp(now, datetime.timezone.utc).isoformat())
+        self.assertEqual(doc["window"]["hours"], 24.0)
+
+    def test_mtime_prune_survives_for_a_live_store(self):
+        """claude-code: dropping the prune everywhere made default runs parse everything."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            d = os.path.join(tmp, "proj")
+            os.makedirs(d)
+            path = os.path.join(d, "old.jsonl")
+            start_ms = int((now - 900) * 1000)
+            ts = datetime.datetime.fromtimestamp(now - 800, datetime.timezone.utc)
+            with open(path, "w") as fh:
+                fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m", start_ms, None) + "\n")
+            os.utime(path, (now - 90 * 86400, now - 90 * 86400))
+            pruned = self.m.iter_pi([tmp], now - 3600, now, prune_mtime=True)
+            kept = self.m.iter_pi([tmp], now - 3600, now, prune_mtime=False)
+        self.assertEqual(pruned, [], "a live store may prune on mtime")
+        self.assertEqual(len(kept), 1, "a mirror may not")
+
+
+class SecondReviewRegressions(unittest.TestCase):
+    """Iteration 2 findings, one test each."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _r(self, start, dur, oc="client_idle_timeout"):
+        return self.m.Request(harness="pi", session="s", model="glm-5.3",
+                              start=start, end=start + dur, outcome=oc)
+
+    def test_sliding_window_keeps_the_recent_cohort(self):
+        """codex: endings at 0/55/65/70 produced no cohort at all."""
+        base = 1_700_000_000.0
+        reqs = [self._r(base + off, 300.0) for off in (0, 55, 65, 70)]
+        storms = self.m.timeout_storms(reqs)
+        self.assertEqual([s["cohort"] for s in storms], [3])
+
+    def test_duration_clustering_ignores_a_rounding_boundary(self):
+        """both: 300.49/300.51/300.52 landed in different integer buckets."""
+        base = 1_700_000_000.0
+        reqs = [self._r(base + i, d) for i, d in enumerate((300.49, 300.51, 300.52))]
+        storms = self.m.timeout_storms(reqs)
+        self.assertEqual([s["cohort"] for s in storms], [3])
+
+    def test_min_cohort_argument_is_honoured(self):
+        """claude-code: _storm_row ignored the caller's min_cohort."""
+        base = 1_700_000_000.0
+        reqs = [self._r(base + i, 300.0) for i in range(4)]
+        self.assertEqual(self.m.timeout_storms(reqs, min_cohort=4)[0]["cohort"], 4)
+        self.assertEqual(self.m.timeout_storms(reqs, min_cohort=5), [])
+
+    def test_source_identity_ignores_argument_order(self):
+        """codex: reversing root order minted a second identity for one dataset."""
+        a = self.m._source_id(["pi"], ["/tmp/a", "/tmp/b"], None)
+        b = self.m._source_id(["pi"], ["/tmp/b", "/tmp/a"], None)
+        self.assertEqual(a, b)
+
+    def test_overlapping_windows_record_one_occurrence_per_event(self):
+        """claude-code: overlapping runs inflated the repeat history."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 300.0,
+                               outcome="client_idle_timeout",
+                               error_message="Stream ended without finish_reason")
+                for i in range(3)]
+        m = self.m.analyse(reqs, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.m.persist_run(m, 1.0, store=tmp, since=base, until=base + 3600)
+            b = self.m.persist_run(m, 24.0, store=tmp, since=base - 82800, until=base + 3600)
+            self.assertNotEqual(a["path"], b["path"], "each window keeps its own report")
+            with open(a["ledger"]) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        self.assertEqual(len([r for r in rows if r["kind"] == "timeout_storm"]), 1,
+                         "the same storm in two windows is one occurrence")
+
+    def test_a_mistyped_root_is_reported_and_reads_nothing(self):
+        """claude-code: a typo'd --pi-root produced a clean, empty diagnosis."""
+        code, out, err = run("analyze", "--since", "1h", "--json",
+                             "--pi-root", "/nonexistent-luna-doctor-test",
+                             "--harness", "pi")
+        self.assertIn("is not a directory", err)
+        self.assertEqual(json.loads(out)["metrics"]["requests"], 0)
+
+    def test_duplicate_claude_roots_do_not_double_count(self):
+        """codex: the response dedupe set reset per file, so repeat roots doubled."""
+        import datetime as _dt
+        with tempfile.TemporaryDirectory() as tmp:
+            now = time.time()
+            d = os.path.join(tmp, "proj")
+            os.makedirs(d)
+            tss = (_dt.datetime.fromtimestamp(now - 60, _dt.timezone.utc)
+                   .strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+            recs = [json.dumps({"type": "user", "timestamp": tss}),
+                    json.dumps({"type": "assistant", "timestamp": tss,
+                                "message": {"id": "m-same", "model": "glm-5.3",
+                                            "stop_reason": "end_turn",
+                                            "usage": {"input_tokens": 1, "output_tokens": 2}}})]
+            with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                fh.write("\n".join(recs) + "\n")
+            once = self.m.collect(1, ["claude-code"], claude_roots=[tmp])
+            twice = self.m.collect(1, ["claude-code"], claude_roots=[tmp, tmp])
+        self.assertEqual(len(once), 1)
+        self.assertEqual(len(twice), 1, "the same response is one request however many roots see it")
+
+
+class ThirdReviewRegressions(unittest.TestCase):
+    """Iteration 3 findings."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _reqs(self, base, n=3, dur=300.0):
+        return [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + dur,
+                               outcome="client_idle_timeout",
+                               error_message="Stream ended without finish_reason")
+                for i in range(n)]
+
+    def test_window_aggregates_are_not_occurrences(self):
+        """claude-code (twice): an outcome count moves whenever the window edges move."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 120.0,
+                               outcome="admission_timeout") for i in range(3)]
+        m = self.m.analyse(reqs, 24.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.m.persist_run(m, 24.0, store=tmp, since=base - 86400, until=base + 60)
+            with open(out["ledger"]) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+            self.assertTrue(out["findings"], "the report still carries every finding")
+        self.assertEqual([r for r in rows if r["kind"] == "outcome"], [],
+                         "window summaries belong in the report, not the repeat history")
+
+    def test_hourly_cron_over_the_same_window_does_not_stack_outcome_rows(self):
+        """claude-code: aggregate findings fell back to a window key that moved hourly."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 120.0,
+                               outcome="admission_timeout",
+                               error_message="scheduler admission timeout") for i in range(4)]
+        m = self.m.analyse(reqs, 24.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            for hour in range(3):
+                self.m.persist_run(m, 24.0, store=tmp,
+                                   since=base + hour * 3600 - 82800,
+                                   until=base + hour * 3600 + 3600)
+            with open(os.path.join(tmp, "findings.jsonl")) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        storm_rows = [r for r in rows if r["kind"] == "timeout_storm"]
+        self.assertLessEqual(len(storm_rows), 1, "unchanged event findings do not stack")
+
+    def test_a_growing_window_records_the_new_observation(self):
+        """codex: a later window containing the same storm plus a new one was discarded."""
+        base = 1_700_000_000.0
+        first = self.m.analyse(self._reqs(base), 1.0)
+        later = self.m.analyse(self._reqs(base) + self._reqs(base + 7200), 24.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.m.persist_run(first, 1.0, store=tmp, since=base, until=base + 3600)
+            self.m.persist_run(later, 24.0, store=tmp, since=base, until=base + 86400)
+            with open(os.path.join(tmp, "findings.jsonl")) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        storms = [r for r in rows if r["kind"] == "timeout_storm"]
+        self.assertEqual(len(storms), 2, "a second cohort is a new event")
+        self.assertEqual(len({r["event_start"] for r in storms}), 2,
+                         "each cohort carries its own event identity")
+
+    def test_overlapping_cohorts_from_two_models_are_two_ledger_rows(self):
+        """claude-code: class-only signatures plus in-run overlap dedupe collapsed them."""
+        base = 1_700_000_000.0
+        reqs = ([self.m.Request(harness="pi", session="s", model="glm-5.3",
+                                start=base + off, end=base + off + 120.2,
+                                outcome="admission_timeout") for off in (0, 5, 10)]
+                + [self.m.Request(harness="pi", session="s", model="deepseek-4.1-flash",
+                                  start=base + off, end=base + off + 60.3,
+                                  outcome="admission_timeout") for off in (15, 20, 25)])
+        m = self.m.analyse(reqs, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.m.persist_run(m, 1.0, store=tmp, since=base - 3600, until=base + 3600)
+            with open(out["ledger"]) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        storms = [r for r in rows if r["kind"] == "timeout_storm"]
+        self.assertEqual(len(storms), 2, "two models, two cohorts, two events")
+        self.assertEqual({tuple(r["detail"]["models"]) for r in storms},
+                         {("glm-5.3",), ("deepseek-4.1-flash",)})
+
+    def test_back_to_back_rounds_are_two_ledger_rows(self):
+        """claude-code: consecutive lockstep rounds overlap by a fraction of a second."""
+        base = 1_700_000_000.0
+        reqs = []
+        for round_ in range(2):
+            offset = round_ * 300.2        # second round starts before the first ends
+            reqs += [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                                    start=base + offset + i, end=base + offset + i + 300.0,
+                                    outcome="client_idle_timeout",
+                                    error_message="Stream ended without finish_reason")
+                     for i in range(10)]
+        m = self.m.analyse(reqs, 1.0)
+        self.assertEqual(len(m["timeout_storms"]), 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.m.persist_run(m, 1.0, store=tmp, since=base - 3600, until=base + 3600)
+            with open(out["ledger"]) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        self.assertEqual(len([r for r in rows if r["kind"] == "timeout_storm"]), 2)
+
+    def test_the_same_cohort_seen_twice_is_one_row(self):
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 300.0,
+                               outcome="client_idle_timeout",
+                               error_message="Stream ended without finish_reason")
+                for i in range(10)]
+        m = self.m.analyse(reqs, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.m.persist_run(m, 1.0, store=tmp, since=base - 3600, until=base + 3600)
+            self.m.persist_run(m, 1.0, store=tmp, since=base - 3600, until=base + 3600)
+            with open(os.path.join(tmp, "findings.jsonl")) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        self.assertEqual(len([r for r in rows if r["kind"] == "timeout_storm"]), 1)
+
+    def test_a_small_pack_is_not_starved_by_a_larger_one(self):
+        """claude-code: the larger cohort won the window and the smaller was dropped."""
+        base = 1_700_000_000.0
+        small = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                                start=base + off - 10.0, end=base + off,
+                                outcome="request_timeout") for off in (0, 1, 2)]
+        large = [self.m.Request(harness="pi", session="s", model="deepseek-4.1-flash",
+                                start=base + off - 60.0, end=base + off,
+                                outcome="request_timeout") for off in (3, 4, 5, 6)]
+        storms = self.m.timeout_storms(small + large)
+        self.assertEqual(sorted(s["cohort"] for s in storms), [3, 4])
+
+    def test_distinct_cohorts_in_one_run_are_both_recorded(self):
+        """codex: in-run fuzzy matching discarded a second, closer cohort."""
+        base = 1_700_000_000.0
+        reqs = []
+        for start_off in (0, 40, 50, 61, 62, 63):
+            reqs.append(self.m.Request(harness="pi", session="s", model="glm-5.3",
+                                       start=base + start_off, end=base + start_off + 300.0,
+                                       outcome="client_idle_timeout",
+                                       error_message="Stream ended without finish_reason"))
+        m = self.m.analyse(reqs, 1.0)
+        self.assertEqual(len(m["timeout_storms"]), 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.m.persist_run(m, 1.0, store=tmp, since=base - 3600, until=base + 3600)
+            with open(out["ledger"]) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        self.assertEqual(len([r for r in rows if r["kind"] == "timeout_storm"]), 2)
+
+    def test_context_error_with_a_model_param_is_not_a_missing_model(self):
+        """codex: `param: model` alone classified a context-length 400 as a stale id."""
+        err = ('400: {"message":"This model\'s maximum context length is 524288 tokens. '
+               'However, you requested 131072 output tokens","param":"model"}')
+        self.assertEqual(self.m.classify({"error_message": err, "stop_reason": "error"}),
+                         "context_length_exceeded")
+
+    def test_a_cohort_cut_by_a_window_is_recorded_as_seen(self):
+        """Documented trade: an exact member set means a cut cohort can be
+        recorded twice, but an event is never lost. The report is authoritative."""
+        base = 1_700_000_000.0
+        full = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 300.0,
+                               outcome="client_idle_timeout",
+                               error_message="Stream ended without finish_reason")
+                for i in range(10)]
+        with tempfile.TemporaryDirectory() as tmp:
+            self.m.persist_run(self.m.analyse(full[:5], 1.0), 1.0, store=tmp,
+                               since=base - 3600, until=base + 6)
+            self.m.persist_run(self.m.analyse(full, 1.0), 1.0, store=tmp,
+                               since=base - 3600, until=base + 3600)
+            with open(os.path.join(tmp, "findings.jsonl")) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        self.assertEqual(len([r for r in rows if r["kind"] == "timeout_storm"]), 2,
+                         "a partial view and the full view are both recorded")
+
+    def test_unclassified_errors_are_reported_but_not_ledgered(self):
+        """No stable occurrence boundary exists for a stream of sightings."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + off, end=base + off + 5.0,
+                               outcome="other_error", error_message="backend unavailable")
+                for off in (0, 600, 3 * 3600)]
+        m = self.m.analyse(reqs, 24.0)
+        self.assertEqual(len(m["unknown_error_bursts"]), 2, "bursts are still surfaced")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.m.persist_run(m, 24.0, store=tmp, since=base - 86400, until=base + 86400)
+            with open(out["ledger"]) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+            self.assertTrue(any(f["kind"] == "unknown_error" for f in out["findings"]),
+                            "the report still carries the finding")
+        self.assertEqual([r for r in rows if r["kind"] == "unknown_error"], [])
+
+    def test_duration_outliers_do_not_veto_a_valid_subset(self):
+        """codex: neighbouring outliers widened every anchor past the tolerance."""
+        base = 1_700_000_000.0
+        durs = (301.125, 301.875, 300.875, 300.0, 302.125, 303.0)
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + d, outcome="request_timeout")
+                for i, d in enumerate(durs)]
+        storms = self.m.timeout_storms(reqs)
+        self.assertEqual([s["cohort"] for s in storms], [3])
+
+    def test_bands_do_not_pool_models_or_tiers(self):
+        """codex: a slow background model masqueraded as a concurrency gradient."""
+        base = 1_700_000_000.0
+        fast = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i * 100, end=base + i * 100 + 10.0,
+                               outcome="completed", tier="interactive") for i in range(3)]
+        slow = [self.m.Request(harness="pi", session="s", model="deepseek-4.1-flash",
+                               start=base + 5000, end=base + 5600.0,
+                               outcome="completed", tier="background") for _ in range(10)]
+        b = self.m.saturation_bands(fast + slow)
+        self.assertFalse(b["top_inflation_flagged"],
+                         "different models and tiers are not a gradient")
+        self.assertEqual(len(b["groups"]), 2)
+
+    def test_the_summary_comes_from_one_group(self):
+        """codex: the summary took bands from the busiest group and a ratio from another."""
+        base = 1_700_000_000.0
+        busy = [self.m.Request(harness="pi", session="s", model="model-a",
+                               start=base + i * 50, end=base + i * 50 + 5.0,
+                               outcome="completed") for i in range(20)]
+        flagged = ([self.m.Request(harness="pi", session="s", model="model-b",
+                                   start=base + 9000 + i * 100,
+                                   end=base + 9000 + i * 100 + 5.0,
+                                   outcome="completed") for i in range(3)]
+                   + [self.m.Request(harness="pi", session="s", model="model-b",
+                                     start=base + 4000, end=base + 4060.0,
+                                     outcome="completed") for _ in range(10)])
+        b = self.m.saturation_bands(busy + flagged)
+        if b["top_inflation_flagged"]:
+            top_n = b["bands"][-1]["n"]
+            self.assertGreaterEqual(top_n, 5,
+                                    "a flagged summary must have samples in its own top band")
+        findings = self.m.run_findings({"timeout_storms": [], "unknown_errors": [],
+                                        "saturation_bands": b, "per_model_deadlines": {},
+                                        "by_outcome": {}})
+        for f in findings:
+            if f["kind"] == "saturation_gradient":
+                self.assertGreater(f["count"], 0)
+
+    def test_member_identity_prefers_response_ids(self):
+        """codex: session filenames made the same cohort hash differently by root."""
+        base = 1_700_000_000.0
+
+        def cohort(session):
+            return [self.m.Request(harness="pi", session=session, model="glm-5.3",
+                                   start=base + i, end=base + i + 300.0,
+                                   outcome="client_idle_timeout", response_id=f"r-{i}")
+                    for i in range(3)]
+        self.assertEqual(self.m._member_id(cohort("mirror-a/proj/x.jsonl")),
+                         self.m._member_id(cohort("mirror-b/proj/y.jsonl")))
+
+    def test_two_windows_ending_in_the_same_hour_keep_both_reports(self):
+        """pi reviewer: a 24h run at 10:05 and 10:50 overwrote each other."""
+        m = {"requests": 0, "by_outcome": {}, "per_model_deadlines": {},
+             "timeout_storms": [], "saturation_bands": {}, "unknown_errors": [], "by_run": []}
+        base = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.m.persist_run(m, 24.0, store=tmp, since=base, until=base + 86400)
+            b = self.m.persist_run(m, 24.0, store=tmp, since=base + 2700, until=base + 86400 + 2700)
+            self.assertNotEqual(a["path"], b["path"])
+            self.assertEqual(len([f for f in os.listdir(tmp) if f.endswith(".json")]), 2)
+
+    def test_an_implausible_duration_is_not_a_deadline(self):
+        """pi reviewer: a seconds-based archive yields decade-long 'durations'."""
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=0.0, end=90000.0, outcome="admission_timeout")
+                for _ in range(3)]
+        d = self.m.per_model_deadlines(reqs)
+        self.assertEqual(d["glm-5.3"]["status"], "unknown")
+        self.assertIsNone(d["glm-5.3"]["deadline_s"])
+
+    def test_message_limit_and_harness_deadline_get_advice(self):
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 2.0, outcome="message_limit"),
+                self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 1200.0, outcome="harness_deadline")]
+        _, adj, _ = self.m.verdict(self.m.analyse(reqs, 1.0))
+        joined = " ".join(adj)
+        self.assertIn("period quota", joined)
+        self.assertIn("caller's own deadline", joined)
+
+    def test_filename_carries_the_whole_window(self):
+        """codex: two windows sharing a start minute and differing in end date collided."""
+        m = {"requests": 0, "by_outcome": {}, "per_model_deadlines": {},
+             "timeout_storms": [], "saturation_bands": {}, "unknown_errors": [], "by_run": []}
+        base = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.m.persist_run(m, 24.0, store=tmp, since=base, until=base + 86400)
+            b = self.m.persist_run(m, 48.0, store=tmp, since=base, until=base + 2 * 86400)
+            c = self.m.persist_run(m, 90.2 / 60, store=tmp, since=base, until=base + 5412)
+            d = self.m.persist_run(m, 90.5 / 60, store=tmp, since=base, until=base + 5430)
+            self.assertNotEqual(a["path"], b["path"])
+            self.assertEqual(len({x["path"] for x in (c, d)}), 2, "close lengths differ too")
+
+    def test_mixed_model_load_is_measured_on_the_lane(self):
+        """codex: concurrency per model hid a lane that was actually saturated."""
+        base = 1_700_000_000.0
+        reqs = []
+        for model in ("model-a", "model-b"):
+            reqs += [self.m.Request(harness="pi", session="s", model=model,
+                                    start=base, end=base + 60.0, outcome="completed")
+                     for _ in range(5)]
+        b = self.m.saturation_bands(reqs)
+        top = [g for g in b["groups"] if g["bands"][-1]["n"]]
+        self.assertTrue(top, "ten requests in flight must land in the top band")
+        self.assertEqual(top[0]["bands"][-1]["n"], 5)
+
+    def test_flat_experiment_roots_stay_distinct(self):
+        """codex: files directly under a root were all '(unattributed)'."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = []
+            for offset, name in enumerate(("exp-one", "exp-two")):
+                d = os.path.join(tmp, name)
+                os.makedirs(d)
+                start_ms = int((now - 900 - offset) * 1000)
+                ts = datetime.datetime.fromtimestamp(now - 800 - offset, datetime.timezone.utc)
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m",
+                                      start_ms, None) + "\n")
+                roots.append(d)
+            reqs = self.m.collect(1, ["pi"], pi_roots=roots)
+        self.assertEqual(len({r.run for r in reqs}), 2)
+
+    def test_root_order_does_not_change_attribution(self):
+        """pi reviewer: the first root listed decided which copy survived."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            for offset, store in enumerate(("z-archive", "a-archive")):
+                d = os.path.join(tmp, store, "project")
+                os.makedirs(d)
+                start_ms = int((now - 900 - offset) * 1000)
+                ts = datetime.datetime.fromtimestamp(now - 800 - offset, datetime.timezone.utc)
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m",
+                                      start_ms, None) + "\n")
+            roots = [os.path.join(tmp, "z-archive"), os.path.join(tmp, "a-archive")]
+            forward = self.m.collect(1, ["pi"], pi_roots=roots)
+            backward = self.m.collect(1, ["pi"], pi_roots=list(reversed(roots)))
+        self.assertEqual(sorted(r.run for r in forward), sorted(r.run for r in backward))
+
+    def test_unknown_deadline_reports_the_raw_observation_count(self):
+        """pi reviewer: five deaths with unusable durations read as 'fewer than 3'."""
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=0.0, end=90000.0, outcome="admission_timeout")
+                for _ in range(5)]
+        m = self.m.analyse(reqs, 1.0)
+        self.assertEqual(m["per_model_deadlines"]["glm-5.3"]["seen_n"], 5)
+        _, adj, _ = self.m.verdict(m)
+        self.assertIn("5 death(s)", " ".join(adj))
+
+    def test_an_implausible_interval_never_reaches_the_minute_bins(self):
+        """codex: a seconds-based archive allocated 28 million minute buckets."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base / 1000.0, end=1.7e9,
+                               outcome="admission_timeout") for _ in range(3)]
+        m = self.m.analyse(reqs, 1.0)          # must not blow up or hang
+        self.assertEqual(m["requests"], 3, "the outcome is still counted")
+        self.assertEqual(m["by_minute"], [], "but it is not placed on a timeline")
+        self.assertEqual(m["peak_concurrency"], 0)
+
+    def test_incomplete_copy_does_not_beat_the_complete_one(self):
+        """codex: an incomplete mirrored copy claimed the response id."""
+        import datetime as _dt
+        with tempfile.TemporaryDirectory() as tmp:
+            now = time.time()
+            tss = (_dt.datetime.fromtimestamp(now - 60, _dt.timezone.utc)
+                   .strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+            late = (_dt.datetime.fromtimestamp(now - 30, _dt.timezone.utc)
+                    .strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+            # "a-first" sorts before "z-complete" and holds a partial response
+            for name, records in (
+                    ("a-first", [{"type": "user", "timestamp": tss},
+                                 {"type": "assistant", "timestamp": tss,
+                                  "message": {"id": "m-1", "model": "glm-5.3",
+                                              "usage": {"input_tokens": 1, "output_tokens": 0}}}]),
+                    ("z-complete", [{"type": "user", "timestamp": tss},
+                                    {"type": "assistant", "timestamp": late,
+                                     "message": {"id": "m-1", "model": "glm-5.3",
+                                                 "stop_reason": "end_turn",
+                                                 "usage": {"input_tokens": 1,
+                                                           "output_tokens": 99}}}])):
+                d = os.path.join(tmp, name)
+                os.makedirs(d)
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write("\n".join(json.dumps(r) for r in records) + "\n")
+            reqs = self.m.collect(1, ["claude-code"], claude_roots=[tmp])
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(reqs[0].out_tokens, 99, "the complete copy wins")
+        self.assertEqual(reqs[0].stop_reason, "end_turn")
+
+    def test_a_single_flat_root_is_named(self):
+        """both: one --pi-root holding files directly became '(unattributed)'."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            start_ms = int((now - 900) * 1000)
+            ts = datetime.datetime.fromtimestamp(now - 800, datetime.timezone.utc)
+            with open(os.path.join(tmp, "s.jsonl"), "w") as fh:
+                fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m",
+                                  start_ms, None) + "\n")
+            reqs = self.m.collect(1, ["pi"], pi_roots=[tmp])
+            self.assertEqual(len(reqs), 1)
+            self.assertEqual(reqs[0].run, f"pi:{os.path.basename(tmp)}",
+                             "the run is namespaced by harness and names its root")
+
+    def test_sources_reflect_what_was_read(self):
+        """pi reviewer: a typo'd root stayed in the stored identity."""
+        code, out, err = run("analyze", "--since", "1h", "--json",
+                             "--pi-root", "/nonexistent-luna-doctor-test",
+                             "--harness", "pi")
+        self.assertIn("is not a directory", err)
+        self.assertEqual(json.loads(out)["metrics"]["requests"], 0)
+
+    def test_window_units(self):
+        """pi reviewer: `w` and `y` were only covered by the skipped mirror test."""
+        self.assertEqual(self.m.window_hours("1w", False), 168.0)
+        self.assertEqual(self.m.window_hours("1y", False), 8760.0)
+        self.assertEqual(self.m.window_hours("90m", False), 1.5)
+        with self.assertRaises(ValueError):
+            self.m.window_hours("banana", False)
+
+    def test_per_run_timing_respects_the_sanity_gate(self):
+        """both: by_run inflated peaks and wall counts from decade-long intervals."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3", run="exp-1",
+                               start=base / 1000.0, end=1.7e9,
+                               outcome="client_idle_timeout") for _ in range(3)]
+        m = self.m.analyse(reqs, 1.0)
+        run = m["by_run"][0]
+        self.assertEqual(run["requests"], 3)
+        self.assertEqual(run["peak_concurrency"], 0)
+        self.assertEqual(run["wall_counts_s"], {})
+        self.assertEqual(run["slow_completions_over_290s"], 0)
+
+    def test_read_nothing_is_not_read_the_default_store(self):
+        """both: a rejected --pi-root was labelled as a default-store read."""
+        self.assertIn("pi:none", self.m._source_id(["pi"], [], None))
+        self.assertIn("pi:default", self.m._source_id(["pi"], None, None))
+
+    def test_runs_do_not_collide_across_harnesses(self):
+        """codex: pi/sessions and claude/sessions labelled the same run."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            for offset, harness in enumerate(("pi", "claude")):
+                d = os.path.join(tmp, harness, "sessions", "project")
+                os.makedirs(d)
+                start_ms = int((now - 900 - offset) * 1000)
+                ts = datetime.datetime.fromtimestamp(now - 800 - offset, datetime.timezone.utc)
+                stamp = ts.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                if harness == "pi":
+                    body = _pi_line(stamp, "m", start_ms, None)
+                else:   # claude-code shape: a user record then an assistant response
+                    body = "\n".join([
+                        json.dumps({"type": "user", "timestamp": stamp}),
+                        json.dumps({"type": "assistant", "timestamp": stamp,
+                                    "message": {"id": "m-claude", "model": "glm-5.3",
+                                                "stop_reason": "end_turn",
+                                                "usage": {"input_tokens": 1, "output_tokens": 2}}})])
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write(body + "\n")
+            reqs = self.m.collect(1, ["pi", "claude-code"],
+                                  pi_roots=[os.path.join(tmp, "pi", "sessions")],
+                                  claude_roots=[os.path.join(tmp, "claude", "sessions")])
+        self.assertEqual(len({r.run for r in reqs}), 2)
+
+    def test_cli_respects_no_store_and_store_dir(self):
+        """pi reviewer: the persistence gate had no CLI-level coverage."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as store:
+            start_ms = int((now - 900) * 1000)
+            ts = datetime.datetime.fromtimestamp(now - 800, datetime.timezone.utc)
+            with open(os.path.join(tmp, "s.jsonl"), "w") as fh:
+                fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m",
+                                  start_ms, None) + "\n")
+            code, _, err = run("analyze", "--since", "1h", "--json", "--pi-root", tmp,
+                               "--harness", "pi", "--no-store", "--store-dir", store)
+            self.assertIn(code, (0, 1), err)
+            self.assertEqual(os.listdir(store), [], "--no-store must write nothing")
+
+            code, _, err = run("analyze", "--since", "1h", "--json", "--pi-root", tmp,
+                               "--harness", "pi", "--store-dir", store)
+            self.assertIn(code, (0, 1), err)
+            names = os.listdir(store)
+            self.assertEqual(len([n for n in names if n.endswith(".json")]), 1)
+            self.assertIn("findings.jsonl", names)
+
+    def test_zero_length_timeouts_are_not_a_cohort(self):
+        """codex: a zero-length inferred interval joined a storm and flipped the exit code."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 0.5, outcome="request_timeout"),
+                self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + 0.1, end=base + 0.6, outcome="request_timeout"),
+                self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + 0.2, end=base + 0.2, outcome="request_timeout")]
+        self.assertEqual(self.m.timeout_storms(reqs), [])
+
+    def test_chart_ignores_implausible_intervals(self):
+        """codex: a decade-long interval stretched the chart axis across decades.
+
+        Rendered through the module rather than the CLI: `chart` takes no
+        --pi-root, so driving it through subprocess exited 2 and the assertion
+        never ran.
+        """
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 5.0, outcome="completed"),
+                self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base / 1000.0, end=1.7e9, outcome="completed")]
+        svg = self.m.svg_chart(reqs, self.m.analyse(reqs, 1.0), 1.0)
+        self.assertIn("<svg", svg)
+        self.assertNotIn("1970", svg[:6000], "the bad interval must not set the axis")
+
+    def test_complementary_copies_merge_into_one_complete_response(self):
+        """codex: a start and a terminal record live in different copies."""
+        import datetime as _dt
+        base = 1_700_000_000.0
+        early = _dt.datetime.fromtimestamp(base, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        late = _dt.datetime.fromtimestamp(base + 30, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, records in (
+                    # user record + fragment: has the start, no terminal data
+                    ("a-fragment", [{"type": "user", "timestamp": early},
+                                    {"type": "assistant", "timestamp": early,
+                                     "message": {"id": "m-1", "model": "glm-5.3",
+                                                 "usage": {"input_tokens": 1}}}]),
+                    # terminal record only: no preceding record, so no real start
+                    ("z-terminal", [{"type": "assistant",
+                                     "timestamp": late,
+                                     "message": {"id": "m-1", "model": "glm-5.3",
+                                                 "stop_reason": "end_turn",
+                                                 "usage": {"output_tokens": 99}}}])):
+                d = os.path.join(tmp, name)
+                os.makedirs(d)
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write("\n".join(json.dumps(r) for r in records) + "\n")
+            reqs = self.m.collect(8760 * 100, ["claude-code"], claude_roots=[tmp])
+        self.assertEqual(len(reqs), 1)
+        r = reqs[0]
+        self.assertEqual(r.stop_reason, "end_turn", "terminal metadata survives")
+        self.assertEqual(r.out_tokens, 99, "usage survives")
+        self.assertIsNotNone(r.start)
+        self.assertGreater(r.end - r.start, 0, "the start from the other copy survives")
+
+    def test_a_fragment_before_the_window_still_supplies_the_start(self):
+        """both: filtering before merging dropped the only copy with a real start."""
+        import datetime as _dt
+        base = 1_700_000_000.0
+        early = _dt.datetime.fromtimestamp(base, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        frag = _dt.datetime.fromtimestamp(base + 5, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        late = _dt.datetime.fromtimestamp(base + 30, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, records in (
+                    ("a-fragment", [{"type": "user", "timestamp": early},
+                                    {"type": "assistant", "timestamp": frag,
+                                     "message": {"id": "m-1", "model": "glm-5.3"}}]),
+                    ("z-terminal", [{"type": "assistant", "timestamp": late,
+                                     "message": {"id": "m-1", "model": "glm-5.3",
+                                                 "stop_reason": "end_turn",
+                                                 "usage": {"output_tokens": 5}}}])):
+                d = os.path.join(tmp, name)
+                os.makedirs(d)
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write("\n".join(json.dumps(r) for r in records) + "\n")
+            # window opens after the fragment's last record, before the terminal one
+            reqs = self.m.iter_claude([tmp], base + 10, base + 3600)
+        self.assertEqual(len(reqs), 1)
+        self.assertIsNotNone(reqs[0].start)
+        self.assertGreater(reqs[0].end - reqs[0].start, 0, "the pre-window start survives")
+        self.assertIn(reqs[0], self.m.timed(reqs), "and the request stays timed")
+
+    def test_the_start_survives_whichever_copy_is_read_first(self):
+        """both: applying pre-window starts per file made it order-dependent."""
+        import datetime as _dt
+        base = 1_700_000_000.0
+        early = _dt.datetime.fromtimestamp(base, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        frag = _dt.datetime.fromtimestamp(base + 5, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        late = _dt.datetime.fromtimestamp(base + 30, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        for terminal_name, fragment_name in (("a-terminal", "z-fragment"),
+                                             ("z-terminal", "a-fragment")):
+            with self.subTest(order=terminal_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    for name, records in (
+                            (fragment_name, [{"type": "user", "timestamp": early},
+                                             {"type": "assistant", "timestamp": frag,
+                                              "message": {"id": "m-1", "model": "glm-5.3"}}]),
+                            (terminal_name, [{"type": "assistant", "timestamp": late,
+                                              "message": {"id": "m-1", "model": "glm-5.3",
+                                                          "stop_reason": "end_turn",
+                                                          "usage": {"output_tokens": 5}}}])):
+                        d = os.path.join(tmp, name)
+                        os.makedirs(d)
+                        with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                            fh.write("\n".join(json.dumps(r) for r in records) + "\n")
+                    reqs = self.m.iter_claude([tmp], base + 10, base + 3600)
+                self.assertEqual(len(reqs), 1)
+                self.assertGreater(reqs[0].end - reqs[0].start, 0,
+                                   "the pre-window start must not depend on file order")
+
+    def test_chart_and_fix_read_explicit_roots(self):
+        """pi reviewer: the flags existed only on analyze, so a mirror user had no chart."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+            start_ms = int((now - 900) * 1000)
+            ts = datetime.datetime.fromtimestamp(now - 800, datetime.timezone.utc)
+            with open(os.path.join(tmp, "s.jsonl"), "w") as fh:
+                fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m",
+                                  start_ms, None) + "\n")
+            svg = os.path.join(out, "c.svg")
+            code, _, err = run("chart", "--since", "1h", "--pi-root", tmp,
+                               "--harness", "pi", "--out", svg)
+            self.assertIn(code, (0, 1), err)
+            self.assertTrue(os.path.exists(svg))
+            code, _, err = run("fix", "--since", "1h", "--pi-root", tmp, "--harness", "pi")
+            self.assertIn(code, (0, 1), err)
+
+    def test_two_writers_do_not_share_a_temp_path(self):
+        """both: concurrent runs of the same window collided on `<path>.tmp`."""
+        m = {"requests": 0, "by_outcome": {}, "per_model_deadlines": {},
+             "timeout_storms": [], "saturation_bands": {}, "unknown_errors": [], "by_run": []}
+        now = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            self.m.persist_run(m, 1.0, store=tmp, since=now - 3600, until=now)
+            leftovers = [f for f in os.listdir(tmp) if f.startswith(".tmp-")]
+        self.assertEqual(leftovers, [], "no temp file survives a completed write")
+
+
+class FourthReviewRegressions(unittest.TestCase):
+    """Iteration 4 findings."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def test_disjoint_windows_with_equal_counts_are_two_occurrences(self):
+        """both: event findings that share a count but not a time must both record."""
+        day = 86400.0
+        base = 1_700_000_000.0
+
+        def window(t0):
+            return self.m.analyse([self.m.Request(harness="pi", session="s", model="glm-5.3",
+                                                  start=t0 + i, end=t0 + i + 300.0,
+                                                  outcome="client_idle_timeout",
+                                                  error_message="Stream ended without finish_reason")
+                                   for i in range(3)], 24.0)
+        a, b = window(base), window(base + day)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.m.persist_run(a, 24.0, store=tmp, since=1_699_900_000.0, until=1_700_000_120.0)
+            self.m.persist_run(b, 24.0, store=tmp,
+                               since=1_699_900_000.0 + day, until=1_700_000_120.0 + day)
+            with open(os.path.join(tmp, "findings.jsonl")) as fh:
+                rows = [json.loads(x) for x in fh if x.strip()]
+        # outcome rows are window summaries and stay out of the ledger; the two
+        # storms are a day apart and must both be recorded
+        self.assertEqual([r for r in rows if r["kind"] == "outcome"], [])
+        storms = [r for r in rows if r["kind"] == "timeout_storm"]
+        self.assertEqual(len(storms), 2, "two occurrences a day apart, not one")
+        self.assertNotEqual(storms[0]["event_start"], storms[1]["event_start"])
+
+    def test_a_bare_404_is_not_a_stale_model(self):
+        """both: any 404 got 'refresh your model list' advice and lost its unknown-error sighting."""
+        self.assertEqual(self.m.classify({"error_message": "404: Not Found",
+                                          "stop_reason": "error"}), "other_error")
+        self.assertNotEqual(self.m.classify({"error_message": '404 {"message":"endpoint does not exist"}',
+                                             "stop_reason": "error"}), "model_not_found")
+
+    def test_model_404_still_classifies(self):
+        patterns = [
+            "404: {\"message\":\"The model 'glm-5.3-vision' does not exist\",\"param\":\"model\"}",
+            '{"code":"model_not_found","message":"nope"}',
+        ]
+        for err in patterns:
+            with self.subTest(err=err):
+                self.assertEqual(self.m.classify({"error_message": err, "stop_reason": "error"}),
+                                 "model_not_found")
+
+    def test_glob_metacharacters_in_a_root_are_literal(self):
+        """codex: a directory named [backup] was read as a pattern."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            d = os.path.join(tmp, "[backup]")
+            os.makedirs(d)
+            start_ms = int((now - 900) * 1000)
+            ts = datetime.datetime.fromtimestamp(now - 800, datetime.timezone.utc)
+            with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m", start_ms, None) + "\n")
+            reqs = self.m.collect(1, ["pi"], pi_roots=[d])
+        self.assertEqual(len(reqs), 1)
+
+
+class FifthReviewRegressions(unittest.TestCase):
+    """Iteration 5 findings."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def test_unknown_error_does_not_claim_concurrency_pressure(self):
+        """claude-code: one unclassified string flipped the exit code to 'pressure'."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 5.0, outcome="other_error",
+                               error_message="some new gateway string")]
+        head, adj, code = self.m.verdict(self.m.analyse(reqs, 1.0))
+        self.assertNotIn("Concurrency pressure", head)
+        self.assertTrue(any("matched no known class" in a for a in adj))
+
+    def test_route_404_is_not_a_missing_model(self):
+        """claude-code: `/v1/models does not exist` matched the loose word clause."""
+        for err in ("404: endpoint /v1/models does not exist",
+                    "Route /v1/models not found"):
+            with self.subTest(err=err):
+                self.assertNotEqual(
+                    self.m.classify({"error_message": err, "stop_reason": "error"}),
+                    "model_not_found")
+
+    def test_report_filename_distinguishes_close_window_lengths(self):
+        """codex: 90.2m and 90.5m collided on one file and one was discarded."""
+        m = {"requests": 0, "by_outcome": {}, "per_model_deadlines": {},
+             "timeout_storms": [], "saturation_bands": {}, "unknown_errors": [], "by_run": []}
+        now = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.m.persist_run(m, 90.2 / 60, store=tmp, since=now - 5412, until=now)
+            b = self.m.persist_run(m, 90.5 / 60, store=tmp, since=now - 5430, until=now)
+        self.assertNotEqual(a["path"], b["path"])
+
+    def test_duration_clustering_does_not_chain(self):
+        """codex: 60s and 61.2s joined two cohorts through intermediate samples."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + d, outcome="request_timeout")
+                for d in (60.0, 60.6, 61.2)]
+        self.assertEqual(self.m.timeout_storms(reqs), [],
+                         "tolerance is measured against the cohort, not the previous sample")
+
+    def test_runs_are_root_qualified(self):
+        """codex: archive-a/project and archive-b/project collapsed into one run."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            for offset, store in enumerate(("archive-a", "archive-b")):
+                d = os.path.join(tmp, store, "project")
+                os.makedirs(d)
+                # distinct response ids: the parser dedupes on them across roots
+                start_ms = int((now - 900 - offset) * 1000)
+                ts = datetime.datetime.fromtimestamp(now - 800 - offset, datetime.timezone.utc)
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m",
+                                      start_ms, None) + "\n")
+            reqs = self.m.collect(1, ["pi"], pi_roots=[os.path.join(tmp, "archive-a"),
+                                                      os.path.join(tmp, "archive-b")])
+        self.assertEqual(len({r.run for r in reqs}), 2)
+
+    def test_model_without_usable_durations_still_reports_unknown(self):
+        """codex: admission failures with no start timestamp vanished entirely."""
+        reqs = [self.m.Request(harness="pi", session="s", model="mystery",
+                               start=None, end=1_700_000_100.0, outcome="admission_timeout")]
+        d = self.m.per_model_deadlines(reqs)
+        self.assertEqual(d["mystery"]["status"], "unknown")
+        self.assertEqual(d["mystery"]["n"], 0)
+
+
+class SixthReviewRegressions(unittest.TestCase):
+    """Iteration 6 findings."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def test_a_stranger_elsewhere_cannot_split_a_pack(self):
+        """codex: 299.4s hours earlier partitioned the 300.x pack away from its peers."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base - 7200, end=base - 7200 + 299.4,
+                               outcome="request_timeout"),
+                self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 300.2, outcome="request_timeout"),
+                self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + 0.3, end=base + 300.5, outcome="request_timeout"),
+                self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + 0.4, end=base + 300.6, outcome="request_timeout")]
+        storms = self.m.timeout_storms(reqs)
+        self.assertEqual([s["cohort"] for s in storms], [3])
+
+    def test_serial_timeouts_are_not_a_pack(self):
+        """codex: three serial 5s timeouts were called a synchronous cohort."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + off, end=base + off + 5.0,
+                               outcome="request_timeout")
+                for off in (0, 10, 20)]
+        self.assertEqual(self.m.timeout_storms(reqs), [],
+                         "peak concurrency of one is a slow client, not a fan-out")
+
+    def test_roots_sharing_a_basename_stay_distinct(self):
+        """codex: /archive-a/pi and /archive-b/pi both reduced to pi/project."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            for offset, store in enumerate(("archive-a", "archive-b")):
+                d = os.path.join(tmp, store, "pi", "project")
+                os.makedirs(d)
+                start_ms = int((now - 900 - offset) * 1000)
+                ts = datetime.datetime.fromtimestamp(now - 800 - offset, datetime.timezone.utc)
+                with open(os.path.join(d, "s.jsonl"), "w") as fh:
+                    fh.write(_pi_line(ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "m",
+                                      start_ms, None) + "\n")
+            reqs = self.m.collect(1, ["pi"], pi_roots=[
+                os.path.join(tmp, "archive-a", "pi"),
+                os.path.join(tmp, "archive-b", "pi")])
+        self.assertEqual(len({r.run for r in reqs}), 2)
+
+
+class SeventhReviewRegressions(unittest.TestCase):
+    """Iteration 7 findings, all in the cohort scanner."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _r(self, end_off, dur, model="glm-5.3", oc="admission_timeout"):
+        base = 1_700_000_000.0
+        return self.m.Request(harness="pi", session="s", model=model,
+                              start=base + end_off - dur, end=base + end_off, outcome=oc)
+
+    def test_interleaved_packs_are_both_reported(self):
+        """both: emitting one cohort consumed members of the other, interleaved one."""
+        slow = [self._r(off, 120.2, "glm-5.3") for off in (300, 310, 320)]
+        fast = [self._r(off, 60.3, "deepseek-4.1-flash") for off in (305, 315, 325)]
+        storms = self.m.timeout_storms(slow + fast)
+        self.assertEqual(sorted(s["cohort"] for s in storms), [3, 3])
+        self.assertEqual(len({s["duration_s"] for s in storms}), 2)
+
+    def test_equal_valued_requests_terminate(self):
+        """both: list.index on equal Requests could stall the scan forever."""
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 300.0, outcome="request_timeout")
+                for _ in range(4)]
+        storms = self.m.timeout_storms(reqs)      # must return, not spin
+        self.assertEqual(len(storms), 1)
+        self.assertEqual(storms[0]["cohort"], 4)
+
+    def test_a_concurrent_pack_is_not_shadowed_by_a_larger_serial_cluster(self):
+        """codex: the biggest cluster won on size, then failed the overlap guard."""
+        concurrent = [self._r(off, 10.0, oc="request_timeout") for off in (0, 1, 2)]
+        serial = [self._r(off, 5.0, oc="request_timeout") for off in (20, 30, 40, 50)]
+        storms = self.m.timeout_storms(concurrent + serial)
+        self.assertEqual([s["cohort"] for s in storms], [3])
+        self.assertAlmostEqual(storms[0]["duration_s"], 10.0)
 
 
 if __name__ == "__main__":
