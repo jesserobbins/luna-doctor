@@ -2491,6 +2491,21 @@ def _add_style(sp) -> None:
                          "terminal and plain otherwise (default)")
 
 
+def probe_required_message(cmd: str, n: int, model: str, budget_s: float) -> str:
+    """What a burst would do, stated without running it.
+
+    LunaRoute bills concurrent sessions, so the message counts sessions,
+    not usage of any other kind.
+    """
+    width = f"{n:g}"
+    if cmd == "compare":
+        return (f"compare would open two bursts of {width} concurrent sessions each "
+                f"at {model} (and its -background twin) for up to {budget_s:g}s; "
+                f"pass --enable-probe to run it")
+    return (f"{cmd} would open {width} concurrent sessions at {model} "
+            f"for up to {budget_s:g}s; pass --enable-probe to run it")
+
+
 def main(argv: list[str] | None = None) -> int:
     # The gate is not resolved yet when argparse builds help text, so the
     # prerelease banner decides inline: no ANSI when NO_COLOR is set or
@@ -2523,22 +2538,30 @@ def main(argv: list[str] | None = None) -> int:
     _add_style(a)
     a.set_defaults(func=cmd_analyze)
 
-    p = sub.add_parser("probe", help="measure the gateway at a chosen burst width")
+    p = sub.add_parser("probe", help="measure the gateway at a chosen burst width "
+                                      "(needs --enable-probe to actually open one)")
     p.add_argument("--n", type=int, default=10)
     p.add_argument("--model", default="glm-5.3")
     p.add_argument("--max-tokens", type=int, default=800)
     p.add_argument("--timeout", type=float, default=320.0)
     p.add_argument("--max-seconds", type=float, default=170.0)
+    p.add_argument("--enable-probe", action="store_true",
+                   help="open the burst; without this flag luna-doctor only says "
+                        "what it would open")
     p.add_argument("--json", action="store_true")
     _add_style(p)
     p.set_defaults(func=cmd_probe)
 
-    c = sub.add_parser("compare", help="run the same burst on a model and its -background twin")
+    c = sub.add_parser("compare", help="run the same burst on a model and its -background twin "
+                                       "(needs --enable-probe to actually open one)")
     c.add_argument("--n", type=int, default=10)
     c.add_argument("--model", default="glm-5.3")
     c.add_argument("--max-tokens", type=int, default=800)
     c.add_argument("--timeout", type=float, default=320.0)
     c.add_argument("--max-seconds", type=float, default=170.0)
+    c.add_argument("--enable-probe", action="store_true",
+                   help="open the bursts; without this flag luna-doctor only says "
+                        "what they would open")
     c.add_argument("--json", action="store_true")
     _add_style(c)
     c.set_defaults(func=cmd_compare)
@@ -2575,6 +2598,13 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.cmd in ("probe", "compare") and getattr(args, "n", 1) < 1:
         print("luna-doctor: --n must be at least 1", file=sys.stderr)
+        return 2
+    # A burst opens real concurrent sessions on the account, so it stays
+    # behind an explicit opt-in: without the flag we say what it would do
+    # and nothing is opened.
+    if args.cmd in ("probe", "compare") and not args.enable_probe:
+        print(probe_required_message(args.cmd, args.n, args.model, args.max_seconds),
+              file=sys.stderr)
         return 2
     # One style resolution per command. `--json` bypasses styling entirely:
     # no Style is constructed on that path, so no code can reach the envelope.

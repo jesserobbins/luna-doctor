@@ -135,6 +135,25 @@ class ExitCodes(unittest.TestCase):
         self.assertEqual(code, 2)
 
 
+class ProbeGate(unittest.TestCase):
+    def test_probe_without_the_flag_refuses_and_names_the_width(self):
+        code, out, err = run("probe", "--n", "8")
+        self.assertEqual(code, 2)
+        self.assertIn("--enable-probe", err)
+        self.assertIn("8 concurrent sessions", err)
+        self.assertEqual(out, "")
+
+    def test_compare_without_the_flag_refuses(self):
+        code, _, err = run("compare", "--n", "4")
+        self.assertEqual(code, 2)
+        self.assertIn("--enable-probe", err)
+
+    def test_message_says_concurrency_not_credits(self):
+        code, _, err = run("probe", "--n", "8")
+        for forbidden in ("credit", "token", "cost", "spend"):
+            self.assertNotIn(forbidden, err.lower())
+
+
 class Chart(unittest.TestCase):
     def _chart(self, *extra):
         d = tempfile.mkdtemp()
