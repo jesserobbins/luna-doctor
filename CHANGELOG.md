@@ -9,8 +9,7 @@ Versioning policy:
 - **MAJOR** — a change that makes existing config advice wrong or unsafe, or a
   breaking change to the `--json` envelope or CLI flags.
 - **MINOR** — new commands, new harness support, new measurements.
-- **PATCH** — corrections to measured constants, wording, or fixes that do not
-  change the interface.
+- **PATCH** — corrections to wording or fixes that do not change the interface.
 - `schema` in the `--json` envelope is bumped independently when the document
   shape changes, so a stored report can be read back correctly.
 - Work in progress accumulates under **Unreleased**. The version is bumped
@@ -22,60 +21,24 @@ Versioning policy:
 
 ### Added
 
-- `--pi-root` / `--claude-root` (repeatable): read pi-format or claude-code stores from mirrored archives instead of the live defaults. Fixes burst-forensics against offline mirrors where mtime pruning hid the window.
-- Per-model admission deadlines (median over `admission_timeout` durations, `unknown` when n<3); removes the single `admission_deadline_s` constant from `contract`.
-- Timeout-storm detector, saturation bands (with ≥5-sample minimum), unknown-error surfacing, wall counts + slow completions, and extraction persistence with an append-only `findings.jsonl` ledger.
+- `--pi-root` / `--claude-root` (repeatable): read pi-format or claude-code stores from mirrored archives instead of the live defaults.
+- Per-model admission deadlines (measured per model; `unknown` when too few observations), reported in `metrics.per_model_deadlines`.
+- Timeout-storm detector, saturation bands (with minimum-sample guard), unknown-error surfacing, wall counts + slow completions, and extraction persistence with an append-only `findings.jsonl` ledger.
 - New outcome classes (`org_concurrency_limit`, `model_not_found`, `context_length_exceeded`, `payload_too_large`, `harness_deadline`, `message_limit`) and `w`/`y` duration units for `--since`.
-- Swamp visibility: `discover` reports `stores.swamp`, `analyze` emits `metrics.swamp` with combined-pressure warning, `fix --agent swamp` advises `SWAMP_EXTRACT_CONCURRENCY` / `SWAMP_LLM_CONCURRENCY` with a combined budget, `probe` adds a swamp headroom note. Schema → 3.
+- Swamp visibility: `discover` reports `stores.swamp`, `analyze` emits `metrics.swamp` with a combined-pressure warning, `fix --agent swamp` advises `SWAMP_EXTRACT_CONCURRENCY` / `SWAMP_LLM_CONCURRENCY` with a combined budget, `probe` adds a swamp headroom note. Schema → 3.
+- `luna-doctor chart` (standalone SVG) and minute-level concurrency series in `analyze`.
 
 ### Changed
 
 - License changed from MIT to Apache-2.0.
 - Releases use prerelease tags (`v0.1.1-alpha.1`); documentation reflects the alpha status.
 
-### Added
-
-- `luna-doctor chart` writes a standalone SVG: requests in flight over time,
-  split by tier with the burst cap and advised fan-out drawn in, and every
-  request's end-to-end latency on a log axis with the 120.2s admission deadline
-  and the 300s client idle budget as reference walls. Failures are plotted on the
-  wall that killed them, so a burst's tail is visible pushing into it.
-- `--width`, `--height`, `--out` and `--open` for the chart; `--json` reports the
-  written path plus the metrics.
-- Minute-level concurrency series in `analyze`: per UTC minute, the max requests
-  in flight, how many started, and how many died on admission — the finest grain
-  the request windows support, and finer than agentsview's 5-minute activity
-  bucket, so a burst can be lined up against the 120.2s admission deadline.
-
-### Changed
-
-- License changed from MIT to Apache-2.0.
-
 ## [0.1.0] - 2026-10-21
 
 ### Added
 
-- `luna-doctor analyze` — reconstructs each model request from pi and
-  claude-code session stores (read-only) and classifies outcomes against the
-  measured gateway contract: admission death at 120.2s, silent stall at the
-  client idle budget, upstream 5xx, rate limit, abort, connection error.
-- `luna-doctor fix` — per-agent copy-paste config for pi, claude-code and codex,
-  built only from keys verified in the installed bundles or their shipped docs.
-  Backs up, validates, merges to a temp file, then moves it into place.
-- `luna-doctor probe` / `compare` — live burst measurement capturing
-  `x-lunaroute-service-class`, `x-lunaroute-service-tier` and
-  `x-lunaroute-warning: overflowed-to-background`; the tier comparison shows the
-  interactive tier being killed at the admission deadline while the `-background`
-  twin is admitted and answers in minutes.
+- `luna-doctor analyze` — reconstructs each model request from pi and claude-code session stores (read-only) and classifies outcomes against measured gateway behaviour.
+- `luna-doctor fix` — per-agent copy-paste config for pi, claude-code and codex, backed by keys verified in the installed bundles or their shipped docs. Each block backs up, validates, and merges to a temp file before moving into place.
+- `luna-doctor probe` / `compare` — live burst measurement capturing tier and demotion headers; shows how the interactive tier and its `-background` twin behave under load.
 - `luna-doctor discover` — what log stores exist, how big, how fresh.
 - `skills/luna-doctor/SKILL.md` — the agent-facing skill.
-
-### Notes
-
-- Measured facts underlying the classification live in `CONTRACT` and in the
-  private research notes: 25.2s before SSE headers, 120.2s admission deadline,
-  interactive burst cap of 10, overflow demoted to the background tier, SSE
-  keep-alive every ~10s, background first token observed at 633s, pi's own idle
-  budget at 300s.
-- `x-lunaroute-queue-ms` is reported by the gateway as `0` even on requests that
-  waited ten minutes, so the tool never uses it.
