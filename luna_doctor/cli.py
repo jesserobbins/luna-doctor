@@ -49,14 +49,18 @@ from datetime import datetime, timezone
 
 from luna_doctor import render_share
 from luna_doctor import report
+from luna_doctor import sources
 from luna_doctor.render_pretty import render_pretty, reveal, style_for
+from luna_doctor.sources import (CLAUDE_STORE, CODEX_STORE, GATEWAY_HOST,
+                                 PI_STORE, SWAMP_EXTRACT_CONCURRENCY_DEFAULT,
+                                 SWAMP_LLM_CONCURRENCY_DEFAULT)
 
 VERSION = "0.1.1-alpha.3"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
-SCHEMA_VERSION = 4         # 3: additive swamp contribution (metrics.swamp)
-                           # 4: capacity fields renamed for the LunaRoute
-                           #     vocabulary - the contract's advised-concurrency
-                           #     key, and the fix findings' field for the
-                           #     account's priority concurrency
+SCHEMA_VERSION = 4         # 4: capacity fields renamed to the LunaRoute
+                           #     vocabulary (contract.advised_concurrency,
+                           #     findings.priority_concurrency: null until
+                           #     the plan pass) and the additive combined
+                           #     snapshot (metrics.snapshot)
 
 # ---- measured constants -----------------------------------------------------
 CONTRACT = {
@@ -90,10 +94,8 @@ CAP_COPY = ("the gateway admits roughly this many interactive requests at once; 
             "the admitted width is specific to the account and cannot be read "
             "from these logs")
 
-PI_STORE = "~/.pi/agent/sessions"
-CLAUDE_STORE = "~/.claude/projects"
-CODEX_STORE = "~/.codex/sessions"
-GATEWAY_HOST = "gw.lunaroute.com"
+# Harness store locations, the gateway host and the swamp knob defaults live
+# in sources.py - the data-collection layer - and are imported above.
 LR_CONFIG = "~/.config/lunaroute/config.json"
 
 
@@ -118,6 +120,13 @@ class Request:
     outcome: str = "unknown"
     thinking_chars: int = 0
     text_chars: int = 0
+    # The harness's own usage record, as logged, per harness and never merged:
+    # pi writes input/cacheRead/cacheWrite/output/totalTokens, claude-code
+    # input_tokens/cache_read_input_tokens/..., codex
+    # input_tokens/cached_input_tokens/... - and codex's input_tokens INCLUDES
+    # its cached tokens while pi's input EXCLUDES cacheRead. The normalized
+    # in_tokens/out_tokens fields stay as they were; this carries the rest.
+    usage_raw: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float | None:
@@ -343,6 +352,7 @@ def iter_pi(roots: list[str], since: float, until: float | None = None,
                     response_id=rid,
                     thinking_chars=think,
                     text_chars=text,
+                    usage_raw=dict(usage),
                 )
                 req.tier, req.demoted, req.reason = tier_of(model)
                 req.outcome = classify(asdict(req))
@@ -463,6 +473,7 @@ def iter_claude(roots: list[str], since: float, until: float | None = None,
             stop_reason=g["stop"],
             error_message=g["err"],
             response_id=mid,
+            usage_raw=dict(u),
         )
         req.tier, req.demoted, req.reason = tier_of(req.model)
         req.outcome = classify(asdict(req))
@@ -674,79 +685,9 @@ def _swamp_store_info(repo_dir: str | None) -> dict:
 
 
 # ---- swamp analyze helpers ------------------------------------------------
-# Task-2 contract: iter_swamp + resolve_swamp_knobs with env -> .env.swamp -> default
-
-SWAMP_EXTRACT_CONCURRENCY_DEFAULT = 12  # extensions/models/obsidian_ideas.ts:4425
-SWAMP_LLM_CONCURRENCY_DEFAULT = 8        # extensions/models/obsidian_ideas.ts:1405
-SWAMP_LLM_MODEL_DEFAULT = "deepseek-4.1-flash-background"
-SWAMP_LLM_PROVIDER_DEFAULT = "lunaroute"
-
-def _parse_dotenv(path: str) -> dict:
-    """Parse a .env file (KEY=VALUE, optional export prefix, comments)."""
-    out: dict = {}
-    try:
-        with open(path, "r", errors="replace") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[7:].strip()
-                if "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip().strip("'\"")
-                if " #" in v:
-                    v = v.split(" #")[0].strip()
-                out[k] = v
-    except OSError:
-        pass
-    return out
-
-def resolve_swamp_knobs(repoDir: str | None = None) -> dict:
-    """Resolve swamp knobs with precedence env -> repo .env.swamp -> extension default.
-
-    Returns {extractConcurrency:{value,source}, llmConcurrency:{value,source}, model:{value,source}, provider:{value,source}}
-    where source in {env, .env.swamp, default}
-    """
-    if repoDir is None:
-        repoDir = _swamp_repo_dir()
-    dotenv_vals: dict = {}
-    if repoDir and os.path.isdir(repoDir):
-        dotenv_vals = _parse_dotenv(os.path.join(repoDir, ".env.swamp"))
-    def _resolve(key: str, default, is_int: bool = False) -> dict:
-        if key in os.environ:
-            raw = os.environ[key]
-            if is_int:
-                try:
-                    v = int(str(raw).strip())
-                    if v <= 0:
-                        raise ValueError
-                    return {"value": v, "source": "env"}
-                except Exception:
-                    pass
-            else:
-                return {"value": str(raw).strip().strip("'\""), "source": "env"}
-        if key in dotenv_vals:
-            raw = dotenv_vals[key]
-            if is_int:
-                try:
-                    v = int(str(raw).strip())
-                    if v <= 0:
-                        raise ValueError
-                    return {"value": v, "source": ".env.swamp"}
-                except Exception:
-                    pass
-            else:
-                return {"value": str(raw).strip(), "source": ".env.swamp"}
-        return {"value": default, "source": "default"}
-    return {
-        "extractConcurrency": _resolve("SWAMP_EXTRACT_CONCURRENCY", SWAMP_EXTRACT_CONCURRENCY_DEFAULT, True),
-        "llmConcurrency": _resolve("SWAMP_LLM_CONCURRENCY", SWAMP_LLM_CONCURRENCY_DEFAULT, True),
-        "model": _resolve("SWAMP_LLM_MODEL", SWAMP_LLM_MODEL_DEFAULT, False),
-        "provider": _resolve("SWAMP_LLM_PROVIDER", SWAMP_LLM_PROVIDER_DEFAULT, False),
-    }
+# Task-2 contract: iter_swamp with env -> .env.swamp -> default knob
+# resolution. The knob resolution itself lives in sources.swamp_knobs (one
+# reader, provenance per value); iter_swamp and the activity scan stay here.
 
 def _yaml_field_value(text: str, field: str) -> str | None:
     try:
@@ -863,7 +804,7 @@ def _collect_swamp_metrics(repoDir: str | None, since: float | None, until: floa
     if not disc.get("present"):
         return {"present": False}
     repo = disc.get("repoDir")
-    knobs = resolve_swamp_knobs(repo)
+    knobs = sources.swamp_knobs(repo)
     bh_counts = {"succeeded": 0, "running": 0, "failed": 0, "total": 0}
     wr_counts = {"succeeded": 0, "running": 0, "failed": 0, "total": 0}
     names: set = set()
@@ -2409,7 +2350,7 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
     """One-sentence headroom note for probe, or None when swamp is not in use.
 
     The probe measured probe_n; swamp's extract+llmConcurrency via
-    resolve_swamp_knobs() is a setting. They are reported as separate facts,
+    sources.swamp_knobs() is a setting. They are reported as separate facts,
     and the only sum sits inside an explicitly assumed "if ... would" clause.
     No network, no second probe.
     """
@@ -2417,7 +2358,7 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
         state = swamp_state(since=time.time() - 24 * 3600)
         if not state["in_use"]:
             return None
-        knobs = resolve_swamp_knobs(state["repo"])
+        knobs = sources.swamp_knobs(state["repo"])
         ex = int(knobs.get("extractConcurrency", {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT))
         ll = int(knobs.get("llmConcurrency", {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
     except Exception:
@@ -2690,6 +2631,26 @@ def _add_copy(sp) -> None:
                          "unchanged, so nothing is lost when no tool exists")
 
 
+def _add_network(sp) -> None:
+    """The offline/online pair for the commands that consume the snapshot.
+
+    The default is offline: a cached catalog serves (a stale one too, marked
+    stale), and the network is never touched. `--online` allows one
+    authenticated GET of the model catalog (refreshing the 24h cache) and a
+    probe of the not-yet-deployed /v1/limits; a network failure still never
+    turns the report into an error - what could not be fetched is reported
+    unknown.
+    """
+    grp = sp.add_mutually_exclusive_group()
+    grp.add_argument("--online", action="store_true",
+                     help="fetch the live model catalog from the gateway (one "
+                          "authenticated GET) and refresh the 24h disk cache; "
+                          "without this flag nothing leaves the machine")
+    grp.add_argument("--offline", action="store_true",
+                     help="never touch the network, even for the catalog "
+                          "(this is the default; stated for scripts)")
+
+
 def probe_required_message(cmd: str, n: int, model: str, budget_s: float) -> str:
     """What a burst would do, stated without running it.
 
@@ -2742,6 +2703,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--out", default=None, metavar="PATH",
                    help="path for the --share card PNG "
                         "(default: ./luna-doctor-share-<ts>.png)")
+    _add_network(a)
     _add_style(a)
     a.set_defaults(func=cmd_analyze)
 
@@ -2787,6 +2749,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="claude-code store to read instead of the default (repeatable)")
     f.add_argument("--json", action="store_true")
     _add_copy(f)
+    _add_network(f)
     f.set_defaults(func=None)
 
     ch = sub.add_parser("chart", help="write a standalone SVG of concurrency and latency")
@@ -2898,6 +2861,23 @@ def cmd_analyze(args) -> int:
             m["_swamp_configured_concurrency"] = m["swamp"].get("configuredConcurrency")
     except Exception:
         pass
+    # Combined snapshot (additive: metrics.snapshot joins the measured
+    # requests, the declared configs and the catalog; analyse()'s own
+    # numbers above are unchanged). Offline by default: a cached catalog
+    # serves, the network is touched only with --online, and a failure
+    # anywhere in here degrades to unknown, never to an error.
+    snap = None
+    try:
+        snap = sources.build_snapshot(reqs, since=now - hours * 3600, until=now,
+                                      allow_network=bool(getattr(args, "online", False)))
+        m["snapshot"] = snap.to_dict()
+    except Exception as e:
+        m["snapshot"] = {"provenance": sources.PROV_UNKNOWN,
+                         "reason": f"collection failed: {type(e).__name__}: {e}"[:200]}
+    if bool(getattr(args, "online", False)) and (snap is None or snap.catalog is None):
+        note = snap.catalog_note if snap is not None else m["snapshot"].get("reason", "")
+        print(f"luna-doctor: catalog unavailable ({note}); "
+              f"model limits are reported unknown", file=sys.stderr)
     head, adj, code = verdict(m)
     stored = None
     if m["requests"] and not getattr(args, "no_store", False):
