@@ -2,7 +2,7 @@
 
 > **Alpha.** The CLI, JSON schema, and measured gateway behaviour may evolve without a major bump until `1.0.0`. Pin to an exact tag if you embed this in automation.
 
-Diagnose what your LunaRoute agent traffic is doing to concurrency — and what to change.
+[**LunaRoute**](https://lunaroute.com) runs your coding agents on open models for a fixed monthly price — capacity is measured in concurrent requests, not tokens. This tool explains what your LunaRoute agent traffic is doing to that concurrency — and what to change.
 
 LunaRoute bills **concurrency**, not tokens. There is no quota or token-budget dimension to it: the account admits a fixed number of concurrent requests at once, and every symptom below is that number being exceeded. The gateway waits, or demotes the request to a background tier and holds the stream open with keep-alives while producing nothing — and part of that same overflow surfaces directly as a 429 (`rate_limit_error`, `CONCURRENT_REQUEST_LIMIT_EXCEEDED`). A 429 in your logs is therefore a concurrency symptom, not a quota you can wait out. Often the harness kills a stall with an error string of its own making instead, which is why grepping logs for 429 finds only part of the picture.
 
