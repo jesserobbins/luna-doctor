@@ -48,7 +48,7 @@ from luna_doctor import render_share
 from luna_doctor import report
 from luna_doctor.render_pretty import render_pretty, reveal, style_for
 
-VERSION = "0.1.1-alpha.1"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+VERSION = "0.1.1-alpha.2"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 3         # 3: additive swamp contribution (metrics.swamp)
 
 # ---- measured constants -----------------------------------------------------

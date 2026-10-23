@@ -1,4 +1,4 @@
-# luna-doctor — `0.1.1-alpha.1` · prerelease
+# luna-doctor — `0.1.1-alpha.2` · prerelease
 
 > **Alpha.** The CLI, JSON schema, and measured gateway behaviour may evolve without a major bump until `1.0.0`. Pin to an exact tag if you embed this in automation.
 

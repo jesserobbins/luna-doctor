@@ -16,6 +16,11 @@ venv/
 *.bak
 *.bak.*
 
+# artifacts the tool writes into the working directory
+luna-doctor-*.png
+luna-doctor-*.svg
+luna-doctor-share-*.png
+
 # editors / os
 .DS_Store
 *.swp

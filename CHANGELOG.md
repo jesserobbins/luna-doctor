@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.1.1-alpha.2] - 2026-10-23
+
 ### Added
 
 - `--style` on `discover`, `analyze`, `probe`, `compare` and `chart`: `auto` (the default) draws the pretty layout only on a terminal that is not `NO_COLOR`, `pretty` asks for it down a pipe too, and `plain` is undecorated text. `NO_COLOR` beats an explicit `--style pretty`, `CLICOLOR_FORCE` colours a pipe, and `--json` is never styled — no `Style` is constructed on that path. `chart` takes the flag for consistency; its console output is two plain lines and the picture is the SVG.
@@ -27,8 +29,9 @@ Versioning policy:
 
 - `discover`, `analyze`, `probe` and `compare` render from one report model: `report.py` builds the headline, `label: value` sections, adjustments and footnote, and `render_plain` / `render_pretty` draw it. Rows are no longer column-aligned, so a long value cannot break the layout and output survives a narrow terminal, a pipe, or a chat window that rewraps.
 - Swamp appears only when it is in use — files under `.swamp/data` or `.swamp/workflow-runs` written inside the window. A populated but idle store is installed, not running, and `analyze` no longer reports it. When swamp is in use, its fan-out is stated as the configured extract + verify setting and where that setting came from, never as measured concurrency.
-- Swamp-only pressure no longer sets exit 1. Pressure is measured, so a warning built from a configured fan-out does not: the combined pi + swamp total and the cap it was held against are gone from `analyze` entirely — what overlapping swamp work might mean is a risk to measure with `probe --enable-probe`, not a number the report computes.
-- Copy no longer states an interactive cap as a gateway fact. `analyze`, `probe`, `chart` and `fix` say the width is per account and point at `probe --enable-probe` to measure it.
+- Swamp-only pressure no longer sets exit 1. Pressure is measured, so a warning built from a configured fan-out does not: the combined pi + swamp total and the cap it was held against are gone from `analyze` entirely. Overlapping swamp work is an unmeasured risk, never a number the report computes.
+- Copy no longer states an interactive cap as a gateway fact, and no longer tells the reader to go and measure it. `analyze`, `probe`, `chart` and `fix` say the admitted width is specific to the account and cannot be read from these logs. `probe` remains available behind `--enable-probe`, as a guarded tool rather than a suggested next step.
+- Outcome copy says "blocked at admission" rather than "died on admission" or "admission deaths" — the request was refused at the gateway's admission deadline because the account was at its concurrency width. The `--json` keys keep their existing names.
 
 ### Fixed
 
