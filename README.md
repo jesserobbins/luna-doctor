@@ -2,7 +2,7 @@
 
 > **Alpha.** The CLI, JSON schema, and measured gateway behaviour may evolve without a major bump until `1.0.0`. Pin to an exact tag if you embed this in automation.
 
-Diagnose what your LunaRoute agent traffic is doing to concurrency — and what to change.
+[**LunaRoute**](https://lunaroute.com) runs your coding agents on open models for a fixed monthly price — capacity is measured in concurrent requests, not tokens. This tool explains what your LunaRoute agent traffic is doing to that concurrency — and what to change.
 
 LunaRoute bills **concurrency**, not tokens. There is no quota or token-budget dimension to it: the account admits a fixed number of concurrent requests at once, and every symptom below is that number being exceeded. The gateway waits, or demotes the request to a background tier and holds the stream open with keep-alives while producing nothing — and part of that same overflow surfaces directly as a 429 (`rate_limit_error`, `CONCURRENT_REQUEST_LIMIT_EXCEEDED`). A 429 in your logs is therefore a concurrency symptom, not a quota you can wait out. Often the harness kills a stall with an error string of its own making instead, which is why grepping logs for 429 finds only part of the picture.
 
@@ -101,7 +101,7 @@ Prints one block per agent: the exact file, the snippet, and a command that back
 
 ### `chart` — one picture
 
-A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requests in flight over time, split by tier, with the gateway's rough admission level and the advised concurrency as dashed rules. Bottom panel: every request end-to-end on a log axis, with reference walls for admission and idle budgets — failures sit on the wall that stopped them. A burst in the top panel at the same x as a cluster of failures below is the whole diagnosis.
+A standalone SVG (no fonts, scripts, or CDN — opens anywhere). One stacked-area graph: a single time axis and a single stack whose height is the account's total concurrent inference requests, layered by band — one model's traffic from one agent in one scheduling class (blues for priority, violets for background), each band named for the agent it belongs to ("glm-5.3 · pi"). A grey outline carries the busiest moment per column, an open circle marks the exact peak, red flare ticks hang where the gateway rejected a request, and the account's priority concurrency is one dashed rule when you declare it with `--plan`. The footer carries the provenance: what was measured, what was declared.
 
 ### `probe` / `compare` — what the gateway will actually admit
 
