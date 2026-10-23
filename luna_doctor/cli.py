@@ -98,6 +98,7 @@ class Request:
     response_id: str | None = None
     tier: str = "interactive"
     demoted: bool = False
+    reason: str = ""
     outcome: str = "unknown"
     thinking_chars: int = 0
     text_chars: int = 0
@@ -114,14 +115,24 @@ class Request:
         return self.outcome in ("admission_timeout", "client_idle_timeout", "stream_stalled")
 
 
-def tier_of(model: str | None, warning: str | None = None) -> tuple[str, bool]:
-    """Return (tier, demoted)."""
+def tier_of(model: str | None, warning: str | None = None) -> tuple[str, bool, str]:
+    """Return (tier, demoted, reason).
+
+    `reason` names how a demotion was seen: "overflow" when the interactive
+    cap spilled the request into the background tier, "no_entitlement" when
+    a `-background` request had no background entitlement and was downgraded
+    into the priority pool instead. Only a live response header carries a
+    warning; log records never do, so log-derived requests get "".
+    """
     m = (model or "").lower()
-    if "overflowed-to-background" in (warning or ""):
-        return "background", True
+    w = warning or ""
+    if "no-background-entitlement" in w:
+        return "interactive", True, "no_entitlement"
+    if "overflowed-to-background" in w:
+        return "background", True, "overflow"
     if m.endswith("-background") or "-background-" in m:
-        return "background", False
-    return "interactive", False
+        return "background", False, ""
+    return "interactive", False, ""
 
 
 def classify(rec: dict) -> str:
@@ -309,7 +320,7 @@ def iter_pi(roots: list[str], since: float, until: float | None = None,
                     thinking_chars=think,
                     text_chars=text,
                 )
-                req.tier, req.demoted = tier_of(model)
+                req.tier, req.demoted, req.reason = tier_of(model)
                 req.outcome = classify(asdict(req))
                 out.append(req)
     return out
@@ -429,7 +440,7 @@ def iter_claude(roots: list[str], since: float, until: float | None = None,
             error_message=g["err"],
             response_id=mid,
         )
-        req.tier, req.demoted = tier_of(req.model)
+        req.tier, req.demoted, req.reason = tier_of(req.model)
         req.outcome = classify(asdict(req))
         out.append(req)
     return out
@@ -1998,6 +2009,9 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
         notes.append(report.Row(
             "note", "claude-code span starts are inferred from record gaps; treat its\n"
                     "concurrency as a lower bound."))
+    notes.append(report.Row(
+        "note", "tiers here are inferred from model names; the served tier is not in these logs; "
+                "only a probe can see it."))
 
     sections = [report.Section(title, rows)
                 for title, rows in (("traffic", traffic), ("pressure", pressure),
@@ -2098,7 +2112,7 @@ def probe_one(idx: int, key: str, model: str, max_tokens: int, timeout: float,
         rec["wait_headers"] = round(t_hdr - t0, 2)
         rec["class"] = hdrs.get("x-lunaroute-service-class")
         rec["warning"] = hdrs.get("x-lunaroute-warning")
-        rec["tier"], rec["demoted"] = tier_of(model, rec["warning"])
+        rec["tier"], rec["demoted"], rec["reason"] = tier_of(model, rec["warning"])
         if resp.status != 200:
             rec["error"] = f"http {resp.status}: " + resp.read().decode("utf-8", "replace")[:300]
             rec["duration"] = round(time.monotonic() - t0, 2)
@@ -2267,10 +2281,18 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
     that printer printed conditionally become `adjustments` so every
     renderer can carry them.
     """
+    # Demotions split by what the live warning header actually said: an
+    # overflow spill and a missing entitlement are different situations.
+    direct = r.get("direct") or []
+    overflow_n = sum(1 for x in direct if x.get("reason") == "overflow")
+    no_ent_n = sum(1 for x in direct if x.get("reason") == "no_entitlement")
+    demoted = r.get("demoted", 0)
+    tier_line = (f"interactive {r['tiers']['interactive']} · background {r['tiers']['background']} "
+                 f"· demoted {demoted}")
+    if demoted:
+        tier_line += f" (overflow {overflow_n} · no entitlement {no_ent_n})"
     burst = [
-        report.Row("tier header",
-                   f"interactive {r['tiers']['interactive']} · background {r['tiers']['background']} "
-                   f"· demoted {r['demoted']}"),
+        report.Row("tier header", tier_line),
         report.Row("outcome",
                    f"streamed {r['streamed']} · no first token {r['silent']} · "
                    f"admission deaths {r['admission_deaths']} · errors {r['errors']} · cut {r['cut']}"),
@@ -2286,9 +2308,14 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
     if r["admission_deaths"]:
         adj.append(f"{r['admission_deaths']}/{n} died on admission (`scheduler admission timeout`). "
                    f"For this width of fan-out, use the -background variant of the same model.")
-    if r["demoted"]:
-        adj.append(f"{r['demoted']} request(s) carried `overflowed-to-background`: the burst exceeded "
+    if overflow_n:
+        adj.append(f"{overflow_n} request(s) carried `overflowed-to-background`: the burst exceeded "
                    f"the interactive cap of {INTERACTIVE_BURST_CAP}.")
+    if no_ent_n:
+        # demotion_note lives in _fix_block.py, exec'd into this namespace at
+        # import time; the probe and fix advice must say the same thing.
+        adj.append(f"{no_ent_n} request(s) carried `no-background-entitlement`: "
+                   + demotion_note("no_entitlement", model))
     if r["streamed"] == r["n"] and not r["cut"]:
         adj.append("all requests streamed; no pressure at this width.")
     return report.Report(headline=f"probe: {n} x {model}",

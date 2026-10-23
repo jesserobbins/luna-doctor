@@ -1830,5 +1830,64 @@ class StyleAndJson(unittest.TestCase):
         proc.stdout.decode("ascii")              # must not raise
 
 
+class DemotionReason(unittest.TestCase):
+    def test_no_background_entitlement_is_priority_demotion(self):
+        m = _load_cli()
+        tier, demoted, reason = m.tier_of("glm-5.3-background", "no-background-entitlement")
+        self.assertEqual((tier, demoted, reason), ("interactive", True, "no_entitlement"))
+
+    def test_overflow_still_reads_as_background(self):
+        m = _load_cli()
+        self.assertEqual(m.tier_of("glm-5.3", "overflowed-to-background"),
+                         ("background", True, "overflow"))
+
+    def test_plain_background_model_is_unremarkable(self):
+        m = _load_cli()
+        self.assertEqual(m.tier_of("glm-5.3-background"), ("background", False, ""))
+
+    def test_analyze_does_not_claim_to_know_the_served_tier(self):
+        code, out, _ = run("analyze", "--since", "24h")
+        self.assertIn("served tier is not in these logs", out)
+
+    def test_probe_report_splits_demoted_by_reason(self):
+        m = _load_cli()
+        r = {"n": 2, "tiers": {"interactive": 0, "background": 2}, "demoted": 2,
+             "streamed": 2, "silent": 0, "admission_deaths": 0, "errors": 0,
+             "keepalives": 0, "wait_headers": 1.0, "ttfb": 2.0, "cut": 0, "budget_s": 170,
+             "direct": [{"reason": "overflow"}, {"reason": "no_entitlement"}]}
+        rep = m.build_probe_report(r, 2, "glm-5.3-background")
+        from luna_doctor.report import render_plain
+        out = render_plain(rep)
+        self.assertIn("demoted 2", out)
+        self.assertIn("overflow 1", out)
+        self.assertIn("no entitlement 1", out)
+        self.assertIn("no-background-entitlement", out)
+        self.assertIn("priority concurrency", out)
+
+    def test_probe_report_without_reasons_keeps_the_old_row(self):
+        m = _load_cli()
+        r = {"n": 8, "tiers": {"interactive": 8, "background": 0}, "demoted": 0,
+             "streamed": 8, "silent": 0, "admission_deaths": 0, "errors": 0,
+             "keepalives": 0, "wait_headers": 25.2, "ttfb": 30.0, "cut": 0, "budget_s": 170}
+        from luna_doctor.report import render_plain
+        out = render_plain(m.build_probe_report(r, 8, "glm-5.3"))
+        self.assertIn("demoted 0", out)
+        self.assertNotIn("overflow 1", out)
+        self.assertNotIn("no entitlement", out)
+
+    def test_demotion_note_names_the_priority_pool_when_observed(self):
+        m = _load_cli()
+        note = m.demotion_note("no_entitlement", "glm-5.3-background")
+        self.assertIn("glm-5.3-background", note)
+        self.assertIn("priority concurrency", note)
+        self.assertIn("no background entitlement", note)
+
+    def test_demotion_note_hedges_when_no_probe_has_spoken(self):
+        m = _load_cli()
+        note = m.demotion_note("", "glm-5.3-background")
+        self.assertIn("may be running on priority concurrency", note)
+        self.assertIn("only a probe can see", note.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -408,6 +408,25 @@ def _impact(peak: int) -> str:
     return f"your peak of {peak} concurrent requests is already past this limit, so this is the change that bites."
 
 
+def demotion_note(reason: str, model: str) -> str:
+    """Plain sentence on how `-background` traffic is really being served.
+
+    `reason` is what a probe saw (`tier_of`'s third value): "no_entitlement"
+    when a `-background` request was downgraded into the priority pool, or
+    "" when nothing has said - which is all log records can ever say, since
+    pi and claude-code keep no response headers. The hedge in the "" branch
+    is the point: `fix` must not imply it knows the served tier.
+    """
+    if reason == "no_entitlement":
+        return (f"`{model}` is being served on priority concurrency: this account has no background "
+                f"entitlement, so its `-background` requests are downgraded into the priority pool "
+                f"and count against interactive headroom.")
+    return (f"your `-background` traffic may be running on priority concurrency: if this account has "
+            f"no background entitlement, `{model}` requests are downgraded into the priority pool, "
+            f"which is why a background model can still be squeezed. Only a probe can see the "
+            f"served tier.")
+
+
 def recommendations(m, reqs, agents) -> list:
     out = []
     cat = catalog()
@@ -423,6 +442,10 @@ def recommendations(m, reqs, agents) -> list:
         f"{idle_stalls} silent stall(s)," if idle_stalls else "",
         f"{bgcount} request(s) already on the background tier." if bgcount else "",
     )
+    # Log records carry no response headers, so a reason only reaches us from
+    # a live observation; the "" case is what logs can ever say.
+    demotion = next((r.reason for r in reqs if r.reason), "")
+    bg_note = demotion_note(demotion, bg) if bg else ""
 
     # ---------------- pi ----------------
     if "pi" in agents:
@@ -506,7 +529,8 @@ def recommendations(m, reqs, agents) -> list:
                     "to": target,
                     "why": _why(evidence,
                                 f"Children currently inherit the interactive model. `{bg}` is the tier with"
-                                f" the larger concurrency allowance; the trade is a much slower SLA."),
+                                f" the larger concurrency allowance; the trade is a much slower SLA.",
+                                bg_note),
                     "impact": _impact(peak),
                     "apply": _jq_apply(PI_SETTINGS,
                                        f'.subagents.defaultModel = "{target}"',
@@ -580,7 +604,8 @@ def recommendations(m, reqs, agents) -> list:
                     "to": bg,
                     "why": _why(evidence,
                                 f"Children inherit the parent model unless this is set; `{bg}` carries the"
-                                f" larger concurrency allowance."),
+                                f" larger concurrency allowance.",
+                                bg_note),
                     "impact": _impact(peak),
                     "apply": _jq_apply(CLAUDE_SETTINGS,
                                        f'.env.CLAUDE_CODE_SUBAGENT_MODEL = "{bg}"',
@@ -614,7 +639,8 @@ def recommendations(m, reqs, agents) -> list:
                     "to": ", ".join(str(v).strip('"') for v in keys.values()),
                     "why": _why(evidence,
                                 "Codex has no verified request-timeout knob, so it cannot defend itself"
-                                " against a 600s first token; keep the fan-out under the cap instead."),
+                                " against a 600s first token; keep the fan-out under the cap instead.",
+                                bg_note),
                     "impact": _impact(peak),
                     "apply": _toml_agents_apply(CODEX_CONFIG, keys),
                     "snippet": "[agents]\n" + "\n".join(f"{k} = {v}" for k, v in keys.items()),
