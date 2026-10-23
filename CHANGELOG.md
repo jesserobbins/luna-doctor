@@ -17,9 +17,15 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.1.1-alpha.3] - 2026-10-23
+
 ### Added
 
 - `--copy` on `discover`, `analyze`, `probe`, `compare` and `fix`: put the printed text on the clipboard as well as on stdout, via the first of `pbcopy`, `wl-copy`, `xclip`, `xsel` found on PATH. The copy is always plain text — an explicit `--style pretty` renders plain for the whole run, and `--copy --json` copies the JSON document exactly — and stdout is unchanged, so a machine with no clipboard tool (or a failed copy) never loses the answer: stderr says `copied N bytes to the clipboard via pbcopy` or `no clipboard tool found (pbcopy, wl-copy, xclip, xsel); printed instead`, never an error and never a changed exit code. `analyze --share --copy` copies the WhatsApp message, while the card is still written and its path printed to stderr; `fix --copy` copies the whole block, apply lines verbatim. Clipboard integration is a deliberate exception to the "no subprocess" rule: that rule was about rasterising images, whereas the clipboard is an OS affordance, used only when explicitly asked for with a flag, never as part of normal output.
+
+### Fixed
+
+- The package parses on Python 3.9 again. `scene.py` emitted SVG through multi-line f-strings whose expressions nested same-quote string literals — PEP 701 syntax, valid only from 3.12 — so on Python 3.9–3.11, macOS's system `python3` included, every command died at import with `SyntaxError: EOL while scanning string literal` despite `requires-python = ">=3.9"`. The emitters hoist their attribute string into a local first. Three guards now cover it: an `ast.parse(..., feature_version=(3, 9))` sweep for gated grammar, a tokenizer check for PEP 701 f-strings, and — where an older interpreter is installed — a real `compileall` with it. The tokenizer and interpreter guards were each confirmed to fail against the pre-fix file.
 
 ## [0.1.1-alpha.2] - 2026-10-23
 
