@@ -143,7 +143,15 @@ class NoRetiredVocabulary(unittest.TestCase):
             self.assertEqual(code, 0, f"chart failed: {err}")
             with open(out, encoding="utf-8") as fh:
                 svg = fh.read()
-        self.assertIn("advised concurrency", svg, "the advised rule must still be drawn")
+        # The redesign draws no advisory rule: the old "advised" number was
+        # headroom under a cap that turned out to be one plan's default, so
+        # advice that depends on the plan is re-derived elsewhere, not drawn.
+        # Without --plan the footer says why no rule is drawn, in the
+        # capacity vocabulary (the declared-rule paths live in ChartPlan).
+        self.assertNotIn("advised concurrency", svg,
+                         "a plan-dependent advisory rule must not be drawn")
+        self.assertIn("specific to the account", svg,
+                      "the no-plan footer must say why no rule is drawn")
         self._assert_clean("chart svg", svg)
         self._assert_clean("chart console", stdout)
 

@@ -47,6 +47,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from luna_doctor import plan
 from luna_doctor import render_share
 from luna_doctor import report
 from luna_doctor import sources
@@ -2764,6 +2765,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="pi-format store to read instead of the default (repeatable)")
     ch.add_argument("--claude-root", action="append", default=None, metavar="DIR",
                     help="claude-code store to read instead of the default (repeatable)")
+    plan.add_plan_arg(ch)
     ch.add_argument("--json", action="store_true")
     _add_style(ch)
     ch.set_defaults(func=None)

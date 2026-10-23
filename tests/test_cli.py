@@ -193,6 +193,216 @@ class Chart(unittest.TestCase):
         self.assertIn("contract", doc)
 
 
+def _chart_store(tmp, n):
+    """A pi store of n requests for chart tests: two scheduling classes,
+    five priority models (so the fold past the four named bands is
+    exercised), rejections at admission with a stable 60.3s deadline
+    spread across models, silent stalls at the idle budget, and bursts of
+    overlap. Deterministic, so every assertion is about the code."""
+    now = time.time()
+    win = 23 * 3600
+    # starts advance 11.6s per request without wrapping (n * 11.6 < win for
+    # any n this builder is called with), and the longest duration is 306s,
+    # so every end lands strictly inside the window and needs no clamping
+    # (the request-count assertion in the tests below is the tripwire for
+    # a builder change that silently loses requests)
+    p_models = ["sonnet-5", "haiku-4", "gpt-5.3", "glm-5.3",
+                "deepseek-4.1-flash"]
+    b_models = ["sonnet-5-background", "glm-5.3-background"]
+    lines = []
+    for i in range(n):
+        start = now - win + (i * 11.6) % win
+        roll = i % 9
+        if roll < 5:
+            model, err, dur = p_models[roll], None, 8.0 + (i % 37) * 2.7
+        elif roll < 7:
+            model, err, dur = b_models[roll - 5], None, 60.0 + (i % 13) * 9.0
+        else:
+            model, err, dur = p_models[i % 2], None, 15.0 + (i % 11) * 4.0
+        if i % 97 == 7:    # ~n/97 rejections, spread over the models: enough
+            err, dur = "scheduler admission timeout", 60.3    # per model to observe
+        elif i % 251 == 8:  # ~n/251 silent stalls at the client idle budget
+            err, dur = "Stream ended without finish_reason", 300.0 + (i % 7)
+        elif i % 401 == 9:  # a few org-level concurrency rejections
+            err, dur = "concurrent_request_limit_exceeded", 5.0
+        end = start + dur
+        # millisecond stamps: a second-resolution stamp truncates the end, so
+        # a 60.3s rejection would measure 59.x
+        ts = datetime.datetime.fromtimestamp(end, datetime.timezone.utc)
+        stamp = ts.strftime("%Y-%m-%dT%H:%M:%S") + ".%03dZ" % (ts.microsecond // 1000)
+        # a unique responseId per record: collection dedupes by response, and
+        # two requests that happen to end in the same millisecond are still
+        # two responses (a timestamp-derived id would collapse them)
+        rec = {
+            "type": "message",
+            "id": "id-%06d" % i,
+            "timestamp": stamp,
+            "message": {
+                "role": "assistant",
+                "model": model,
+                "provider": "lunaroute",
+                "timestamp": int(start * 1000),
+                "usage": {"input": 10, "output": 100},
+                "stopReason": "error" if err else "stop",
+                "errorMessage": err,
+                "content": [{"type": "text", "text": "x"}],
+                "responseId": "r-%06d" % i,
+            },
+        }
+        lines.append(json.dumps(rec))
+    proj = os.path.join(tmp, "proj", "--rat-run--")
+    os.makedirs(proj, exist_ok=True)
+    with open(os.path.join(proj, "2026-08-13T06-41-17-867Z_abc.jsonl"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+class ChartSweep(unittest.TestCase):
+    """Termination and size guards for the chart's column sweep.
+
+    The first version of the redesign hung in `_accum`: each pass
+    recomputed a clamped column index from a cursor that float rounding
+    had already nudged off the nominal column edges, then assigned
+    `a = e` where `e` could resolve at or before `a` -- at an interior
+    boundary as readily as the final one -- so the cursor never advanced,
+    on a window as small as 179 requests, and the defect was never
+    data-size dependent. The sweep is now bounded by the column count,
+    and these tests pin that; the direct one runs out-of-process with a
+    timeout, because on a regression it would hang rather than fail.
+    """
+
+    def test_accum_terminates_at_the_final_column_boundary(self):
+        snippet = (
+            "from luna_doctor import cli\n"
+            "from luna_doctor.cli import Request\n"
+            "def sweep(t0, t1, n_cols, reqs):\n"
+            "    bands, band_of = cli._bands(reqs)\n"
+            "    return cli._panel_series(reqs, bands, band_of, t0, t1, n_cols)\n"
+            "# (t0, window, n_cols) that hung before the fix: epoch-scale t0,\n"
+            "# and the 48 columns the renderer really picks for a 100s window\n"
+            "m = sweep(1000000000.0, 1000000100.0, 48,\n"
+            "          [Request(harness='pi', session='s', model='m',\n"
+            "                   start=1000000001.0, end=1000000100.0)])\n"
+            "assert abs(sum(sum(v) for v in m[0].values()) - 99.0) < 1e-9, m[0]\n"
+            "assert m[2] == 1 and max(m[1]) == 1, m\n"
+            "# a request ending exactly on the final boundary, in exact floats\n"
+            "m = sweep(0.0, 100.0, 40,\n"
+            "          [Request(harness='pi', session='s', model='m',\n"
+            "                   start=1.0, end=100.0)])\n"
+            "assert abs(sum(sum(v) for v in m[0].values()) - 99.0) < 1e-9, m[0]\n"
+            "# a single zero-width request: nothing to accumulate, no hang\n"
+            "m = sweep(0.0, 100.0, 48,\n"
+            "          [Request(harness='pi', session='s', model='m',\n"
+            "                   start=50.0, end=50.0)])\n"
+            "assert sum(sum(v) for v in m[0].values()) == 0.0, m[0]\n"
+            "# a degenerate window: t0 == t1\n"
+            "m = sweep(100.0, 100.0, 48,\n"
+            "          [Request(harness='pi', session='s', model='m',\n"
+            "                   start=50.0, end=150.0)])\n"
+            "assert sum(sum(v) for v in m[0].values()) == 0.0, m[0]\n"
+            "print('ok')\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
+                              text=True, timeout=30, cwd=ROOT)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "ok")
+
+    def test_chart_renders_a_seven_thousand_request_window_in_bounded_time(self):
+        """Perf guard, never skipped: the sweep is bounded by the column
+        count, not the request count, and this pins that at scale. The
+        render measures well under a second for 7000 requests here, so
+        the 10s bound is deliberately generous headroom for a loaded
+        machine while still failing any complexity regression -- a
+        reintroduced quadratic or non-terminating sweep cannot get under
+        it (the hang surfaces as the subprocess timeout, the same
+        failure mode the termination test pins directly).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _chart_store(tmp, 7000)
+            out = os.path.join(tmp, "chart.svg")
+            began = time.monotonic()
+            code, stdout, err = run("chart", "--since", "24h", "--out", out,
+                                    "--pi-root", tmp, "--harness", "pi",
+                                    timeout=120)
+            elapsed = time.monotonic() - began
+            self.assertEqual(code, 0, err)
+            with open(out) as fh:
+                svg = fh.read()
+            self.assertTrue(svg.startswith("<svg"), svg[:40])
+            ET.fromstring(svg)
+            # every request survived collection, every rejection is a tick
+            # where it died, and the deadline the footer reports is the
+            # measured one, per model, with its n
+            self.assertIn("7000 requests", svg)
+            self.assertIn("rejected at admission", svg)
+            self.assertIn("measured: observed admission deadline per model", svg)
+            self.assertIn("60.3s (n=", svg)
+            self.assertLess(elapsed, 10.0,
+                            "chart needed %.1fs for 7000 requests" % elapsed)
+
+
+class ChartPlan(unittest.TestCase):
+    """--plan declares the account's priority concurrency. The contract:
+    a name maps to LunaRoute's published default, a bare integer passes
+    through unclamped, anything else is a usage error naming what is
+    accepted -- never a silent default -- and with no --plan the chart
+    draws no rule and says why in the footer."""
+
+    def _chart(self, tmp, *extra):
+        _chart_store(tmp, 60)
+        out = os.path.join(tmp, "chart.svg")
+        code, stdout, err = run("chart", "--since", "24h", "--out", out,
+                                "--pi-root", tmp, "--harness", "pi", *extra)
+        return code, err, out
+
+    def test_unknown_plan_name_is_a_usage_error_listing_the_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, err, out = self._chart(tmp, "--plan", "bogus")
+            self.assertEqual(code, 2)
+            self.assertIn("unknown --plan value 'bogus'", err)
+            for name in ("personal", "pro", "max", "apex", "teams"):
+                self.assertIn(name, err, "the error must list the valid names")
+            self.assertNotIn("Traceback", err)
+            self.assertFalse(os.path.exists(out),
+                             "a bad declaration must not render anything")
+
+    def test_plan_below_one_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, err, _ = self._chart(tmp, "--plan", "0")
+            self.assertEqual(code, 2)
+            self.assertIn("at least 1", err)
+            self.assertNotIn("Traceback", err)
+
+    def test_a_bare_integer_is_drawn_unclamped_and_labelled_declared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, err, out = self._chart(tmp, "--plan", "25")
+            self.assertEqual(code, 0, err)
+            with open(out) as fh:
+                svg = fh.read()
+            self.assertIn("priority concurrency (--plan 25)", svg)
+            self.assertIn("declared by you", svg)
+            self.assertIn("A declaration, not a measurement", svg)
+
+    def test_a_plan_name_labels_its_published_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, err, out = self._chart(tmp, "--plan", "max")
+            self.assertEqual(code, 0, err)
+            with open(out) as fh:
+                svg = fh.read()
+            self.assertIn("priority concurrency (--plan max = 4)", svg)
+            self.assertIn("published plan default", svg)
+            self.assertIn("A declaration, not a measurement", svg)
+
+    def test_no_plan_draws_no_rule_and_names_the_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, err, out = self._chart(tmp)
+            self.assertEqual(code, 0, err)
+            with open(out) as fh:
+                svg = fh.read()
+            self.assertNotIn("priority concurrency (--plan", svg)
+            self.assertIn("no priority concurrency rule drawn", svg)
+            self.assertIn("specific to the account", svg)
+
+
 class InstallShape(unittest.TestCase):
     """`fix` and `chart` load their code from sibling files, so they only work
     when those files sit beside the CLI.
