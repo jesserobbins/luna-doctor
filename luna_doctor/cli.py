@@ -44,6 +44,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from luna_doctor import render_share
 from luna_doctor import report
 from luna_doctor.render_pretty import render_pretty, reveal, style_for
 
@@ -2121,11 +2122,11 @@ def print_report(rep: report.Report, args) -> None:
     """Render `rep` to stdout the way this run's `--style` asked for.
 
     `--json` never reaches here - it prints its own envelope, and no Style
-    is ever constructed on that path. `plain` and `share` render undecorated
-    (`share` waits for the share renderer; `main` prints that note at parse
-    time), `pretty` always takes the pretty layout - with the gate closed
-    the same layout prints bare - and `auto` picks pretty only when the
-    gate opened for this stream.
+    is ever constructed on that path. `plain` renders undecorated; `share`
+    never reaches here either - `render()` routes it to the share renderer
+    before this is called - and `pretty` always takes the pretty layout -
+    with the gate closed the same layout prints bare - and `auto` picks
+    pretty only when the gate opened for this stream.
     """
     style = getattr(args, "_style", None)
     requested = getattr(args, "style", None)
@@ -2133,6 +2134,23 @@ def print_report(rep: report.Report, args) -> None:
         write_out(render_pretty(rep, style))
         return
     write_out(report.render_plain(rep))
+
+
+def _share(m: dict, head: str, adj: list, args) -> None:
+    """Print the WhatsApp message to stdout and the card's path to stderr.
+
+    stdout alone is the copyable artifact: the message, nothing else. The
+    PNG path (and any failure to write it) goes to stderr, so piping stdout
+    straight into a paste yields clean share text.
+    """
+    write_out(render_share.render_share_text(build_report(m, head, adj), m))
+    out = getattr(args, "out", None) or render_share.default_card_path()
+    try:
+        path = render_share.write_card(m, head, out)
+    except OSError as e:
+        print(f"luna-doctor: could not write the share card: {e}", file=sys.stderr)
+        return
+    print(f"share card: {os.path.abspath(path)}", file=sys.stderr)
 
 
 def render(m: dict, head: str, adj: list[str], as_json: bool,
@@ -2147,6 +2165,9 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
             doc["store"] = {"path": stored["path"], "ledger": stored["ledger"],
                             "findings": len(stored["findings"])}
         print(json.dumps(doc, indent=2))
+        return
+    if getattr(args, "share", False) or getattr(args, "style", None) == "share":
+        _share(m, head, adj, args)
         return
     print_report(build_report(m, head, adj), args)
 
@@ -2635,6 +2656,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="where run extractions are written (default ~/.luna-doctor/store)")
     a.add_argument("--no-store", action="store_true", help="do not persist this run")
     a.add_argument("--json", action="store_true")
+    a.add_argument("--share", action="store_true",
+                   help="print a WhatsApp-ready message to stdout and write a "
+                        "1080x1350 share card PNG (implies plain output)")
+    a.add_argument("--out", default=None, metavar="PATH",
+                   help="path for the --share card PNG "
+                        "(default: ./luna-doctor-share-<ts>.png)")
     _add_style(a)
     a.set_defaults(func=cmd_analyze)
 
@@ -2710,10 +2737,12 @@ def main(argv: list[str] | None = None) -> int:
     # no Style is constructed on that path, so no code can reach the envelope.
     if hasattr(args, "style") and not args.json:
         args._style = style_for(args.style, sys.stdout)
-        if args.style == "share":
-            print("luna-doctor: --style share prints a WhatsApp-ready card and message; "
-                  "that renderer is not in this release yet, so this run shows plain output.",
-                  file=sys.stderr)
+        if args.style == "share" and args.cmd != "analyze":
+            # Share is analyze's renderer: `analyze --share` prints the
+            # message and writes the card. On any other command the request
+            # falls back to plain output rather than being refused.
+            print("luna-doctor: --style share is the analyze share renderer; "
+                  "this command shows plain output.", file=sys.stderr)
     else:
         args._style = None
     if args.cmd == "analyze":
