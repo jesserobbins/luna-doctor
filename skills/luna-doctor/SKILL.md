@@ -18,6 +18,7 @@ luna-doctor analyze --now      # if the user says "it is slow right now"
 luna-doctor analyze            # what the machine has been doing for 24h
 luna-doctor analyze --since 7d --json
 luna-doctor analyze --style plain   # undecorated text, for pasting to the user
+luna-doctor analyze --copy          # same text, also on the clipboard, plain
 luna-doctor fix                # copy-paste config per agent, justified by the numbers
 luna-doctor fix --agent pi     # one agent at a time
 luna-doctor chart --since 24h  # SVG: fan-out over time + every request's latency
@@ -42,6 +43,11 @@ adds color, a rule per section and a moon.
 and `plain` otherwise. `NO_COLOR` beats an explicit `--style pretty`;
 `CLICOLOR_FORCE` colors a pipe. `--json` is never styled. When you paste a report
 to the user, use `--style plain`.
+
+`--copy` (on `discover`, `analyze`, `probe`, `compare` and `fix`) also puts the
+printed text on the clipboard, as plain text even under `--style pretty`; the
+same text still prints to stdout, so nothing is lost when the machine has no
+clipboard tool. `--json` is copied exactly.
 
 ## Reading the output
 

@@ -17,6 +17,10 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- `--copy` on `discover`, `analyze`, `probe`, `compare` and `fix`: put the printed text on the clipboard as well as on stdout, via the first of `pbcopy`, `wl-copy`, `xclip`, `xsel` found on PATH. The copy is always plain text — an explicit `--style pretty` renders plain for the whole run, and `--copy --json` copies the JSON document exactly — and stdout is unchanged, so a machine with no clipboard tool (or a failed copy) never loses the answer: stderr says `copied N bytes to the clipboard via pbcopy` or `no clipboard tool found (pbcopy, wl-copy, xclip, xsel); printed instead`, never an error and never a changed exit code. `analyze --share --copy` copies the WhatsApp message, while the card is still written and its path printed to stderr; `fix --copy` copies the whole block, apply lines verbatim. Clipboard integration is a deliberate exception to the "no subprocess" rule: that rule was about rasterising images, whereas the clipboard is an OS affordance, used only when explicitly asked for with a flag, never as part of normal output.
+
 ## [0.1.1-alpha.2] - 2026-10-23
 
 ### Added

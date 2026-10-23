@@ -31,12 +31,15 @@ import fcntl
 import glob
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
 import re
+import shutil
 import ssl
 import statistics
+import subprocess
 import sys
 import tempfile
 import threading
@@ -2114,6 +2117,57 @@ def write_out(text: str) -> None:
         sys.stdout.write(text.encode(enc, "replace").decode(enc, "replace"))
 
 
+# ---- clipboard ---------------------------------------------------------------
+# The one deliberate exception to luna-doctor's "no subprocess" rule. That
+# rule was about rasterising images (an expensive, failure-prone pipeline);
+# the clipboard is a small OS affordance, reached only when --copy asks for
+# it and never on the normal output path.
+
+CLIPBOARD_TOOLS = (
+    # Detection order: the first name that exists on PATH is used. One
+    # candidate per window system, with the arguments each needs to take
+    # text on stdin for the system clipboard (never the mouse selection).
+    ("pbcopy", ()),                         # macOS
+    ("wl-copy", ()),                        # Wayland
+    ("xclip", ("-selection", "clipboard")),  # X11
+    ("xsel", ("--clipboard", "--input")),     # X11
+)
+CLIPBOARD_TIMEOUT_S = 5.0
+
+
+def clipboard_copy(text: str) -> str | None:
+    """Put `text` on the system clipboard; return the tool used, or None.
+
+    A hung clipboard daemon must not hang the report, so every run is bounded
+    by CLIPBOARD_TIMEOUT_S. A candidate that exists but refuses the text
+    yields to the next one; None means nothing took it, and the caller keeps
+    the printed answer, so a failed copy is never a lost answer.
+    """
+    for name, extra in CLIPBOARD_TOOLS:
+        path = shutil.which(name)
+        if not path:
+            continue
+        try:
+            proc = subprocess.run([path, *extra], input=text, text=True,
+                                  capture_output=True, timeout=CLIPBOARD_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            return name
+    return None
+
+
+def _copy_or_say(text: str) -> None:
+    """The --copy report line, on stderr; never an error, never an exit code."""
+    tool = clipboard_copy(text)
+    if tool is None:
+        print("no clipboard tool found (pbcopy, wl-copy, xclip, xsel); printed instead",
+              file=sys.stderr)
+    else:
+        print(f"copied {len(text.encode('utf-8'))} bytes to the clipboard via {tool}",
+              file=sys.stderr)
+
+
 def print_report(rep: report.Report, args) -> None:
     """Render `rep` to stdout the way this run's `--style` asked for.
 
@@ -2612,6 +2666,18 @@ def _add_style(sp) -> None:
                          "terminal and plain otherwise (default)")
 
 
+def _add_copy(sp) -> None:
+    """The clipboard opt-in for the commands whose stdout is a pasteable artifact.
+
+    `chart` is excluded on purpose: its artifact is the SVG file, and the only
+    stdout it owns is a path line.
+    """
+    sp.add_argument("--copy", action="store_true",
+                    help="also put the printed text on the clipboard, as plain "
+                         "text (pbcopy, wl-copy, xclip or xsel); stdout is "
+                         "unchanged, so nothing is lost when no tool exists")
+
+
 def probe_required_message(cmd: str, n: int, model: str, budget_s: float) -> str:
     """What a burst would do, stated without running it.
 
@@ -2641,6 +2707,7 @@ def main(argv: list[str] | None = None) -> int:
 
     d = sub.add_parser("discover", help="what log stores exist on this machine")
     d.add_argument("--json", action="store_true")
+    _add_copy(d)
     _add_style(d)
     d.set_defaults(func=cmd_discover)
 
@@ -2656,6 +2723,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="where run extractions are written (default ~/.luna-doctor/store)")
     a.add_argument("--no-store", action="store_true", help="do not persist this run")
     a.add_argument("--json", action="store_true")
+    _add_copy(a)
     a.add_argument("--share", action="store_true",
                    help="print a WhatsApp-ready message to stdout and write a "
                         "1080x1350 share card PNG (implies plain output)")
@@ -2676,6 +2744,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="open the burst; without this flag luna-doctor only says "
                         "what it would open")
     p.add_argument("--json", action="store_true")
+    _add_copy(p)
     _add_style(p)
     p.set_defaults(func=cmd_probe)
 
@@ -2690,6 +2759,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="open the bursts; without this flag luna-doctor only says "
                         "what they would open")
     c.add_argument("--json", action="store_true")
+    _add_copy(c)
     _add_style(c)
     c.set_defaults(func=cmd_compare)
 
@@ -2704,6 +2774,7 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--claude-root", action="append", default=None, metavar="DIR",
                    help="claude-code store to read instead of the default (repeatable)")
     f.add_argument("--json", action="store_true")
+    _add_copy(f)
     f.set_defaults(func=None)
 
     ch = sub.add_parser("chart", help="write a standalone SVG of concurrency and latency")
@@ -2733,6 +2804,13 @@ def main(argv: list[str] | None = None) -> int:
         print(probe_required_message(args.cmd, args.n, args.model, args.max_seconds),
               file=sys.stderr)
         return 2
+    if getattr(args, "copy", False):
+        return _run_captured(args)
+    return _run(args)
+
+
+def _run(args) -> int:
+    """Style resolution and dispatch: everything after argument validation."""
     # One style resolution per command. `--json` bypasses styling entirely:
     # no Style is constructed on that path, so no code can reach the envelope.
     if hasattr(args, "style") and not args.json:
@@ -2752,6 +2830,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "chart":
         return cmd_chart(args)
     return args.func(args)
+
+
+def _run_captured(args) -> int:
+    """`--copy`: run with stdout captured, echo it, then offer it to the clipboard.
+
+    Capture is the only mechanism that can promise "exactly what the command
+    printed" across five commands that each own their printing - `fix` prints
+    its block directly, `analyze --share` prints the share message, `--json`
+    prints its own envelope. The captured text is echoed to the real stdout
+    after the run, so stdout is unchanged and a failed copy is never a lost
+    answer. It is also why `--copy` renders plain even under an explicit
+    `--style pretty`: the clipboard is a paste target, not a terminal, and the
+    copied text must carry no ANSI escapes - since the copy is the echo, the
+    whole run renders plain.
+    """
+    if not args.json and getattr(args, "style", None) == "pretty":
+        args.style = "plain"
+    real = sys.stdout
+    buf = io.StringIO()
+    sys.stdout = buf
+    try:
+        code = _run(args)
+    finally:
+        sys.stdout = real
+    text = buf.getvalue()
+    write_out(text)
+    _copy_or_say(text)
+    return code
 
 
 def cmd_analyze(args) -> int:

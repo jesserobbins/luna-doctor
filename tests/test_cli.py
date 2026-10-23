@@ -1830,6 +1830,94 @@ class StyleAndJson(unittest.TestCase):
         proc.stdout.decode("ascii")              # must not raise
 
 
+class CopyToClipboard(unittest.TestCase):
+    """`--copy` puts the printed artifact on the clipboard via the first tool
+    on PATH (pbcopy, wl-copy, xclip, xsel), as plain text, with stdout
+    unchanged - so a machine with no clipboard tool loses nothing."""
+
+    FALLBACK = "no clipboard tool found (pbcopy, wl-copy, xclip, xsel); printed instead"
+    COPIED = re.compile(r"^copied (\d+) bytes to the clipboard via pbcopy$", re.M)
+
+    def _fake_clipboard(self):
+        """A PATH with a fake pbcopy first; it writes stdin to a file we read back."""
+        clip = os.path.join(tempfile.mkdtemp(prefix="luna-doctor-clip-"), "clipboard.txt")
+        bindir = tempfile.mkdtemp(prefix="luna-doctor-bin-")
+        tool = os.path.join(bindir, "pbcopy")
+        with open(tool, "w") as fh:
+            fh.write("#!/usr/bin/env python3\n"
+                     "import os, sys\n"
+                     "open(os.environ['LUNA_FAKE_CLIPBOARD'], 'w').write(sys.stdin.read())\n")
+        os.chmod(tool, 0o755)
+        env = dict(os.environ)
+        env["LUNA_DOCTOR_STORE"] = _TEST_STORE
+        env["LUNA_FAKE_CLIPBOARD"] = clip
+        # Prepended, so the fake wins over any real pbcopy further down PATH.
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        return env, clip
+
+    def _run(self, env, *args):
+        return subprocess.run([sys.executable, CLI, *args], capture_output=True,
+                              text=True, timeout=180, cwd=ROOT, env=env)
+
+    def test_analyze_plain_copy_equals_stdout(self):
+        env, clip = self._fake_clipboard()
+        proc = self._run(env, "analyze", "--since", "24h", "--style", "plain", "--copy")
+        self.assertIn(proc.returncode, (0, 1, 2))
+        with open(clip) as fh:
+            self.assertEqual(fh.read(), proc.stdout)
+        m = self.COPIED.search(proc.stderr)
+        self.assertIsNotNone(m, proc.stderr)
+        self.assertEqual(int(m.group(1)), len(proc.stdout.encode("utf-8")))
+
+    def test_fix_copy_copies_what_it_prints(self):
+        env, clip = self._fake_clipboard()
+        proc = self._run(env, "fix", "--copy")
+        self.assertIn(proc.returncode, (0, 1))
+        with open(clip) as fh:
+            copied = fh.read()
+        self.assertEqual(copied, proc.stdout)
+        if copied:
+            # verbatim, with nothing added at either end
+            self.assertFalse(copied[:1].isspace())
+        if "apply (copy these lines exactly):" in proc.stdout:
+            # the apply lines ride along untouched, including the jq tail
+            self.assertIn("apply (copy these lines exactly):", copied)
+            self.assertIn("jq -e . \"$f\" >/dev/null && echo ok", copied)
+
+    def test_copy_stays_plain_even_with_style_pretty(self):
+        env, clip = self._fake_clipboard()
+        proc = self._run(env, "analyze", "--since", "24h", "--style", "pretty", "--copy")
+        self.assertIn(proc.returncode, (0, 1, 2))
+        with open(clip) as fh:
+            copied = fh.read()
+        self.assertNotIn("\033[", copied)
+        self.assertEqual(copied, proc.stdout)   # the copy is exactly what printed
+
+    def test_no_clipboard_tool_prints_fallback_and_keeps_the_answer(self):
+        # A PATH-like env with a python3 but no clipboard tool on it.
+        bindir = tempfile.mkdtemp(prefix="luna-doctor-empty-")
+        os.symlink(sys.executable, os.path.join(bindir, "python3"))
+        env = {"PATH": bindir, "HOME": os.environ.get("HOME", ""),
+               "LUNA_DOCTOR_STORE": _TEST_STORE,
+               "NO_COLOR": "1"}
+        proc = self._run(env, "analyze", "--since", "24h", "--style", "plain", "--copy")
+        self.assertIn(proc.returncode, (0, 1, 2))
+        self.assertIn(self.FALLBACK, proc.stderr)
+        self.assertTrue(proc.stdout)          # a failed copy is never a lost answer
+        self.assertNotIn("copied ", proc.stderr)
+
+    def test_json_copy_is_the_exact_document(self):
+        env, clip = self._fake_clipboard()
+        proc = self._run(env, "analyze", "--since", "24h", "--json", "--copy")
+        self.assertIn(proc.returncode, (0, 1, 2))
+        with open(clip) as fh:
+            copied = fh.read()
+        self.assertEqual(copied, proc.stdout)
+        doc = json.loads(copied)               # the whole document, nothing more
+        self.assertEqual(doc["command"], "analyze")
+        self.assertEqual(doc["schema"], 3)
+
+
 class DemotionReason(unittest.TestCase):
     def test_no_background_entitlement_is_priority_demotion(self):
         m = _load_cli()

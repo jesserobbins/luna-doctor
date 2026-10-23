@@ -84,6 +84,13 @@ stay plain. `--json` is never styled: no `Style` is constructed on that path at
 all. `chart` takes the flag for consistency, but its console output is two plain
 lines — the picture is the SVG.
 
+`--copy` is on `discover`, `analyze`, `probe`, `compare` and `fix`: it puts the
+printed text on the clipboard too — via the first of `pbcopy`, `wl-copy`,
+`xclip` or `xsel` found on PATH — as plain text, while stdout stays exactly as
+it would have been, so a machine with no clipboard tool loses nothing (stderr
+says so, never as an error). `analyze --share --copy` copies the chat message,
+not the card's path.
+
 ### `analyze` — what your machine has been doing
 
 Reconstructs every model request from the local log stores (pi, claude-code) and classifies each outcome against measured gateway behaviour — admission timeouts, silent background demotions, upstream errors, rate limits, and more. Thresholds (admission deadlines, idle budgets) are measured per model via `probe`, not hardcoded — and the number of interactive requests the gateway admits at once is specific to the account and cannot be read from these logs. `analyze` reports what it observed for each model in the window.
