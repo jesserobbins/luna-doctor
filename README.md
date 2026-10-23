@@ -101,7 +101,7 @@ Prints one block per agent: the exact file, the snippet, and a command that back
 
 ### `chart` — one picture
 
-A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requests in flight over time, split by tier, with the gateway's rough admission level and the advised concurrency as dashed rules. Bottom panel: every request end-to-end on a log axis, with reference walls for admission and idle budgets — failures sit on the wall that stopped them. A burst in the top panel at the same x as a cluster of failures below is the whole diagnosis.
+A standalone SVG (no fonts, scripts, or CDN — opens anywhere). One stacked-area graph: a single time axis and a single stack whose height is the account's total concurrent inference requests, layered by band — one model's traffic from one agent in one scheduling class (blues for priority, violets for background), each band named for the agent it belongs to ("glm-5.3 · pi"). A grey outline carries the busiest moment per column, an open circle marks the exact peak, red flare ticks hang where the gateway rejected a request, and the account's priority concurrency is one dashed rule when you declare it with `--plan`. The footer carries the provenance: what was measured, what was declared.
 
 ### `probe` / `compare` — what the gateway will actually admit
 

@@ -17,6 +17,10 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Changed
+
+- The `chart` picture is one stacked-area graph. The previous design answered "whose traffic is this" with a row of pictures — the whole machine, then one per agent — which split one number across several canvases and put the account total only in the first. Now a single time axis and a single stack carry the whole machine: the stack's height is the account's total concurrent inference requests — what the gateway prices — layered by band, and a band is one model's traffic from one agent in one scheduling class, with the agent named in the band label ("glm-5.3 · pi") whenever more than one agent has traffic. Band order is fixed and deterministic: every priority-scheduling band below every background-scheduling band, then by peak thickness within a class, so big steady bands base the stack and thin ones cap it. The marks that earned their place stay on the one canvas — the grey per-column peak envelope, the open circle at the exact peak, red flare ticks at the moment the gateway rejected a request, the dashed priority-concurrency rule drawn only when declared with `--plan`, direct band labels with hairline leaders, and the wrapped provenance footer — and the folded "other" tail now folds per class and agent, so a band's agent identity survives the fold. A window where no agent had timed traffic draws the one plot area over the requested window — empty axes and the honest footer — instead of a bare message.
+
 ## [0.2.0-alpha.1] - 2026-10-23
 
 ### Added
