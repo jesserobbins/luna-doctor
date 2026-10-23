@@ -403,6 +403,110 @@ class ChartPlan(unittest.TestCase):
             self.assertIn("specific to the account", svg)
 
 
+class ChartSingleStack(unittest.TestCase):
+    """The chart is ONE stacked-area graph: one plot area, one time axis,
+    one stack, with attribution carried in the band names. The row of
+    per-agent pictures is gone, so these tests pin the shape the product
+    owner asked for: a regression back to several small pictures, or a
+    stack that stops saying whose traffic a band is, cannot pass unnoticed.
+    """
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _scene(self, reqs, hours=24.0):
+        return self.m.build_chart_scene(reqs, self.m.analyse(reqs, hours), hours)
+
+    def _bottom_axes(self, scene):
+        # the axis under a plot area: the lowest full-width horizontal hairline.
+        # A row of N pictures drew N of these at the same height; the single
+        # stack draws 1. (The grey peak envelope shares the axis colour but
+        # never reaches the bottom of the plot, so it must not count.)
+        horiz = [s for s in scene.shapes
+                 if isinstance(s, self.m.Line) and s.y1 == s.y2
+                 and s.stroke == "#9ca3af" and (s.x2 - s.x1) > 500]
+        if not horiz:
+            return []
+        bot = max(l.y1 for l in horiz)
+        return [l for l in horiz if l.y1 == bot]
+
+    def test_one_plot_area_no_matter_how_many_agents_ran(self):
+        base = 1_700_000_000.0
+        reqs = [
+            self.m.Request(harness="pi", session="s", model="glm-5.3",
+                           start=base, end=base + 600, outcome="completed"),
+            self.m.Request(harness="claude-code", session="s", model="claude-opus-5-5",
+                           start=base + 60, end=base + 660, outcome="completed"),
+        ]
+        scene = self._scene(reqs)
+        self.assertEqual(len(self._bottom_axes(scene)), 1,
+                         "the picture is one plot area, not a row of them")
+        svg = self.m.svg_from(scene)
+        self.assertNotIn("all agents", svg,
+                         "the aggregate header belonged to the deleted row")
+        # one time axis: every tick label of the window appears exactly once
+        span = 660.0
+        for i in range(7):
+            label = datetime.datetime.fromtimestamp(
+                base + span * i / 6, datetime.timezone.utc).strftime("%H:%M")
+            self.assertEqual(svg.count(">%s<" % label), 1,
+                             "tick label %r is not on a single shared axis" % label)
+        self.assertEqual(svg.count('r="2.6"'), 1,
+                         "one peak circle, on the one stack")
+
+    def test_band_names_carry_the_agent_when_two_agents_ran(self):
+        base = 1_700_000_000.0
+        reqs = [
+            self.m.Request(harness="pi", session="s", model="glm-5.3",
+                           start=base, end=base + 600, outcome="completed"),
+            self.m.Request(harness="claude-code", session="s", model="glm-5.3",
+                           start=base + 60, end=base + 660, outcome="completed"),
+        ]
+        svg = self.m.svg_chart(reqs, self.m.analyse(reqs, 24.0), 24.0)
+        # the same model on two agents is two bands, each named for its agent
+        self.assertIn("glm-5.3 \u00b7 pi", svg)
+        self.assertIn("glm-5.3 \u00b7 claude-code", svg)
+
+    def test_band_names_drop_the_agent_when_one_agent_ran(self):
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 600, outcome="completed")]
+        svg = self.m.svg_chart(reqs, self.m.analyse(reqs, 24.0), 24.0)
+        self.assertIn(">glm-5.3<", svg)
+        self.assertNotIn("\u00b7 pi", svg,
+                         "with one agent there is nothing for a suffix to distinguish")
+
+    def test_priority_scheduling_bases_the_stack_background_rides_above(self):
+        base = 1_700_000_000.0
+        reqs = [
+            self.m.Request(harness="pi", session="s", model="glm-5.3",
+                           start=base, end=base + 600, outcome="completed"),
+            self.m.Request(harness="pi", session="s", model="glm-5.3-background",
+                           start=base, end=base + 600, outcome="completed",
+                           tier="background"),
+        ]
+        scene = self._scene(reqs)
+        bot = self._bottom_axes(scene)[0].y1
+        navy = [s for s in scene.shapes
+                if isinstance(s, self.m.Rect) and s.fill == "#173f8f"]
+        violet = [s for s in scene.shapes
+                  if isinstance(s, self.m.Rect) and s.fill == "#5b21b6"]
+        self.assertTrue(navy and violet, "both classes must draw their band")
+        self.assertTrue(all(abs(r.y + r.h - bot) < 0.6 for r in navy),
+                        "priority scheduling sits on the axis, at the base")
+        self.assertTrue(all(r.y + r.h <= min(r.y for r in navy) + 0.6 for r in violet),
+                        "background scheduling rides above the priority block")
+
+    def test_an_empty_window_is_one_plot_area_with_the_honest_footer(self):
+        scene = self._scene([])
+        self.assertEqual(len(self._bottom_axes(scene)), 1,
+                         "no traffic still draws the one plot area, not a bare message")
+        svg = self.m.svg_from(scene)
+        self.assertIn("no timed requests in this window", svg)
+        self.assertIn("nothing was measured", svg)
+        self.assertIn("no agent had a timed request in this window", svg)
+
+
 class InstallShape(unittest.TestCase):
     """`fix` and `chart` load their code from sibling files, so they only work
     when those files sit beside the CLI.

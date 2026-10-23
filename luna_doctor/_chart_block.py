@@ -9,38 +9,56 @@ luna_doctor.scene), then serialised; nothing here touches SVG syntax.
 Design note -- what the picture is, why each mark exists, and what was
 chosen not to draw.
 
-WHAT. A row of stacked-area panels sharing one time axis and one vertical
-scale: first the whole machine ("all agents"), then one panel per agent
-(harness). Each panel stacks concurrent inference requests by model, split
-by scheduling class: blues are priority scheduling, violets are background
-scheduling (the `-background` model-id form). The purpose is the build-up:
-at a glance the reader sees which agent piled up, on which models, in which
-class, and whether that pile crossed what the account is allowed to run.
+WHAT. One stacked-area graph: one plot area, one time axis, one vertical
+scale, one stack. The stack's height at any moment is the account's total
+concurrent inference requests -- everything in flight at once, which is
+what the gateway prices and what a priority-concurrency limit compares
+against. The stack is layered by band, and a band is one model's traffic
+from one agent in one scheduling class: blues are priority scheduling,
+violets are background scheduling (the `-background` model-id form), and
+each band is named with its agent ("glm-5.3 \u00b7 pi") whenever more than
+one agent has traffic in the window. The machine's whole story -- every
+agent, every model, both scheduling classes -- is one stack: the build-up
+the reader is looking for is which bands piled up, for whom, in which
+class, and whether the total crossed what the account is allowed to run.
+
+BAND ORDER. Fixed and deterministic: scheduling class first -- every
+priority-scheduling band below every background-scheduling band -- then,
+within a class, by the band's peak thickness (its widest moment over the
+window), then by total volume, then by name. Priority scheduling sits at
+the base because it is the load the account's priority concurrency is
+about and the work someone is actively waiting on, and because background
+scheduling rides above it, which is also how the gateway admits it (only
+as capacity allows). The order puts the big, steady bands at the base of
+the stack where the eye reads totals, and the thin ones cap it.
 
 WHY EACH MARK EXISTS.
 
 Stacked area   the core mark: the average concurrent inference requests per
-               time column, one band per model and class. Average, not
-               per-column maxima, so the stack's height is an honest load
-               rather than a sum of peaks that never co-occurred.
+               time column, one band per model, agent and class. Average,
+               not per-column maxima, so the stack's height is an honest
+               load rather than a sum of peaks that never co-occurred.
 Grey outline   the busiest moment in each column. Averages smooth away the
                bursts the reader is looking for, so the envelope carries
-               the peaks the areas cannot.
+               the peaks the areas cannot. It is the envelope of the
+               account total: the stack's own height at its worst.
 Open circle    the exact peak, and when it happened.
 Dashed rule    the account's priority concurrency, drawn only when the user
                declares it with --plan, and labelled with the declaration
                ("priority concurrency (--plan max = 4)") so a declared
                threshold can never be mistaken for a measured one. It is
-               drawn on the aggregate panel only: it is an account-wide
-               limit, and drawing it per agent would let a single agent
-               look "over the limit" when the account was not.
-Flare ticks    one tick per request the gateway rejected, hung from the
-               top edge of the owning agent's panel at the moment it died.
-               Red is reserved for rejection (and overflow); nothing else
-               wears it.
+               an account-wide limit, so it is drawn once, against the
+               one total it governs.
+Flare ticks    one tick per request the gateway rejected, hung from the top
+               edge of the plot area at the moment it died. The hover
+               title names the agent whose request died; on the single
+               canvas the tick itself is anonymous without that title,
+               which is a price paid for one graph.
 Direct labels  each band is named at its right-hand edge, in its own
-               colour, at the height the band left the panel, with a
-               hairline leader when the band ended early. There is no
+               colour, at the height the band left the stack, with a
+               hairline leader when the band ended early. The name carries
+               the agent whenever more than one agent has traffic, so
+               attribution never needs a second picture. There is no
                legend box: a legend makes the eye travel.
 Footer         provenance: window, version, which numbers are measured
                (per-model rejection deadlines, with sample counts) and
@@ -50,10 +68,17 @@ Footer         provenance: window, version, which numbers are measured
 
 WHAT WAS CHOSEN NOT TO DRAW.
 
+No per-agent frames. The previous design answered "whose traffic is
+this" by drawing a row of pictures -- the whole machine, then one per
+agent, on a shared scale. Splitting one number across several canvases
+made each thinner, and the account total -- the number the gateway
+prices -- lived only in the first of them. The row is gone; attribution
+moved into the band names, and the one stack carries the total at every
+moment of the window.
 No universal admission deadline. The previous chart drew one wall at 120.2s
 for every model; that is one model's constant (another model's requests
-were rejected at 60.3s). Rejections are now per-request ticks, and the
-footer reports each model's observed deadline, measured, with its n.
+were rejected at 60.3s). Rejections are per-request ticks, and the footer
+reports each model's observed deadline, measured, with its n.
 No advisory concurrency rule. The old "advised 8" was headroom under a cap
 of 10 that turned out to be one plan's default, not a gateway constant.
 Advice that depends on the plan is being re-derived per plan elsewhere in
@@ -63,9 +88,19 @@ is not declarable yet, and a missing line is honest where a wrong one is
 not.
 No priority rule at all when nothing is declared: the footer says the
 number is specific to the account and cannot be read from these logs.
-No latency panel. It shared a frame with the old bars and halved the space
-each story got; latency keeps its own home in `analyze`.
-No panel fills, panel borders, or legend: the data is the ink.
+No latency picture. It shared a frame with the old bars and halved the
+space each story got; latency keeps its own home in `analyze`.
+No plot fills, plot borders, or legend: the data is the ink.
+
+Two deliberate trades. The folded tail: bands below legibility fold into
+one "other" band per scheduling class and agent, so an agent's identity
+survives the fold while the model names beneath it do not -- the residue
+is, by definition, the traffic no label could name. And when only one
+agent has traffic in the window the agent suffix is dropped from every
+name: with one agent there is nothing to distinguish, and the footer's
+"read from pi logs" already says whose traffic it is. A window where no
+agent had timed traffic still draws the one plot area over the requested
+window -- empty axes and the honest footer, never a bare message.
 """
 
 from luna_doctor.plan import PLAN_PRIORITY, resolve_capacity
@@ -74,7 +109,7 @@ from luna_doctor.scene import Circle, Line, Rect, Scene, Text, svg_from
 CHART_FONT = "ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif"
 
 # Colour carries meaning: one blue ramp for priority scheduling (one step
-# per model, in volume order), a violet ramp for background scheduling,
+# per band, in volume order), a violet ramp for background scheduling,
 # slate for each class's folded "other" residue. Red is reserved for
 # rejected/overflowed requests. Each entry is (fill, label ink): pale fills
 # keep a readable label by re-inking the name in the same hue.
@@ -91,7 +126,7 @@ BACKGROUND_STYLE = [
     ("#c4b5fd", "#8b5cf6"),
 ]
 BACKGROUND_OTHER_STYLE = ("#ddd6fe", "#7c3aed")
-NAMED_PER_CLASS = 4      # models named per class; the rest fold into "other"
+NAMED_PER_CLASS = 4      # bands named per class; the rest fold into "other"
 MAX_LABEL_CHARS = 24
 
 C = {
@@ -158,17 +193,20 @@ def _display_name(model, tier):
 def _bands(reqs):
     """The global band list and the request-to-band map.
 
-    Every panel stacks the same bands in the same order -- the priority
-    block from the axis up, then the background scheduling block -- so
-    shapes compare across panels and a model keeps one colour everywhere.
-    The busiest NAMED_PER_CLASS models per class get their own band; the
-    rest fold into one "other" band per class rather than a soup of slivers
-    no label could name.
+    A band is one model's traffic from one agent in one scheduling class,
+    so the single stack can say whose traffic it is drawing: a model that
+    runs on two agents is two bands, and a band keeps one colour everywhere.
+    The busiest NAMED_PER_CLASS (model, agent) pairs per class get their own
+    band; the rest fold into one "other" band per class and agent, which
+    keeps the agent's identity while giving up the model names no label
+    could fit.
     """
+    multi = len({r.harness for r in reqs}) > 1
     per_class = {}
     for r in reqs:
-        models = per_class.setdefault(r.tier, {})
-        models[r.model] = models.get(r.model, 0) + 1
+        pairs = per_class.setdefault(r.tier, {})
+        pair = (r.model, r.harness)
+        pairs[pair] = pairs.get(pair, 0) + 1
     bands = []
     for tier, styles, other_style in (
             ("interactive", PRIORITY_STYLE, PRIORITY_OTHER_STYLE),
@@ -178,45 +216,66 @@ def _bands(reqs):
             continue
         ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
         cap = min(NAMED_PER_CLASS, len(styles))
-        for i, (model, _n) in enumerate(ranked[:cap]):
+        for i, ((model, harness), _n) in enumerate(ranked[:cap]):
             fill, ink = styles[i]
-            bands.append({"tier": tier, "model": model,
-                          "display": _display_name(model, tier),
+            bands.append({"tier": tier, "model": model, "harness": harness,
+                          "display": _band_label(_display_name(model, tier),
+                                                 harness, multi),
                           "fill": fill, "ink": ink, "folded": None})
         rest = ranked[cap:]
-        if rest:
+        by_agent = {}
+        for (model, harness), _n in rest:
+            by_agent.setdefault(harness, []).append(model)
+        for harness in sorted(by_agent):
+            models = by_agent[harness]
             fill, ink = other_style
-            plural = "s" if len(rest) != 1 else ""
-            bands.append({"tier": tier, "model": None,
-                          "display": "other (%d model%s)" % (len(rest), plural),
+            plural = "s" if len(models) != 1 else ""
+            label = "other (%d model%s)" % (len(models), plural)
+            bands.append({"tier": tier, "model": None, "harness": harness,
+                          "display": _band_label(label, harness, multi),
                           "fill": fill, "ink": ink,
-                          "folded": [model for model, _n in rest]})
+                          "folded": models})
     band_of = {}
     for b in bands:
         if b["folded"] is None:
-            band_of[(b["tier"], b["model"])] = (b["tier"], b["model"])
+            band_of[(b["tier"], b["model"], b["harness"])] = (
+                b["tier"], b["model"], b["harness"])
         else:
             for model in b["folded"]:
-                band_of[(b["tier"], model)] = (b["tier"], None)
+                band_of[(b["tier"], model, b["harness"])] = (
+                    b["tier"], None, b["harness"])
     return bands, band_of
 
 
-def _panel_series(panel_reqs, bands, band_of, t0, t1, n_cols):
-    """Column statistics for one panel.
+def _band_label(name, harness, multi):
+    """A band's name: the model (and class) plus the agent when it matters.
+
+    The agent suffix is the whole attribution mechanism of the single
+    stack, so it is drawn whenever more than one agent has traffic -- the
+    one case where "whose traffic" has more than one answer.
+    """
+    if not multi:
+        return name
+    return "%s \u00b7 %s" % (name, harness)
+
+
+def _panel_series(reqs, bands, band_of, t0, t1, n_cols):
+    """Column statistics for the whole window.
 
     `means[key][k]` is the time-integral of that band's concurrent-request
     count over column k (divide by the column width for the average);
     `colmax[k]` is the most concurrent inference requests at any instant in
     column k; `peak`/`peak_t` the exact maximum and the first instant it
-    was reached. One event sweep computes all of it.
+    was reached. One event sweep computes all of it. (The name is pinned by
+    tests that call this directly.)
     """
-    keys = [(b["tier"], b["model"]) for b in bands]
+    keys = [(b["tier"], b["model"], b["harness"]) for b in bands]
     means = {key: [0.0] * n_cols for key in keys}
     colmax = [0] * n_cols
     col_w = (t1 - t0) / n_cols
     events = []
-    for r in panel_reqs:
-        key = band_of.get((r.tier, r.model))
+    for r in reqs:
+        key = band_of.get((r.tier, r.model, r.harness))
         if key is None:
             continue          # a class with no band has no stack to draw
         events.append((max(t0, r.start), 1, key))
@@ -279,43 +338,39 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
     """Collect the chart as an ordered list of shapes.
 
     `m` is the metrics dict from analyse(); `reqs` the raw requests, because
-    the panels draw one tick per rejected request. `capacity` is a
+    the picture draws one tick per rejected request. `capacity` is a
     plan.Capacity (None means nothing was declared, and then no priority
     rule is drawn). Shape order below is paint order.
     """
     timed_reqs = timed(reqs)
-    if not timed_reqs:
-        return Scene(640, 120, C["bg"], [
-            Text(20, 60, "luna-doctor: no timed requests in this window "
-                         "(try a wider --since)", size=15, fill=C["text"]),
-        ], font=CHART_FONT)
 
     cap = capacity
     declared_n = cap.priority if cap is not None and cap.priority is not None else None
     declared_txt = cap.declared if cap is not None else ""
     declared_named = bool(declared_txt) and declared_txt.lower() in PLAN_PRIORITY
 
-    t0 = min(r.start for r in timed_reqs)
-    t1 = max(r.end for r in timed_reqs)
-    # t1 > t0 always: every timed request has a positive duration, so the
-    # request holding the latest end carries t1 past t0. No floor is needed,
-    # and one would lie: span also sizes the averaging column, and a window
-    # shorter than the floor would scale every band's height by (t1 - t0).
+    if timed_reqs:
+        t0 = min(r.start for r in timed_reqs)
+        t1 = max(r.end for r in timed_reqs)
+        # t1 > t0 always: every timed request has a positive duration, so
+        # the request holding the latest end carries t1 past t0. No floor is
+        # needed, and one would lie: span also sizes the averaging column,
+        # and a window shorter than the floor would scale every band's
+        # height by (t1 - t0).
+    else:
+        # No agent had timed traffic in this window. The picture is still
+        # one plot area, drawn over the requested window -- empty axes and
+        # the honest footer -- never a bare message.
+        t1 = time.time()
+        t0 = t1 - hours * 3600
     span = t1 - t0
 
     bands, band_of = _bands(timed_reqs)
-    # agent panels in volume order, biggest next to the aggregate, so the
-    # reader compares the shapes that matter most, side by side
+    # the agents in volume order, for the footer's provenance
     by_harness_n = {}
     for r in timed_reqs:
         by_harness_n[r.harness] = by_harness_n.get(r.harness, 0) + 1
     harnesses = sorted(by_harness_n, key=lambda h: (-by_harness_n[h], h))
-    multi = len(harnesses) > 1
-    panel_specs = [("all agents", timed_reqs)]
-    if multi:
-        for h in harnesses:
-            panel_specs.append((h, [r for r in timed_reqs if r.harness == h]))
-    panel_of_harness = {h: i + 1 for i, h in enumerate(harnesses)}
 
     # ---- geometry ---------------------------------------------------------
     pad_l, pad_r = 56, 18
@@ -325,20 +380,33 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
     xlab_y = bot + 20
 
     label_w = max([_est_w(b["display"], 10) for b in bands] + [40.0])
-    gutter = max(64.0, min(180.0, label_w + 12))
-    row_w = width - pad_l - pad_r
-    panel_w = row_w / len(panel_specs)
-    plot_w = max(36.0, panel_w - gutter)
+    gutter = max(64.0, min(260.0, label_w + 14))
+    plot_w = max(120.0, width - pad_l - pad_r - gutter)
+    px = pad_l
 
     n_cols = max(48, min(480, round(span / 240)))
     n_cols = max(24, min(n_cols, int(plot_w)))
     col_s = span / n_cols
 
-    # one shared vertical scale: the peak of everything, plus the declared
+    # one series for the whole machine: the stack's height is the account
+    # total, and one sweep computes every band's share of it
+    means, colmax, peak_total, peak_ts = _panel_series(
+        timed_reqs, bands, band_of, t0, t1, n_cols)
+
+    # the one stack order, read off the series itself: scheduling class
+    # first (priority below background), then peak thickness, then volume,
+    # then name -- deterministic, big steady bands at the base, thin ones
+    # capping the stack
+    def _stack_order(b):
+        mv = means.get((b["tier"], b["model"], b["harness"])) or []
+        pk = max([v / col_s for v in mv] or [0.0])
+        return (0 if b["tier"] == "interactive" else 1,
+                -pk, -sum(mv), b["display"])
+    bands = sorted(bands, key=_stack_order)
+
+    # one vertical scale: the peak of everything, plus the declared
     # priority concurrency when there is one (a declared rule must be
-    # drawable, so it joins the scale instead of clipping off the panel)
-    agg_series = _panel_series(timed_reqs, bands, band_of, t0, t1, n_cols)
-    peak_total, peak_ts = agg_series[2], agg_series[3]
+    # drawable, so it joins the scale instead of clipping off the plot)
     y_raw = max(1, peak_total, declared_n or 0)
     step = 1 if y_raw <= 10 else (2 if y_raw <= 30 else 5)
     head = max(2, y_raw // 8 + 1)
@@ -348,10 +416,10 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
     def y_of(v):
         return bot - (v / y_max) * (bot - top)
 
-    def col_x(px, k):
+    def col_x(k):
         return px + plot_w * k / n_cols
 
-    def x_of(px, ts):
+    def x_of(ts):
         return px + (ts - t0) / span * plot_w
 
     n_reqs = m["requests"]
@@ -367,11 +435,16 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
     # ---- title block ------------------------------------------------------
     add(Text(pad_l, title_y, "luna-doctor \u00b7 last %s" % human_window(hours),
              size=20, weight="600", fill=C["text"]))
-    add(Text(pad_l, sub_y,
-             "%d requests \u00b7 peak %d concurrent inference requests "
-             "\u00b7 %d rejected at admission \u00b7 %d%% on background scheduling"
-             % (n_reqs, m["peak_concurrency"], dead, bg_pct),
-             size=12.5, fill=C["muted"]))
+    if timed_reqs:
+        add(Text(pad_l, sub_y,
+                 "%d requests \u00b7 peak %d concurrent inference requests "
+                 "\u00b7 %d rejected at admission \u00b7 %d%% on background scheduling"
+                 % (n_reqs, m["peak_concurrency"], dead, bg_pct),
+                 size=12.5, fill=C["muted"]))
+    else:
+        add(Text(pad_l, sub_y,
+                 "no timed requests in this window (try a wider --since)",
+                 size=12.5, fill=C["muted"]))
     # the hue key: three words, each in the colour it names. No boxes.
     kx = pad_l
     for word, colour in (("priority", PRIORITY_STYLE[0][1]),
@@ -380,7 +453,7 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
         add(Text(kx, key_y, word, size=11, fill=colour))
         kx += _est_w(word, 11) + 20
 
-    # ---- panels -----------------------------------------------------------
+    # ---- the one plot area -------------------------------------------------
     x_ticks = 6 if plot_w >= 260 else (4 if plot_w >= 120 else 3)
     # Tick labels are clock times until the window holds more than two days:
     # up to there the day cycle wraps at most once, so a repeated HH:MM is
@@ -388,139 +461,128 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
     # label becomes the day.
     day_labels = span > 2 * 86400
 
-    for pi, (title, preqs) in enumerate(panel_specs):
-        px = pad_l + pi * panel_w
-        if pi == 0:
-            means, colmax, peak, peak_ts_p = agg_series
-        else:
-            means, colmax, peak, peak_ts_p = _panel_series(
-                preqs, bands, band_of, t0, t1, n_cols)
+    # muted furniture, under the data: level hairlines and time hairlines
+    for v in y_vals:
+        if v:
+            y = y_of(v)
+            add(Line(px, y, px + plot_w, y, C["grid"], 1.0, (), 0.8))
+    for i in range(x_ticks + 1):
+        x = x_of(t0 + span * i / x_ticks)
+        add(Line(x, top, x, bot, C["grid"], 1.0, (), 0.7))
 
-        # header: the panel's name, and its own peak
-        add(Text(px, top - 12, title, size=12, weight="600", fill=C["text"]))
-        add(Text(px + plot_w, top - 12, "peak %d" % peak, size=10.5,
-                 fill=C["muted"], anchor="end"))
-
-        # muted furniture, under the data: level hairlines and time hairlines
-        for v in y_vals:
-            if v:
-                y = y_of(v)
-                add(Line(px, y, px + plot_w, y, C["grid"], 1.0, (), 0.8))
-        for i in range(x_ticks + 1):
-            x = x_of(px, t0 + span * i / x_ticks)
-            add(Line(x, top, x, bot, C["grid"], 1.0, (), 0.7))
-
-        # the stack: one rect run per band, averages per column
-        cum = [0.0] * n_cols
-        label_entries = []      # (band, y0 at the band's end, leader x or None)
-        for b in bands:
-            key = (b["tier"], b["model"])
-            mvals = means.get(key)
-            if not mvals:
+    # the stack: one rect run per band, averages per column, in the fixed
+    # band order; the running total is the account's in-flight requests
+    cum = [0.0] * n_cols
+    label_entries = []      # (band, y0 at the band's end, leader x or None)
+    for b in bands:
+        key = (b["tier"], b["model"], b["harness"])
+        mvals = means.get(key)
+        if not mvals:
+            continue
+        segs = []           # (y_top, y_bot) per column, None when nothing
+        last_k, last_y0 = None, None
+        for k in range(n_cols):
+            base = cum[k]
+            v = mvals[k] / col_s
+            cum[k] = base + v
+            if v <= 0:
+                segs.append(None)
                 continue
-            segs = []           # (y_top, y_bot) per column, None when nothing
-            last_k, last_y0, leader_x = None, None, None
-            for k in range(n_cols):
-                base = cum[k]
-                v = mvals[k] / col_s
-                cum[k] = base + v
-                if v <= 0:
-                    segs.append(None)
-                    continue
-                y_t, y_b = y_of(base + v), y_of(base)
-                segs.append((y_t, y_b))
-                if y_b - y_t < 0.15:
-                    continue      # sub-pixel bands stay in the stack, not the ink
-                last_k, last_y0 = k, (y_t + y_b) / 2.0
-            # merge columns whose band segment rounds to the same geometry
-            k = 0
-            while k < n_cols:
-                seg = segs[k]
-                if seg is None:
-                    k += 1
-                    continue
-                q = (round(seg[0] * 4), round(seg[1] * 4))
-                j = k
-                while (j + 1 < n_cols and segs[j + 1] is not None
-                       and (round(segs[j + 1][0] * 4),
-                            round(segs[j + 1][1] * 4)) == q):
-                    j += 1
-                add(Rect(col_x(px, k), seg[0], col_x(px, j + 1) - col_x(px, k),
-                         seg[1] - seg[0], fill=b["fill"]))
-                k = j + 1
-            if last_k is not None:
-                at_edge = last_k >= n_cols - 1
-                label_entries.append((b, last_y0,
-                                      None if at_edge else col_x(px, last_k + 1)))
-
-        # the busiest moment per column, as one step outline
+            y_t, y_b = y_of(base + v), y_of(base)
+            segs.append((y_t, y_b))
+            if y_b - y_t < 0.15:
+                continue      # sub-pixel bands stay in the stack, not the ink
+            last_k, last_y0 = k, (y_t + y_b) / 2.0
+        # merge columns whose band segment rounds to the same geometry
         k = 0
         while k < n_cols:
-            v = colmax[k]
+            seg = segs[k]
+            if seg is None:
+                k += 1
+                continue
+            q = (round(seg[0] * 4), round(seg[1] * 4))
             j = k
-            while j + 1 < n_cols and colmax[j + 1] == v:
+            while (j + 1 < n_cols and segs[j + 1] is not None
+                   and (round(segs[j + 1][0] * 4),
+                        round(segs[j + 1][1] * 4)) == q):
                 j += 1
-            if v > 0:
-                y = y_of(v)
-                add(Line(col_x(px, k), y, col_x(px, j + 1), y,
-                         C["outline"], 1.1, (), 0.9))
+            add(Rect(col_x(k), seg[0], col_x(j + 1) - col_x(k),
+                     seg[1] - seg[0], fill=b["fill"]))
             k = j + 1
-        for k in range(1, n_cols):
-            a, b2 = colmax[k - 1], colmax[k]
-            if a != b2:
-                add(Line(col_x(px, k), y_of(a), col_x(px, k), y_of(b2),
-                         C["outline"], 1.1, (), 0.9))
+        if last_k is not None:
+            at_edge = last_k >= n_cols - 1
+            label_entries.append((b, last_y0,
+                                  None if at_edge else col_x(last_k + 1)))
 
-        # the axis under the stack
-        add(Line(px, bot, px + plot_w, bot, C["axis"]))
+    # the busiest moment per column, as one step outline over the stack:
+    # the envelope of the account's total in-flight requests
+    k = 0
+    while k < n_cols:
+        v = colmax[k]
+        j = k
+        while j + 1 < n_cols and colmax[j + 1] == v:
+            j += 1
+        if v > 0:
+            y = y_of(v)
+            add(Line(col_x(k), y, col_x(j + 1), y,
+                     C["outline"], 1.1, (), 0.9))
+        k = j + 1
+    for k in range(1, n_cols):
+        a, b2 = colmax[k - 1], colmax[k]
+        if a != b2:
+            add(Line(col_x(k), y_of(a), col_x(k), y_of(b2),
+                     C["outline"], 1.1, (), 0.9))
 
-        # the exact peak, marked where it happened
-        peak_txt = datetime.fromtimestamp(peak_ts_p, timezone.utc).strftime("%H:%M UTC")
-        add(Circle(x_of(px, peak_ts_p), y_of(peak), 2.6, fill=C["bg"],
+    # the axis under the stack
+    add(Line(px, bot, px + plot_w, bot, C["axis"]))
+
+    # the exact peak, marked where it happened
+    if peak_total > 0:
+        peak_txt = datetime.fromtimestamp(peak_ts, timezone.utc).strftime("%H:%M UTC")
+        add(Circle(x_of(peak_ts), y_of(peak_total), 2.6, fill=C["bg"],
                    stroke=C["text"], stroke_width=1.2,
                    title="peak %d concurrent inference requests \u00b7 %s"
-                         % (peak, peak_txt)))
+                         % (peak_total, peak_txt)))
 
-        # level labels, on the first panel only; the scale is shared
-        if pi == 0:
-            for v in y_vals:
-                add(Text(pad_l - 10, y_of(v) + 3.5, str(v), size=10.5,
-                         fill=C["muted"], anchor="end"))
+    # level labels
+    for v in y_vals:
+        add(Text(pad_l - 10, y_of(v) + 3.5, str(v), size=10.5,
+                 fill=C["muted"], anchor="end"))
 
-        # time ticks: marks on each panel, labels under each panel
-        for i in range(x_ticks + 1):
-            ts = t0 + span * i / x_ticks
-            x = x_of(px, ts)
-            add(Line(x, bot, x, bot + 5, C["axis"]))
-            fmt = "%b %d" if day_labels else "%H:%M"
-            label = datetime.fromtimestamp(ts, timezone.utc).strftime(fmt)
-            add(Text(x, xlab_y, label, size=9.5, anchor="middle", fill=C["muted"]))
+    # time ticks: marks on the axis, labels under it
+    for i in range(x_ticks + 1):
+        ts = t0 + span * i / x_ticks
+        x = x_of(ts)
+        add(Line(x, bot, x, bot + 5, C["axis"]))
+        fmt = "%b %d" if day_labels else "%H:%M"
+        label = datetime.fromtimestamp(ts, timezone.utc).strftime(fmt)
+        add(Text(x, xlab_y, label, size=9.5, anchor="middle", fill=C["muted"]))
 
-        # direct labels: one per band at the right-hand edge, in the band's
-        # own ink, at the height the band left the panel; a hairline leader
-        # connects an early-ending band to its name. Gaps are enforced so
-        # the label column can never collide with itself.
-        ys = []
-        for b, y0, _lx in label_entries:
-            y = y0
-            if ys and y < ys[-1] + 11.0:
-                y = ys[-1] + 11.0
-            ys.append(y)
-        if ys and ys[-1] > bot - 7:
-            shift = ys[-1] - (bot - 7)
-            ys = [max(top + 7.0, y - shift) for y in ys]
-            for i in range(1, len(ys)):
-                if ys[i] < ys[i - 1] + 11.0:
-                    ys[i] = ys[i - 1] + 11.0
-        for (b, y0, lx), y in zip(label_entries, ys):
-            if lx is not None and px + plot_w - lx > 4:
-                add(Line(lx, y0, px + plot_w + 2, y, C["axis"], 0.7, (), 0.6))
-        for (b, y0, lx), y in zip(label_entries, ys):
-            add(Text(px + plot_w + 6, y + 3.2, b["display"], size=10, fill=b["ink"]))
+    # direct labels: one per band at the right-hand edge, in the band's
+    # own ink, at the height the band left the stack; a hairline leader
+    # connects an early-ending band to its name. Gaps are enforced so
+    # the label column can never collide with itself.
+    ys = []
+    for b, y0, _lx in label_entries:
+        y = y0
+        if ys and y < ys[-1] + 11.0:
+            y = ys[-1] + 11.0
+        ys.append(y)
+    if ys and ys[-1] > bot - 7:
+        shift = ys[-1] - (bot - 7)
+        ys = [max(top + 7.0, y - shift) for y in ys]
+        for i in range(1, len(ys)):
+            if ys[i] < ys[i - 1] + 11.0:
+                ys[i] = ys[i - 1] + 11.0
+    for (b, y0, lx), y in zip(label_entries, ys):
+        if lx is not None and px + plot_w - lx > 4:
+            add(Line(lx, y0, px + plot_w + 2, y, C["axis"], 0.7, (), 0.6))
+    for (b, y0, lx), y in zip(label_entries, ys):
+        add(Text(px + plot_w + 6, y + 3.2, b["display"], size=10, fill=b["ink"]))
 
     # ---- flare ticks: one per rejected or overflowed request ---------------
-    # Hung from the top edge of the owning agent's panel at the moment the
-    # request died, so the reader can see which agent was hit and when.
+    # Hung from the top edge of the plot area at the moment the request
+    # died; the hover title names the agent whose request it was.
     for r in timed_reqs:
         if r.demoted:
             ts, kind = r.start, "overflowed to background scheduling"
@@ -530,18 +592,15 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
             ts, kind = r.end, "rejected: concurrency limit"
         else:
             continue
-        pi = panel_of_harness.get(r.harness, 0)
-        px = pad_l + pi * panel_w
-        x = x_of(px, ts)
-        title = "%s \u00b7 %s \u00b7 waited %s" % (kind, r.model or "(unknown)",
-                                                  _fmt_dur(r.duration))
+        x = x_of(ts)
+        title = "%s \u00b7 %s \u00b7 %s \u00b7 waited %s" % (
+            kind, r.harness, r.model or "(unknown)", _fmt_dur(r.duration))
         add(Line(x, top, x, top + 7, C["flare"], 1.4, (), 0.95))
         # a Line cannot carry a tooltip, so an invisible hover spot does
         add(Circle(x, top + 3.5, 3, fill=None, stroke=None, title=title))
 
-    # ---- the declared priority concurrency, on the aggregate panel only ----
+    # ---- the declared priority concurrency, against the one stack ----------
     if declared_n is not None:
-        px = pad_l
         ry = y_of(declared_n)
         add(Line(px, ry, px + plot_w, ry, C["rule"], 1.0, (5, 4), 0.9))
         if declared_named:
@@ -571,7 +630,11 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
                  "specific to the account and cannot be read from these logs "
                  "\u2014 declare it with chart --plan <plan name or number>")
 
-    if declared_n is not None and m["peak_concurrency"] > declared_n:
+    if not timed_reqs:
+        line2 = ("reading: no timed request in this window; the axes span the "
+                 "requested window and nothing was measured \u2014 try a wider "
+                 "--since or run luna-doctor discover")
+    elif declared_n is not None and m["peak_concurrency"] > declared_n:
         if dead:
             line2 = ("reading: the peak of %d concurrent inference requests "
                      "exceeded the declared priority concurrency %d; %d "
@@ -613,12 +676,15 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
                  "budget %.0fs: %d silent stall(s)"
                  % (CLIENT_IDLE_TIMEOUT_S, stalls))
 
+    if harnesses:
+        read_from = "read from %s logs" % ", ".join(harnesses)
+    else:
+        read_from = "no agent had a timed request in this window"
     line4 = ("bands: average concurrent inference requests per %s column "
              "\u00b7 grey outline: the busiest moment per column \u00b7 a request "
              "waiting for admission counts as open until it is served or "
-             "rejected \u00b7 luna-doctor v%s \u00b7 last %s \u00b7 read from %s logs"
-             % (_fmt_dur(col_s), VERSION, human_window(hours),
-                ", ".join(harnesses)))
+             "rejected \u00b7 luna-doctor v%s \u00b7 last %s \u00b7 %s"
+             % (_fmt_dur(col_s), VERSION, human_window(hours), read_from))
 
     # the footer is wrapped, and the canvas grows to keep it: provenance is
     # mandatory content, so a window with more to report than four rows hold
