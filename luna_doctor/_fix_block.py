@@ -2,7 +2,7 @@
 """`fix` command for luna-doctor.
 
 Executed inside luna_doctor.cli's namespace, so it may use Request, collect,
-analyse, window_hours, ADVISE_FANOUT_MAX and friends.
+analyse, window_hours, ADVISED_CONCURRENCY and friends.
 
 Design rules:
   * Never write. Print only. No shell is emitted.
@@ -170,7 +170,7 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
     except (TypeError, ValueError):
         extract_n = SWAMP_DEFAULT_EXTRACT
         llm_n = SWAMP_DEFAULT_LLM
-    pi_budget = ADVISE_FANOUT_MAX
+    pi_budget = ADVISED_CONCURRENCY
     swamp_total = extract_n + llm_n
     combined = pi_budget + swamp_total
     cap = INTERACTIVE_BURST_CAP
@@ -236,7 +236,7 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
                         f"is past the conservative combined budget. Default {SWAMP_DEFAULT_LLM} from "
                         f"{SWAMP_CITATION_DEFAULT}; live from {llm_cite}. {CAP_COPY[0].upper()}{CAP_COPY[1:]}."),
                 "instruction": (f"Ask your agent: set SWAMP_LLM_CONCURRENCY={llm_rec} (was {llm_n} from {llm_cite}). "
-                                f"Check it with your swamp runner's env and restart it so the next batch respects the new fan-out."),
+                                f"Check it with your swamp runner's env and restart it so the next batch respects the new limit."),
                 "impact": f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = {combined_rec} within the combined budget.",
             },
         ],
@@ -285,9 +285,9 @@ def _why(*bits: str) -> str:
 
 
 def _impact(peak: int) -> str:
-    if peak <= ADVISE_FANOUT_MAX:
+    if peak <= ADVISED_CONCURRENCY:
         return (f"no effect at your current peak of {peak} concurrent requests - this is headroom so "
-                f"the next wide fan-out cannot overflow into the background tier.")
+                f"a later burst cannot overflow into the background tier.")
     return f"your peak of {peak} concurrent requests is already past this limit, so this is the change that bites."
 
 
@@ -305,7 +305,7 @@ def demotion_note(reason: str, model: str) -> str:
 # ---- lunaroute explainer (instructions-only fix) --------------------------
 # Rendered once at the top of every non-JSON fix report so the per-agent
 # instructions make sense even to a first-time user. Short by design:
-# what LunaRoute is, what plan/tier means here, how fan-out fits, and how to
+# what LunaRoute is, what plan/tier means here, how concurrency fits, and how to
 # talk to the `lunaroute` command (with the `npx` fallback when it is not on
 # PATH).
 
@@ -318,7 +318,7 @@ LUNAROUTE_PREFACE = (
 
 LUNAROUTE_ROUTING_PREFACE = (
     "Routing: by default, non-interactive work (subagents, background tasks) "
-    "should ride the background tier — it is slower but admits wider fan-out. "
+    "should ride the background tier — it is slower but admits more concurrent requests. "
     "Interactive work (the session you are watching) rides the priority tier. "
     "Every non-interactive call should use the background variant of your model (e.g. "
     "`glm-5.3-background` rather than `glm-5.3`). If your account has no background "
@@ -352,7 +352,7 @@ def recommendations(m, reqs, agents) -> list:
     dead = m["by_outcome"].get("admission_timeout", 0)
     idle_stalls = m["by_outcome"].get("client_idle_timeout", 0)
     bgcount = m["by_tier"].get("background", 0)
-    wide = peak > ADVISE_FANOUT_MAX or dead > 0
+    wide = peak > ADVISED_CONCURRENCY or dead > 0
     evidence = _why(
         f"peak concurrency {peak},",
         f"{dead} request(s) blocked at admission," if dead else "",
@@ -370,19 +370,21 @@ def recommendations(m, reqs, agents) -> list:
         idle_ms = settings.get("httpIdleTimeoutMs")
         changes = []
 
-        if isinstance(limit, int) and limit > ADVISE_FANOUT_MAX:
+        if isinstance(limit, int) and limit > ADVISED_CONCURRENCY:
             changes.append({
                 "key": "globalConcurrencyLimit",
                 "file": PI_SUBAGENT_CFG,
                 "from": limit,
-                "to": ADVISE_FANOUT_MAX,
+                "to": ADVISED_CONCURRENCY,
                 "why": _why(evidence,
                             f"This machine caps children at {limit}, wider than the interactive "
-                            f"admission width - {CAP_COPY}. Past it, requests are demoted to the "
-                            f"background tier, where the first token takes about 600s."),
-                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISE_FANOUT_MAX} "
-                                f"(was {limit}). This caps simultaneous child agents so your burst no longer overflows "
-                                f"the interactive lane and gets demoted to background. Restart the harness after the change."),
+                            f"admission width - {CAP_COPY}. Past that width, the excess concurrent "
+                            f"requests park or overflow into background scheduling, where the first "
+                            f"token takes about 600s."),
+                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISED_CONCURRENCY} "
+                                f"(was {limit}). This caps simultaneous child agents so your concurrent requests stay "
+                                f"within the interactive admission width instead of overflowing into background "
+                                f"scheduling. Restart the harness after the change."),
                 "impact": _impact(peak),
             })
         elif limit is None:
@@ -390,11 +392,11 @@ def recommendations(m, reqs, agents) -> list:
                 "key": "globalConcurrencyLimit",
                 "file": PI_SUBAGENT_CFG,
                 "from": "unset (default 20)",
-                "to": ADVISE_FANOUT_MAX,
+                "to": ADVISED_CONCURRENCY,
                 "why": _why(evidence,
-                            "The default lets one run fan out 20 children, well past the interactive "
+                            "The default lets one run hold 20 concurrent requests, well past the interactive "
                             f"admission width - {CAP_COPY}."),
-                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISE_FANOUT_MAX}. "
+                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISED_CONCURRENCY}. "
                                 f"The current default (20) will keep overflowing the interactive tier under load; lower it. "
                                 f"Have the agent read the existing file first, preserve other keys, then apply the change."),
                 "impact": _impact(peak),
@@ -467,16 +469,16 @@ def recommendations(m, reqs, agents) -> list:
             except ValueError:
                 return True
 
-        if too_big(subs, ADVISE_FANOUT_MAX):
+        if too_big(subs, ADVISED_CONCURRENCY):
             changes.append({
                 "key": "env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
                 "file": CLAUDE_SETTINGS,
                 "from": subs if subs is not None else "unset (default 20)",
-                "to": str(ADVISE_FANOUT_MAX),
+                "to": str(ADVISED_CONCURRENCY),
                 "why": _why(evidence,
                             f"The default is 20 concurrent subagents, well past the interactive "
                             f"admission width - {CAP_COPY}."),
-                "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {ADVISE_FANOUT_MAX}. "
+                "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {ADVISED_CONCURRENCY}. "
                                 f"The default 20 keeps overflowing interactive headroom."),
                 "impact": _impact(peak),
             })
@@ -529,7 +531,7 @@ def recommendations(m, reqs, agents) -> list:
         text = _read_text(CODEX_CONFIG)
         keys = {}
         if "max_concurrent_threads_per_session" not in text:
-            keys["max_concurrent_threads_per_session"] = str(ADVISE_FANOUT_MAX)
+            keys["max_concurrent_threads_per_session"] = str(ADVISED_CONCURRENCY)
         if bg and wide and "default_subagent_model" not in text:
             keys["default_subagent_model"] = json.dumps(bg)
         if keys:
@@ -544,7 +546,8 @@ def recommendations(m, reqs, agents) -> list:
                     "to": desired,
                     "why": _why(evidence,
                                 "Codex has no verified request-timeout knob, so it cannot defend itself"
-                                " against a 600s first token; keep the fan-out under the advised width instead.",
+                                " against a 600s first token; keep concurrent requests under the"
+                                " advised width instead.",
                                 bg_note),
                     "instruction": (f"Ask your agent: in {CODEX_CONFIG} set {pretty_keys} to {desired}. "
                                     f"Existing keys in that file must be preserved. No shell is needed — let the agent edit the TOML directly. "
@@ -575,7 +578,10 @@ def render_fix(recs, m, as_json: bool) -> None:
                 "admission_deaths": m["by_outcome"].get("admission_timeout", 0),
                 "silent_stalls": m["by_outcome"].get("client_idle_timeout", 0),
                 "background_requests": m["by_tier"].get("background", 0),
-                "fanout_limit": ADVISE_FANOUT_MAX,
+                # The account's priority concurrency allowance, in concurrent
+                # requests. Null until the plan-derivation pass can read the
+                # account's plan: never 0, never a guessed default.
+                "priority_concurrency": None,
             },
             "agents": recs,
         }, indent=2))
@@ -589,7 +595,7 @@ def render_fix(recs, m, as_json: bool) -> None:
     for line in _wrap(_lunaroute_preface_text(), 72):
         print(line)
     print()
-    print(f"Fan-out limit for the advice below: {ADVISE_FANOUT_MAX} "
+    print(f"Advice: keep concurrent requests at or under {ADVISED_CONCURRENCY} "
           f"({CAP_COPY}).")
     print()
     for group in recs:

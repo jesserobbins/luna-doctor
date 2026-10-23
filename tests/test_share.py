@@ -49,7 +49,7 @@ class WhatsAppSafety(unittest.TestCase):
 class ShareText(unittest.TestCase):
     def _rep(self, headline="Pressure found."):
         return Report(headline, [Section("traffic", [Row("peak concurrency", "17", "bad")])],
-                      ["Narrow the fan-out to 8."])
+                      ["Keep concurrent requests at or under 8."])
 
     def _m(self, **over):
         m = {"requests": 1661, "peak_concurrency": 17,
@@ -77,7 +77,7 @@ class ShareText(unittest.TestCase):
 
     def test_adjustments_are_bullets(self):
         text = render_share_text(self._rep(), {})
-        self.assertIn("- Narrow the fan-out to 8.", text)
+        self.assertIn("- Keep concurrent requests at or under 8.", text)
 
     def test_provenance_names_the_window_and_the_account(self):
         text = render_share_text(self._rep(), self._m())
@@ -124,15 +124,15 @@ class ShareText(unittest.TestCase):
             [
                 "20 request(s) were blocked at admission (`scheduler admission timeout`).",
                 "3 request(s) stalled until the harness's own ~300s idle budget killed them.",
-                "21 window(s) had more than 8 requests in flight at once.",
+                "21 window(s) held more than 8 concurrent requests at once.",
                 "1577 request(s) already ran on the -background tier.",
-                "1 request(s) hit a rate-limit error (429 rate_limit_error).",
+                "1 request(s) were rejected (429 rate_limit_error).",
                 "8 stalled request(s) had another request to the same model complete "
                 "inside their own window.",
-                "swamp is configured to fan out to 20 concurrent requests per behavior - "
+                "swamp is configured for 20 concurrent requests per behavior - "
                 "a setting, not measured traffic.",
-                "Adjust: keep interactive fan-out at or under 8, and move any wider "
-                "fan-out to the -background variant of the same model.",
+                "Adjust: keep concurrent requests at or under 8, and move anything "
+                "wider to the -background variant of the same model.",
             ])
 
     def test_message_is_trimmed_for_a_group_chat(self):
@@ -153,8 +153,8 @@ class ShareText(unittest.TestCase):
         self.assertTrue(any("silent-overflow" in b for b in bullets),
                         "the stall bullet names the signature")
         self.assertEqual(bullets[-1],
-                         "- Keep interactive fan-out at or under 8, and move any wider "
-                         "fan-out to the -background variant of the same model.")
+                         "- Keep concurrent requests at or under 8, and move anything "
+                         "wider to the -background variant of the same model.")
         self.assertEqual(lines[-1], "measured on this account, last 1d")
         # Swamp is in use, so it gets exactly one mention - its configured
         # value line - and the latency line yields its slot to stay at five.
@@ -219,7 +219,7 @@ class ShareCard(unittest.TestCase):
         self.assertNotIn("nan", svg)
         self.assertNotIn("None", svg)
 
-    def test_scene_labels_swamp_fanout_as_configured(self):
+    def test_scene_labels_swamp_concurrency_as_configured(self):
         from luna_doctor.scene import build_card_scene, svg_from
 
         m = self._m(swamp={"present": True, "configuredConcurrency": 20})

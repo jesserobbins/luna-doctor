@@ -45,7 +45,7 @@ def wa_safe(s: str) -> str:
 def _share_numbers(m: dict) -> list:
     """The numbers that earn a place on a phone screen: at most five.
 
-    Measured figures only: swamp's configured fan-out, when swamp is in
+    Measured figures only: swamp's configured concurrency, when swamp is in
     use, is a setting and gets its own line labelled "configured" - it is
     never summed into the measured peak beside it. When swamp is in use
     that line takes the fifth slot in place of interactive latency, which
@@ -64,7 +64,7 @@ def _share_numbers(m: dict) -> list:
     lat = ((m.get("latency_s") or {}).get("interactive") or {})
     sw = m.get("swamp") or {}
     if sw.get("present") and sw.get("configuredConcurrency"):
-        out.append(("swamp fan-out (configured)",
+        out.append(("swamp concurrency (configured)",
                     f"{sw['configuredConcurrency']} - a setting, not measured traffic"))
     elif lat.get("p50") is not None:
         p90 = f", p90 {lat['p90']:.1f}s" if lat.get("p90") is not None else ""

@@ -17,6 +17,15 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Breaking
+
+- `fix --json`: `findings.fanout_limit` is replaced by `findings.priority_concurrency`, and the envelope `schema` is now `4`. The removed field carried the tool's advised number under a name that was the owner's own shorthand for capacity; it never had a stable consumer, so nothing was preserved for compatibility. The new field is a different quantity — the account's actual priority concurrency allowance, in concurrent requests — and it is `null` until the plan-derivation pass can read the account's plan: never `0`, never a guessed default. `contract.advised_fanout_max` is renamed `contract.advised_concurrency` in the same sweep. While the project is prerelease, `schema` is bumped freely; the envelope has no consumers to protect yet.
+
+### Changed
+
+- The capacity vocabulary is LunaRoute's own documentation language, everywhere a user reads it. "Fan-out" — the owner's personal shorthand, never a LunaRoute term — is gone from every rendered surface (reports, the pretty renderer, share text, fix output, chart SVG, README and the skill), and "lane", which is an internal API field name rather than product language, is gone with it. Copy now says **concurrent requests** for what the gateway counts, **priority concurrency** for the account's allowance, **park or overflow into background scheduling** for what happens past it, and **rejected** for a `429` `CONCURRENT_REQUEST_LIMIT_EXCEEDED`. The advice reads "keep concurrent requests at or under 8" / "keep concurrent requests within your priority concurrency allowance"; the `INTERACTIVE_BURST_CAP` arithmetic is unchanged and will be re-derived from the account's plan in a separate pass.
+- The internal spelling follows the copy: `ADVISE_FANOUT_MAX` is now `ADVISED_CONCURRENCY` (also `contract.advised_concurrency` in the `--json` envelope), the swamp scratch key is `_swamp_configured_concurrency`, and the `ADMISSION_DEADLINE_S` alias — kept only for a chart-block compatibility that no longer exists, since both files ship in one package — is removed in favour of `ADMISSION_DEADLINE_GLM53_S`.
+
 ## [0.1.1-alpha.3] - 2026-10-23
 
 ### Added
