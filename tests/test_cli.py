@@ -380,6 +380,78 @@ class OutcomeClasses(unittest.TestCase):
         self.assertEqual(self.classify("kernel panic in the tensor router"), "other_error")
 
 
+class RateLimitIsConcurrency(unittest.TestCase):
+    """A 429 on LunaRoute is capacity, not a quota: no advice may imply otherwise.
+
+    The gateway has no quota or token-budget dimension. Every 429,
+    `rate_limit_error` and "quota"-looking rejection is concurrent requests
+    overrunning what the account admits, so the advice has to send the reader
+    to fan-out or the -background tier. `message_limit` is the one exception:
+    a message-count ceiling, which fan-out genuinely cannot fix - but it is
+    still not a quota.
+    """
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _advice(self, *outcomes):
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 2.0, outcome=outcome)
+                for i, outcome in enumerate(outcomes)]
+        _, adj, _ = self.m.verdict(self.m.analyse(reqs, 1.0))
+        return " ".join(adj)
+
+    def test_rate_limited_advice_names_concurrency_as_the_cause(self):
+        joined = self._advice("rate_limited")
+        self.assertIn("429", joined)
+        self.assertIn("concurrent-request capacity", joined)
+        self.assertIn("narrow the fan-out", joined)
+        self.assertIn("-background", joined)
+        # The old advice told the reader that narrowing fan-out would not help.
+        self.assertNotIn("will not fix it", joined)
+        self.assertNotIn("not concurrency", joined)
+
+    def test_org_lane_total_advice_is_about_the_whole_lane(self):
+        joined = self._advice("org_concurrency_limit")
+        self.assertIn("concurrent lane", joined)
+        self.assertIn("narrow the fan-out", joined)
+        self.assertNotIn("not a rate limit", joined)
+
+    def test_message_limit_is_a_message_count_ceiling(self):
+        joined = self._advice("message_limit")
+        self.assertIn("message-count limit", joined)
+        self.assertIn("not concurrency pressure", joined)
+        self.assertIn("fan-out will not fix it", joined)
+
+    def test_no_rendered_advice_says_quota(self):
+        """Regression: the tool must never tell a reader a quota exists."""
+        base = 1_700_000_000.0
+        outcomes = ("admission_timeout", "client_idle_timeout", "org_concurrency_limit",
+                    "message_limit", "rate_limited", "context_length_exceeded",
+                    "payload_too_large", "model_not_found", "harness_deadline")
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base + i, end=base + i + 2.0, outcome=outcome)
+                for i, outcome in enumerate(outcomes)]
+        metrics = self.m.analyse(reqs, 1.0)
+        head, adj, _ = self.m.verdict(metrics)
+        rep = self.m.build_report(metrics, head, adj)
+        from luna_doctor.report import render_plain
+        from luna_doctor.render_pretty import render_pretty
+        from luna_doctor.render_share import render_share_text
+        from luna_doctor.style import Style
+        rendered = {
+            "advice": " ".join(adj),
+            "plain": render_plain(rep),
+            "pretty": render_pretty(rep, Style(False, False, False)),
+            "share": render_share_text(rep, metrics),
+        }
+        self.assertIn("rate_limit", rendered["advice"], "the sample must reach every branch")
+        self.assertIn("message-count", rendered["advice"])
+        for surface, text in rendered.items():
+            self.assertNotIn("quota", text.lower(), f"{surface} still says quota")
+
+
 class PerModelDeadlines(unittest.TestCase):
     def setUp(self):
         self.m = _load_cli()
@@ -1161,7 +1233,8 @@ class ThirdReviewRegressions(unittest.TestCase):
                                start=base, end=base + 1200.0, outcome="harness_deadline")]
         _, adj, _ = self.m.verdict(self.m.analyse(reqs, 1.0))
         joined = " ".join(adj)
-        self.assertIn("period quota", joined)
+        self.assertIn("message-count limit", joined)
+        self.assertIn("not concurrency pressure", joined)
         self.assertIn("caller's own deadline", joined)
 
     def test_filename_carries_the_whole_window(self):

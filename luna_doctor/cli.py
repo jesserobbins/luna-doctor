@@ -194,6 +194,10 @@ def classify(rec: dict) -> str:
         return "upstream_error"
     if "failed to resolve api key" in low or "401" in low[:4]:
         return "auth_error"
+    # A 429 here is this gateway's report that the account's concurrent-request
+    # capacity is full: there is no separate quota dimension, so the class is
+    # never a "wait it out" signal. The name stays `rate_limited` because it is
+    # part of the JSON contract; only the advice behind it is about fan-out.
     if "rate_limit_error" in low or err.startswith("429") or "would exceed your account" in low:
         return "rate_limited"
     if "aborted" in low or stop == "aborted":
@@ -1869,8 +1873,8 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         pressure = True
         adj.append(
             f"{ocl} request(s) hit the organization concurrency cap "
-            f"(`CONCURRENT_REQUEST_LIMIT_EXCEEDED`). That is the lane total, not a rate limit: "
-            f"narrow the fan-out or move work to the -background tier."
+            f"(`CONCURRENT_REQUEST_LIMIT_EXCEEDED`). That is the account's whole concurrent lane, "
+            f"not one model's share: narrow the fan-out or move work to the -background tier."
         )
     mnf = m["by_outcome"].get("model_not_found", 0)
     if mnf:
@@ -1893,8 +1897,9 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     ml = m["by_outcome"].get("message_limit", 0)
     if ml:
         adj.append(
-            f"{ml} request(s) hit a message-count limit (`Message limit reached`). That is a "
-            f"period quota on the account, not concurrency - narrowing fan-out will not fix it."
+            f"{ml} request(s) hit a message-count limit (`Message limit reached`, a 400). That is "
+            f"a ceiling on how many messages this account may send, not concurrency pressure - "
+            f"narrowing fan-out will not fix it."
         )
     hd = m["by_outcome"].get("harness_deadline", 0)
     if hd:
@@ -1907,8 +1912,9 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     if rl:
         pressure = True
         adj.append(
-            f"{rl} request(s) hit an account rate limit (429 rate_limit_error). That is the "
-            f"subscription quota, not concurrency: narrowing fan-out will not fix it."
+            f"{rl} request(s) hit a rate-limit error (429 `rate_limit_error`). That error is the "
+            f"account's concurrent-request capacity being exceeded, nothing else: narrow the "
+            f"fan-out, or move the work to the -background tier."
         )
 
     lat = m["latency_s"]["interactive"]

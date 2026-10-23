@@ -126,7 +126,7 @@ class ShareText(unittest.TestCase):
                 "3 request(s) stalled until the harness's own ~300s idle budget killed them.",
                 "21 window(s) had more than 8 requests in flight at once.",
                 "1577 request(s) already ran on the -background tier.",
-                "1 request(s) hit an account rate limit (429 rate_limit_error).",
+                "1 request(s) hit a rate-limit error (429 rate_limit_error).",
                 "8 stalled request(s) had another request to the same model complete "
                 "inside their own window.",
                 "swamp is configured to fan out to 20 concurrent requests per behavior - "

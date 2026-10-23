@@ -56,7 +56,7 @@ clipboard tool. `--json` is copied exactly.
 | `admission_timeout` | blocked at the gateway's ~120.2s admission deadline. Concurrency was exhausted; the request was never admitted. |
 | `client_idle_timeout` | stalled until the harness's ~300s idle budget killed the stream. Almost always the silent background demotion. |
 | `upstream_unavailable` / `upstream_error` | 503/500/502 propagation. Not concurrency; check service health. |
-| `rate_limited` | 429 `rate_limit_error` — the subscription quota. Narrowing fan-out will not fix it. |
+| `rate_limited` | 429 `rate_limit_error`. The account's concurrent-request capacity was exceeded — there is no separate quota dimension behind this error. Narrowing fan-out and moving work to the `-background` tier is exactly the fix. |
 | `connection_error` / `request_timeout` | transport-level trouble, not the tier. Retry once, then look elsewhere. |
 | `aborted` | the user or a tool cancelled it. |
 

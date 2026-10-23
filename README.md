@@ -4,7 +4,7 @@
 
 Diagnose what your LunaRoute agent traffic is doing to concurrency — and what to change.
 
-LunaRoute bills **concurrency**, not tokens. When you exceed it the gateway does not return a 429. It waits, or demotes the request to a background tier and holds the stream open with keep-alives while producing nothing. The harness eventually kills the stall with an error string of its own making — which is why grepping logs for 429 finds nothing.
+LunaRoute bills **concurrency**, not tokens. There is no quota or token-budget dimension to it: the account admits a fixed number of concurrent requests at once, and every symptom below is that number being exceeded. The gateway waits, or demotes the request to a background tier and holds the stream open with keep-alives while producing nothing — and part of that same overflow surfaces directly as a 429 (`rate_limit_error`, `CONCURRENT_REQUEST_LIMIT_EXCEEDED`). A 429 in your logs is therefore a concurrency symptom, not a quota you can wait out. Often the harness kills a stall with an error string of its own making instead, which is why grepping logs for 429 finds only part of the picture.
 
 `luna-doctor` reads the session logs the machine already has, reconstructs what was asked for at what tier and what came back, and tells you what to adjust. Thresholds are measured on your machine (via `probe`), not assumed from ours.
 
@@ -93,7 +93,7 @@ not the card's path.
 
 ### `analyze` — what your machine has been doing
 
-Reconstructs every model request from the local log stores (pi, claude-code) and classifies each outcome against measured gateway behaviour — admission timeouts, silent background demotions, upstream errors, rate limits, and more. Thresholds (admission deadlines, idle budgets) are measured per model via `probe`, not hardcoded — and the number of interactive requests the gateway admits at once is specific to the account and cannot be read from these logs. `analyze` reports what it observed for each model in the window.
+Reconstructs every model request from the local log stores (pi, claude-code) and classifies each outcome against measured gateway behaviour — admission timeouts, silent background demotions, upstream errors, concurrency rejections that surface as 429s, and more. Thresholds (admission deadlines, idle budgets) are measured per model via `probe`, not hardcoded — and the number of interactive requests the gateway admits at once is specific to the account and cannot be read from these logs. `analyze` reports what it observed for each model in the window.
 
 ### `fix` — what to change, with copy-paste you can audit
 
