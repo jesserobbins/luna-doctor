@@ -53,7 +53,7 @@ luna-doctor compare --n 8 --model <model>   # model vs its -background twin
 
 ### `analyze` — what your machine has been doing
 
-Reconstructs every model request from the local log stores (pi, claude-code) and classifies each outcome against measured gateway behaviour — admission timeouts, silent background demotions, upstream errors, rate limits, and more. Thresholds (admission deadlines, burst caps, idle budgets) are measured per model via `probe`, not hardcoded; `analyze` reports what it observed for each model in the window.
+Reconstructs every model request from the local log stores (pi, claude-code) and classifies each outcome against measured gateway behaviour — admission timeouts, silent background demotions, upstream errors, rate limits, and more. Thresholds (admission deadlines, idle budgets) are measured per model via `probe`, not hardcoded — and the number of interactive requests the gateway admits at once is per account, not a constant: measure yours with `luna-doctor probe --enable-probe`. `analyze` reports what it observed for each model in the window.
 
 ### `fix` — what to change, with copy-paste you can audit
 
@@ -61,7 +61,7 @@ Prints one block per agent: the exact file, the snippet, and a command that back
 
 ### `chart` — one picture
 
-A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requests in flight over time, split by tier, with the burst cap and advised fan-out as dashed rules. Bottom panel: every request end-to-end on a log axis, with reference walls for admission and idle budgets — failures sit on the wall that killed them. A burst in the top panel at the same x as a cluster of failures below is the whole diagnosis.
+A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requests in flight over time, split by tier, with the gateway's rough admission level and the advised fan-out as dashed rules. Bottom panel: every request end-to-end on a log axis, with reference walls for admission and idle budgets — failures sit on the wall that killed them. A burst in the top panel at the same x as a cluster of failures below is the whole diagnosis.
 
 ### `probe` / `compare` — what the gateway will actually admit
 

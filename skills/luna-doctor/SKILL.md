@@ -50,8 +50,9 @@ Two metrics carry most of the diagnosis:
 ## Reading the chart
 
 `luna-doctor chart` draws the same window as two stacked panels. Top: requests in
-flight, split by tier, with the advised fan-out (8) and the burst cap (10) as
-dashed rules. Bottom: every request end to end on a log axis, with the 120.2s
+flight, split by tier, with the advised fan-out (8) and the gateway's rough
+admission level as dashed rules. Bottom: every request end to end on a log
+axis, with the 120.2s
 admission deadline and the 300s client idle budget as dashed walls — failures sit
 on the wall that killed them (red crosses at 120.2s, amber dots at 300s).
 
@@ -62,9 +63,10 @@ answer is that fan-out is not the problem.
 
 ## What to recommend
 
-1. **Keep interactive fan-out at or under 8.** The interactive burst cap is 10,
-   and anything past it is demoted to background, where the first token can take
-   ten minutes.
+1. **Keep interactive fan-out at or under 8.** The gateway admits roughly this many
+   interactive requests at once, per account; measure yours with
+   `luna-doctor probe --enable-probe`. Anything past that width is demoted to
+   background, where the first token can take ten minutes.
 2. **Move wide fan-out to the `-background` variant** of the same model. More
    concurrency, much slower SLA. That is the trade, and it is deliberate.
    `luna-doctor fix` emits the exact key for whichever agent the user runs.

@@ -12,8 +12,9 @@ Two halves:
 The constants below are measured, not assumed. See research notes: the gateway
 waits ~25.2s before sending SSE headers, kills unadmitted requests at a
 per-model deadline (~120.2s measured on glm-5.3, ~60.3s on deepseek-4.1-flash,
-reported per model in every run), demotes overflow past a burst cap to the
-background tier with `x-lunaroute-warning: overflowed-to-background`, and holds
+reported per model in every run), demotes overflow past the
+interactive admission width to the background tier with
+`x-lunaroute-warning: overflowed-to-background`, and holds
 demoted streams open with an SSE keep-alive every ~10s while producing nothing.
 pi's own idle budget is 300s, which is where `Stream ended without finish_reason`
 comes from - a client string, never a gateway one.
@@ -73,6 +74,12 @@ UPSTREAM_HOLD_S = 10.1          # 503 INFERENCE_UNAVAILABLE hold
 KEEPALIVE_S = 10.0              # SSE keep-alive cadence in background tier
 INTERACTIVE_BURST_CAP = 10      # per-burst interactive class cap: min(n, 10)
 ADVISE_FANOUT_MAX = 8           # our recommendation: below the cap, with headroom
+# What user-facing copy says wherever it used to name the gateway's cap as a
+# constant. The admission width is per account and only a probe can see it, so
+# copy points at the number it sits next to ("roughly this many") and tells the
+# reader to measure. INTERACTIVE_BURST_CAP stays for arithmetic, never prose.
+CAP_COPY = ("the gateway admits roughly this many interactive requests at once, per account; "
+            "measure yours with `probe --enable-probe`")
 
 PI_STORE = "~/.pi/agent/sessions"
 CLAUDE_STORE = "~/.claude/projects"
@@ -112,7 +119,10 @@ class Request:
 
     @property
     def saturated(self) -> bool:
-        return self.outcome in ("admission_timeout", "client_idle_timeout", "stream_stalled")
+        # "stream_stalled" is not an outcome anything emits: the idle stall is
+        # logged as client_idle_timeout, so promising it here invented a third
+        # vocabulary word. Saturation is the two outcomes the logs really carry.
+        return self.outcome in ("admission_timeout", "client_idle_timeout")
 
 
 def tier_of(model: str | None, warning: str | None = None) -> tuple[str, bool, str]:
@@ -1766,8 +1776,8 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         adj.append(
             f"{m['pressure_windows']} window(s) had more than {ADVISE_FANOUT_MAX} requests in flight "
             f"at once; the longest lasted {fmt(w.get('seconds'), 's')} and peaked at "
-            f"{fmt(w.get('max_concurrent'))} concurrent. The interactive burst cap is "
-            f"{INTERACTIVE_BURST_CAP}: past it, requests are demoted to background rather than failing."
+            f"{fmt(w.get('max_concurrent'))} concurrent. {CAP_COPY[0].upper()}{CAP_COPY[1:]}; "
+            f"past that width, requests are demoted to background rather than failing."
         )
     if bg:
         adj.append(
@@ -2269,8 +2279,8 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
     verdict = "exceeds" if M > INTERACTIVE_BURST_CAP else "is within"
     return (
         f"a background probe at n={probe_n} passed; adding swamp's configured "
-        f"{N} (={ex}+{llm}) would be {M}, which {verdict} the interactive "
-        f"burst cap of {INTERACTIVE_BURST_CAP}"
+        f"{N} (={ex}+{llm}) would put the combined width at {M}, which {verdict} "
+        f"the conservative combined budget. {CAP_COPY[0].upper()}{CAP_COPY[1:]}."
     )
 
 
@@ -2309,8 +2319,8 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
         adj.append(f"{r['admission_deaths']}/{n} died on admission (`scheduler admission timeout`). "
                    f"For this width of fan-out, use the -background variant of the same model.")
     if overflow_n:
-        adj.append(f"{overflow_n} request(s) carried `overflowed-to-background`: the burst exceeded "
-                   f"the interactive cap of {INTERACTIVE_BURST_CAP}.")
+        adj.append(f"{overflow_n} request(s) carried `overflowed-to-background`: the burst was "
+                   f"wider than the interactive admission width - {CAP_COPY}.")
     if no_ent_n:
         # demotion_note lives in _fix_block.py, exec'd into this namespace at
         # import time; the probe and fix advice must say the same thing.

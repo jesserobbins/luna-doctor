@@ -227,19 +227,20 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
         return [{
             "agent": "swamp",
             "note": (f"swamp already within budget: pi {pi_budget} + swamp extract {extract_n} + "
-                     f"swamp phase-6 {llm_n} = {combined} <= cap {cap}. No change needed."),
+                     f"swamp phase-6 {llm_n} = {combined}. No change needed."),
             "changes": [{
                 "key": "SWAMP_EXTRACT_CONCURRENCY + SWAMP_LLM_CONCURRENCY",
                 "file": os.path.join(repo_dir or "~", ".env.swamp") if repo_dir else "~/.swamp.yaml",
                 "from": f"extract={extract_n} ({extract_cite}), llm={llm_n} ({llm_cite})",
-                "to": f"extract={extract_n}, llm={llm_n} (within cap)",
+                "to": f"extract={extract_n}, llm={llm_n} (within budget)",
                 "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + llm {llm_n} = {combined} "
-                        f"is within INTERACTIVE_BURST_CAP {cap}. No adjustment needed, but keep the "
-                        f"combined total under {cap} when tuning swamp concurrency. "
+                        f"fits the conservative combined budget, so no adjustment is needed; keep the "
+                        f"combined total within it when tuning swamp concurrency. "
                         f"Defaults: {SWAMP_CITATION_DEFAULT} extract={SWAMP_DEFAULT_EXTRACT}, "
-                        f"llm={SWAMP_DEFAULT_LLM}. Live: ~/.swamp.yaml + .env.swamp."),
-                "impact": "no change needed; swamp is already within the combined burst cap.",
-                "apply": f"true   # within budget: {combined} <= {cap}",
+                        f"llm={SWAMP_DEFAULT_LLM}. Live: ~/.swamp.yaml + .env.swamp. "
+                        f"{CAP_COPY[0].upper()}{CAP_COPY[1:]}."),
+                "impact": "no change needed; swamp is already within the combined budget.",
+                "apply": f"true   # within budget: {combined}",
                 "snippet": f"SWAMP_EXTRACT_CONCURRENCY={extract_n}\nSWAMP_LLM_CONCURRENCY={llm_n}",
             }],
         }]
@@ -255,11 +256,12 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
                 "from": f"{extract_n} ({extract_cite})",
                 "to": str(extract_rec),
                 "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + phase-6 {llm_n} = {combined} "
-                        f"> cap {cap}: swamp alone would overflow the interactive burst cap even before "
-                        f"pi traffic. Default {SWAMP_DEFAULT_EXTRACT} from {SWAMP_CITATION_DEFAULT} "
+                        f"is past the conservative combined budget: swamp alone would fill the "
+                        f"interactive admission width even before pi traffic. "
+                        f"Default {SWAMP_DEFAULT_EXTRACT} from {SWAMP_CITATION_DEFAULT} "
                         f"(extractMany worker count). Live value from {extract_cite}."),
                 "impact": (f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = "
-                           f"{combined_rec} <= {cap}."),
+                           f"{combined_rec}, within the combined budget."),
                 "apply": _swamp_env_apply(repo_dir, "SWAMP_EXTRACT_CONCURRENCY", str(extract_rec)),
                 "snippet": f"SWAMP_EXTRACT_CONCURRENCY={extract_rec}",
             },
@@ -269,11 +271,12 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
                 "from": f"{llm_n} ({llm_cite})",
                 "to": str(llm_rec),
                 "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + phase-6 {llm_n} = {combined} "
-                        f"> cap {cap} (INTERACTIVE_BURST_CAP): swamp phase-6 alone overfills the "
-                        f"interactive burst cap without headroom for pi. Default {SWAMP_DEFAULT_LLM} from "
-                        f"{SWAMP_CITATION_DEFAULT} (runVerifyPass batch concurrency). Live value from {llm_cite}."),
+                        f"is past the conservative combined budget: swamp phase-6 alone overfills the "
+                        f"interactive admission width without headroom for pi. Default {SWAMP_DEFAULT_LLM} from "
+                        f"{SWAMP_CITATION_DEFAULT} (runVerifyPass batch concurrency). Live value from {llm_cite}. "
+                        f"{CAP_COPY[0].upper()}{CAP_COPY[1:]}."),
                 "impact": (f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = "
-                           f"{combined_rec} <= {cap}."),
+                           f"{combined_rec}, within the combined budget."),
                 "apply": _swamp_env_apply(repo_dir, "SWAMP_LLM_CONCURRENCY", str(llm_rec)),
                 "snippet": f"SWAMP_LLM_CONCURRENCY={llm_rec}",
             },
@@ -462,9 +465,9 @@ def recommendations(m, reqs, agents) -> list:
                 "from": limit,
                 "to": ADVISE_FANOUT_MAX,
                 "why": _why(evidence,
-                            f"This machine caps children at {limit}, above the gateway's interactive"
-                            f" burst cap of {INTERACTIVE_BURST_CAP}: anything past the cap is demoted to the"
-                            f" background tier, where the first token takes about 600s."),
+                            f"This machine caps children at {limit}, wider than the interactive "
+                            f"admission width - {CAP_COPY}. Past it, requests are demoted to the "
+                            f"background tier, where the first token takes about 600s."),
                 "impact": _impact(peak),
                 "apply": _jq_apply(PI_SUBAGENT_CFG,
                                    f".globalConcurrencyLimit = {ADVISE_FANOUT_MAX}",
@@ -478,8 +481,8 @@ def recommendations(m, reqs, agents) -> list:
                 "from": "unset (default 20)",
                 "to": ADVISE_FANOUT_MAX,
                 "why": _why(evidence,
-                            "The default lets one run fan out 20 children, double the gateway's interactive"
-                            " burst cap."),
+                            "The default lets one run fan out 20 children, well past the interactive "
+                            f"admission width - {CAP_COPY}."),
                 "impact": _impact(peak),
                 "apply": _jq_apply(PI_SUBAGENT_CFG,
                                    f".globalConcurrencyLimit = {ADVISE_FANOUT_MAX}",
@@ -565,8 +568,8 @@ def recommendations(m, reqs, agents) -> list:
                 "from": subs if subs is not None else "unset (default 20)",
                 "to": str(ADVISE_FANOUT_MAX),
                 "why": _why(evidence,
-                            f"The default is 20 concurrent subagents, double the gateway's interactive cap"
-                            f" of {INTERACTIVE_BURST_CAP}."),
+                            f"The default is 20 concurrent subagents, well past the interactive "
+                            f"admission width - {CAP_COPY}."),
                 "impact": _impact(peak),
                 "apply": _jq_apply(CLAUDE_SETTINGS,
                                    f'.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = "{ADVISE_FANOUT_MAX}"',
@@ -639,7 +642,7 @@ def recommendations(m, reqs, agents) -> list:
                     "to": ", ".join(str(v).strip('"') for v in keys.values()),
                     "why": _why(evidence,
                                 "Codex has no verified request-timeout knob, so it cannot defend itself"
-                                " against a 600s first token; keep the fan-out under the cap instead.",
+                                " against a 600s first token; keep the fan-out under the advised width instead.",
                                 bg_note),
                     "impact": _impact(peak),
                     "apply": _toml_agents_apply(CODEX_CONFIG, keys),
@@ -677,8 +680,8 @@ def render_fix(recs, m, as_json: bool) -> None:
         print("Nothing to change: no agent is configured in a way that can overflow the gateway.")
         return
     print("Copy-paste fixes. Nothing below runs on its own; each block backs the file up first.")
-    print(f"Fan-out limit used throughout: {ADVISE_FANOUT_MAX} (gateway interactive cap is "
-          f"{INTERACTIVE_BURST_CAP}).")
+    print(f"Fan-out limit used throughout: {ADVISE_FANOUT_MAX} "
+          f"({CAP_COPY}).")
     print()
     for group in recs:
         n = len(group["changes"])

@@ -190,8 +190,10 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
     shapes.extend(step_lines(max_s, c["background"], 1.4))
     shapes.extend(step_lines(max_a, c["interactive"], 1.8))
 
-    # the two numbers that matter: the cap you get demoted past, and the advice
-    for value, label, colour in ((INTERACTIVE_BURST_CAP, "burst cap 10", c["stall"]),
+    # the two rules that matter: the admission level you get demoted past, and
+    # the advice. The label names no number: the footer says the level is per
+    # account and measured with probe, so the rule itself is the only "this many".
+    for value, label, colour in ((INTERACTIVE_BURST_CAP, "gateway admission level", c["stall"]),
                                  (ADVISE_FANOUT_MAX, "advised 8", c["muted"])):
         if value <= y_max:
             y = y_conc(value)
@@ -317,7 +319,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
 
     # footer note
     add(Text(pad_l, height - 14,
-             f"luna-doctor v{VERSION} \u00b7 gateway burst cap {INTERACTIVE_BURST_CAP} "
+             f"luna-doctor v{VERSION} \u00b7 {CAP_COPY} "
              f"\u00b7 advised fan-out \u2264 {ADVISE_FANOUT_MAX}",
              size=10.5, fill=c["muted"]))
 

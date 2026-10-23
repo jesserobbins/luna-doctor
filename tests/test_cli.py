@@ -1889,5 +1889,14 @@ class DemotionReason(unittest.TestCase):
         self.assertIn("only a probe can see", note.lower())
 
 
+class SaturatedVocabulary(unittest.TestCase):
+    def test_stream_stalled_is_not_a_promised_outcome(self):
+        m = _load_cli()
+        r = m.Request(harness="pi", session="s", model="m", outcome="stream_stalled")
+        self.assertFalse(r.saturated)
+        r2 = m.Request(harness="pi", session="s", model="m", outcome="client_idle_timeout")
+        self.assertTrue(r2.saturated)
+
+
 if __name__ == "__main__":
     unittest.main()
