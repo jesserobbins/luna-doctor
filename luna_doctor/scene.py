@@ -197,7 +197,7 @@ def _wrap_text(s: str, scale: int, max_w: int) -> list:
 def _card_pairs(m: dict, p: dict) -> list:
     """The label/value pairs that earn a place on a phone screen.
 
-    Measured numbers only. Swamp's configured fan-out, when swamp is in
+    Measured numbers only. Swamp's configured concurrency, when swamp is in
     use, is a setting and gets its own pair labelled "configured" - it is
     never summed into the measured peak beside it.
     """
@@ -215,7 +215,7 @@ def _card_pairs(m: dict, p: dict) -> list:
         pairs.append(("interactive latency p50", f"{lat['p50']:.1f}s", p["text"]))
     sw = m.get("swamp") or {}
     if sw.get("present") and sw.get("configuredConcurrency"):
-        pairs.append(("swamp fan-out (configured)", str(sw["configuredConcurrency"]),
+        pairs.append(("swamp concurrency (configured)", str(sw["configuredConcurrency"]),
                       p["muted"]))
     return pairs
 

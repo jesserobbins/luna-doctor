@@ -47,12 +47,21 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from luna_doctor import plan
 from luna_doctor import render_share
 from luna_doctor import report
+from luna_doctor import sources
 from luna_doctor.render_pretty import render_pretty, reveal, style_for
+from luna_doctor.sources import (CLAUDE_STORE, CODEX_STORE, GATEWAY_HOST,
+                                 PI_STORE, SWAMP_EXTRACT_CONCURRENCY_DEFAULT,
+                                 SWAMP_LLM_CONCURRENCY_DEFAULT)
 
 VERSION = "0.1.1-alpha.3"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
-SCHEMA_VERSION = 3         # 3: additive swamp contribution (metrics.swamp)
+SCHEMA_VERSION = 4         # 4: capacity fields renamed to the LunaRoute
+                           #     vocabulary (contract.advised_concurrency,
+                           #     findings.priority_concurrency: null until
+                           #     the plan pass) and the additive combined
+                           #     snapshot (metrics.snapshot)
 
 # ---- measured constants -----------------------------------------------------
 CONTRACT = {
@@ -64,7 +73,7 @@ CONTRACT = {
     "upstream_hold_s": 10.1,
     "keepalive_s": 10.0,
     "interactive_burst_cap": 10,
-    "advised_fanout_max": 8,
+    "advised_concurrency": 8,
 }
 
 PRE_HEADER_WAIT_S = 25.2        # fixed wait before SSE headers, load-independent
@@ -72,12 +81,11 @@ PRE_HEADER_WAIT_S = 25.2        # fixed wait before SSE headers, load-independen
 # advice and never a default for a model without observations: the deadline is
 # per model (60.3s on deepseek-4.1-flash) and `analyze` reports each model's own.
 ADMISSION_DEADLINE_GLM53_S = 120.2
-ADMISSION_DEADLINE_S = ADMISSION_DEADLINE_GLM53_S  # alias for chart block compat
 CLIENT_IDLE_TIMEOUT_S = 300.0   # pi DEFAULT_HTTP_IDLE_TIMEOUT_MS
 UPSTREAM_HOLD_S = 10.1          # 503 INFERENCE_UNAVAILABLE hold
 KEEPALIVE_S = 10.0              # SSE keep-alive cadence in background tier
 INTERACTIVE_BURST_CAP = 10      # per-burst interactive class cap: min(n, 10)
-ADVISE_FANOUT_MAX = 8           # our recommendation: below the cap, with headroom
+ADVISED_CONCURRENCY = 8         # our recommendation: below the cap, with headroom
 # What user-facing copy says wherever it used to name the gateway's cap as a
 # constant. The admitted width is specific to the account and cannot be read
 # from these logs, so copy points at the number it sits next to ("roughly
@@ -87,10 +95,8 @@ CAP_COPY = ("the gateway admits roughly this many interactive requests at once; 
             "the admitted width is specific to the account and cannot be read "
             "from these logs")
 
-PI_STORE = "~/.pi/agent/sessions"
-CLAUDE_STORE = "~/.claude/projects"
-CODEX_STORE = "~/.codex/sessions"
-GATEWAY_HOST = "gw.lunaroute.com"
+# Harness store locations, the gateway host and the swamp knob defaults live
+# in sources.py - the data-collection layer - and are imported above.
 LR_CONFIG = "~/.config/lunaroute/config.json"
 
 
@@ -115,6 +121,13 @@ class Request:
     outcome: str = "unknown"
     thinking_chars: int = 0
     text_chars: int = 0
+    # The harness's own usage record, as logged, per harness and never merged:
+    # pi writes input/cacheRead/cacheWrite/output/totalTokens, claude-code
+    # input_tokens/cache_read_input_tokens/..., codex
+    # input_tokens/cached_input_tokens/... - and codex's input_tokens INCLUDES
+    # its cached tokens while pi's input EXCLUDES cacheRead. The normalized
+    # in_tokens/out_tokens fields stay as they were; this carries the rest.
+    usage_raw: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float | None:
@@ -197,7 +210,8 @@ def classify(rec: dict) -> str:
     # A 429 here is this gateway's report that the account's concurrent-request
     # capacity is full: there is no separate quota dimension, so the class is
     # never a "wait it out" signal. The name stays `rate_limited` because it is
-    # part of the JSON contract; only the advice behind it is about fan-out.
+    # part of the JSON contract; only the advice behind it is about how many
+    # concurrent requests you hold at once.
     if "rate_limit_error" in low or err.startswith("429") or "would exceed your account" in low:
         return "rate_limited"
     if "aborted" in low or stop == "aborted":
@@ -339,6 +353,7 @@ def iter_pi(roots: list[str], since: float, until: float | None = None,
                     response_id=rid,
                     thinking_chars=think,
                     text_chars=text,
+                    usage_raw=dict(usage),
                 )
                 req.tier, req.demoted, req.reason = tier_of(model)
                 req.outcome = classify(asdict(req))
@@ -459,6 +474,7 @@ def iter_claude(roots: list[str], since: float, until: float | None = None,
             stop_reason=g["stop"],
             error_message=g["err"],
             response_id=mid,
+            usage_raw=dict(u),
         )
         req.tier, req.demoted, req.reason = tier_of(req.model)
         req.outcome = classify(asdict(req))
@@ -670,79 +686,9 @@ def _swamp_store_info(repo_dir: str | None) -> dict:
 
 
 # ---- swamp analyze helpers ------------------------------------------------
-# Task-2 contract: iter_swamp + resolve_swamp_knobs with env -> .env.swamp -> default
-
-SWAMP_EXTRACT_CONCURRENCY_DEFAULT = 12  # extensions/models/obsidian_ideas.ts:4425
-SWAMP_LLM_CONCURRENCY_DEFAULT = 8        # extensions/models/obsidian_ideas.ts:1405
-SWAMP_LLM_MODEL_DEFAULT = "deepseek-4.1-flash-background"
-SWAMP_LLM_PROVIDER_DEFAULT = "lunaroute"
-
-def _parse_dotenv(path: str) -> dict:
-    """Parse a .env file (KEY=VALUE, optional export prefix, comments)."""
-    out: dict = {}
-    try:
-        with open(path, "r", errors="replace") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[7:].strip()
-                if "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip().strip("'\"")
-                if " #" in v:
-                    v = v.split(" #")[0].strip()
-                out[k] = v
-    except OSError:
-        pass
-    return out
-
-def resolve_swamp_knobs(repoDir: str | None = None) -> dict:
-    """Resolve swamp knobs with precedence env -> repo .env.swamp -> extension default.
-
-    Returns {extractConcurrency:{value,source}, llmConcurrency:{value,source}, model:{value,source}, provider:{value,source}}
-    where source in {env, .env.swamp, default}
-    """
-    if repoDir is None:
-        repoDir = _swamp_repo_dir()
-    dotenv_vals: dict = {}
-    if repoDir and os.path.isdir(repoDir):
-        dotenv_vals = _parse_dotenv(os.path.join(repoDir, ".env.swamp"))
-    def _resolve(key: str, default, is_int: bool = False) -> dict:
-        if key in os.environ:
-            raw = os.environ[key]
-            if is_int:
-                try:
-                    v = int(str(raw).strip())
-                    if v <= 0:
-                        raise ValueError
-                    return {"value": v, "source": "env"}
-                except Exception:
-                    pass
-            else:
-                return {"value": str(raw).strip().strip("'\""), "source": "env"}
-        if key in dotenv_vals:
-            raw = dotenv_vals[key]
-            if is_int:
-                try:
-                    v = int(str(raw).strip())
-                    if v <= 0:
-                        raise ValueError
-                    return {"value": v, "source": ".env.swamp"}
-                except Exception:
-                    pass
-            else:
-                return {"value": str(raw).strip(), "source": ".env.swamp"}
-        return {"value": default, "source": "default"}
-    return {
-        "extractConcurrency": _resolve("SWAMP_EXTRACT_CONCURRENCY", SWAMP_EXTRACT_CONCURRENCY_DEFAULT, True),
-        "llmConcurrency": _resolve("SWAMP_LLM_CONCURRENCY", SWAMP_LLM_CONCURRENCY_DEFAULT, True),
-        "model": _resolve("SWAMP_LLM_MODEL", SWAMP_LLM_MODEL_DEFAULT, False),
-        "provider": _resolve("SWAMP_LLM_PROVIDER", SWAMP_LLM_PROVIDER_DEFAULT, False),
-    }
+# Task-2 contract: iter_swamp with env -> .env.swamp -> default knob
+# resolution. The knob resolution itself lives in sources.swamp_knobs (one
+# reader, provenance per value); iter_swamp and the activity scan stay here.
 
 def _yaml_field_value(text: str, field: str) -> str | None:
     try:
@@ -859,7 +805,7 @@ def _collect_swamp_metrics(repoDir: str | None, since: float | None, until: floa
     if not disc.get("present"):
         return {"present": False}
     repo = disc.get("repoDir")
-    knobs = resolve_swamp_knobs(repo)
+    knobs = sources.swamp_knobs(repo)
     bh_counts = {"succeeded": 0, "running": 0, "failed": 0, "total": 0}
     wr_counts = {"succeeded": 0, "running": 0, "failed": 0, "total": 0}
     names: set = set()
@@ -1354,8 +1300,8 @@ def _bands_for(sub: list[Request], peaks: dict[int, int], min_top_n: int,
                inflation: float) -> dict:
     """`peaks` is indexed by position in the *whole* request list, not in `sub`.
 
-    Concurrency is a property of the lane, not of a model: two models each at
-    five in flight put ten requests on the gateway.
+    Concurrency is a property of the account, not of a model: two models each
+    at five in flight put ten concurrent requests on the gateway.
     """
     timed = [(peaks[i], r.duration) for i, r in sub
              if i in peaks and r.duration is not None and r.outcome == "completed"]
@@ -1730,7 +1676,7 @@ def analyse(reqs: list[Request], window_hours: float) -> dict:
                 starved += 1
                 break
 
-    win = pressure_windows(ok, ADVISE_FANOUT_MAX)
+    win = pressure_windows(ok, ADVISED_CONCURRENCY)
     longest = max(win, key=lambda w: w["seconds"]) if win else None
     by_harness_peak = {}
     for h in sorted(by_harness):
@@ -1828,16 +1774,17 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         pressure = True
         w = m["longest_pressure_window"] or {}
         adj.append(
-            f"{m['pressure_windows']} window(s) had more than {ADVISE_FANOUT_MAX} requests in flight "
-            f"at once; the longest lasted {fmt(w.get('seconds'), 's')} and peaked at "
+            f"{m['pressure_windows']} window(s) held more than {ADVISED_CONCURRENCY} concurrent "
+            f"requests at once; the longest lasted {fmt(w.get('seconds'), 's')} and peaked at "
             f"{fmt(w.get('max_concurrent'))} concurrent. {CAP_COPY[0].upper()}{CAP_COPY[1:]}; "
-            f"past that width, requests are demoted to background rather than failing."
+            f"past that width, requests park or overflow into background scheduling "
+            f"rather than fail."
         )
     if bg:
         adj.append(
-            f"{bg} request(s) already ran on the -background tier. That is the right home for wide "
-            f"fan-out, but its SLA is minutes, not seconds: budget for it and do not put a short "
-            f"client timeout in front of it."
+            f"{bg} request(s) already ran on the -background tier. That is the right home for "
+            f"concurrent requests beyond your priority concurrency, but its SLA is minutes, not "
+            f"seconds: budget for it and do not put a short client timeout in front of it."
         )
     storms = m.get("timeout_storms") or []
     if storms:
@@ -1856,7 +1803,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
             f"Latency inflates at the ceiling: p90 {fmt(top['p90'], 's')} at concurrency "
             f"{top['band']} (n={top['n']}) against a mid-band p90 of "
             f"{fmt(bands.get('mid_p90_baseline_s'), 's')} - {bands['top_inflation']}x. "
-            f"Fan-out above this band buys latency, not throughput."
+            f"Holding more concurrent requests than this band buys latency, not throughput."
         )
     unknown = m.get("unknown_errors") or []
     if unknown:
@@ -1872,9 +1819,9 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     if ocl:
         pressure = True
         adj.append(
-            f"{ocl} request(s) hit the organization concurrency cap "
-            f"(`CONCURRENT_REQUEST_LIMIT_EXCEEDED`). That is the account's whole concurrent lane, "
-            f"not one model's share: narrow the fan-out or move work to the -background tier."
+            f"{ocl} request(s) were rejected (`CONCURRENT_REQUEST_LIMIT_EXCEEDED`) - the "
+            f"account's whole priority concurrency was in use, not one model's share. Hold "
+            f"fewer concurrent requests at once, or move work to the -background tier."
         )
     mnf = m["by_outcome"].get("model_not_found", 0)
     if mnf:
@@ -1899,7 +1846,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         adj.append(
             f"{ml} request(s) hit a message-count limit (`Message limit reached`, a 400). That is "
             f"a ceiling on how many messages this account may send, not concurrency pressure - "
-            f"narrowing fan-out will not fix it."
+            f"holding fewer concurrent requests will not fix it."
         )
     hd = m["by_outcome"].get("harness_deadline", 0)
     if hd:
@@ -1912,9 +1859,10 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     if rl:
         pressure = True
         adj.append(
-            f"{rl} request(s) hit a rate-limit error (429 `rate_limit_error`). That error is the "
-            f"account's concurrent-request capacity being exceeded, nothing else: narrow the "
-            f"fan-out, or move the work to the -background tier."
+            f"{rl} request(s) were rejected (429 `rate_limit_error`). That error is the "
+            f"account's concurrent-request capacity being exceeded, nothing else: keep concurrent "
+            f"requests within your priority concurrency allowance, or move the work to the "
+            f"-background tier."
         )
 
     lat = m["latency_s"]["interactive"]
@@ -1931,12 +1879,12 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
             f"served, not slow."
         )
 
-    # ---- swamp fan-out is configuration, never measured traffic ----
-    # The peak concurrency above is an observation; swamp's fan-out is a
-    # setting. They are reported as separate labelled facts and never
-    # combined: swamp's configured figure enters no arithmetic, no sum and
-    # no stated limit here, and never reaches the headline. What the two
-    # together might mean is a risk this report does not compute, not a
+    # ---- swamp concurrency is configuration, never measured traffic ----
+    # The peak concurrency above is an observation; swamp's configured
+    # concurrency is a setting. They are reported as separate labelled facts
+    # and never combined: swamp's configured figure enters no arithmetic, no
+    # sum and no stated limit here, and never reaches the headline. What the
+    # two together might mean is a risk this report does not compute, not a
     # number this report computes.
     sw = m.get("swamp")
     configured = None
@@ -1951,19 +1899,19 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         except Exception:
             configured = None
     if configured is None:
-        # _swamp_configured_fanout carries the setting when the full in-use
-        # scan is not attached to these metrics; pop it so --json never sees
-        # the scratch key.
-        configured = m.pop("_swamp_configured_fanout", None)
+        # _swamp_configured_concurrency carries the setting when the full
+        # in-use scan is not attached to these metrics; pop it so --json
+        # never sees the scratch key.
+        configured = m.pop("_swamp_configured_concurrency", None)
     else:
-        m.pop("_swamp_configured_fanout", None)
+        m.pop("_swamp_configured_concurrency", None)
     if configured:
         peak = m.get("peak_concurrency") or 0
         adj.append(
-            f"swamp is configured to fan out to {configured} concurrent requests per behavior"
+            f"swamp is configured for {configured} concurrent requests per behavior"
             f"{split} - a setting, not measured traffic. The measured peak concurrency this "
-            f"window is {peak}, a separate observation reported above. Overlapping swamp "
-            f"fan-out on top of interactive bursts is an unmeasured risk, not a computed "
+            f"window is {peak}, a separate observation reported above. Swamp's configured "
+            f"concurrency on top of interactive bursts is an unmeasured risk, not a computed "
             f"total; the width this account actually admits cannot be read from these logs."
         )
 
@@ -1977,8 +1925,8 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         else f"{n} requests, none blocked at admission, peak concurrency {m['peak_concurrency']}."
     )
     adj.append(
-        f"Adjust: keep interactive fan-out at or under {ADVISE_FANOUT_MAX}, and move any wider "
-        f"fan-out to the -background variant of the same model."
+        f"Adjust: keep concurrent requests at or under {ADVISED_CONCURRENCY}, and move "
+        f"anything wider to the -background variant of the same model."
     )
     return head, adj, (1 if pressure else 0)
 
@@ -2077,8 +2025,8 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
     sw = m.get("swamp")
     if sw and sw.get("present"):
         # Only an in-use swamp reaches here (installed is not in use), and its
-        # configured fan-out is labelled as a setting so it can never be read
-        # as measured traffic next to the peak concurrency row above.
+        # configured concurrency is labelled as a setting so it can never be
+        # read as measured traffic next to the peak concurrency row above.
         bh = (sw.get("behaviorHistory") or {}).get("total") or 0
         wr = (sw.get("workflowRuns") or {}).get("total") or 0
         names = list(sw.get("behaviors") or [])
@@ -2093,7 +2041,7 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
             ex = int((knobs.get("extractConcurrency") or {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT))
             ll = int((knobs.get("llmConcurrency") or {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
             src = (knobs.get("extractConcurrency") or {}).get("source") or "default"
-            setting = (f"; configured fan-out {ex + ll} per behavior (extract {ex} + verify {ll}, "
+            setting = (f"; configured concurrency {ex + ll} per behavior (extract {ex} + verify {ll}, "
                        f"from {src}) - a setting, not measured traffic")
         except Exception:
             setting = ""
@@ -2215,7 +2163,7 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
         # A zero-request window returns from verdict() before the swamp
         # scratch key is consumed, and the envelope must never ship it:
         # nothing prefixed with "_" is contract data.
-        m.pop("_swamp_configured_fanout", None)
+        m.pop("_swamp_configured_concurrency", None)
         doc = envelope("analyze", {
             "headline": head,
             "adjustments": adj,
@@ -2403,7 +2351,7 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
     """One-sentence headroom note for probe, or None when swamp is not in use.
 
     The probe measured probe_n; swamp's extract+llmConcurrency via
-    resolve_swamp_knobs() is a setting. They are reported as separate facts,
+    sources.swamp_knobs() is a setting. They are reported as separate facts,
     and the only sum sits inside an explicitly assumed "if ... would" clause.
     No network, no second probe.
     """
@@ -2411,7 +2359,7 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
         state = swamp_state(since=time.time() - 24 * 3600)
         if not state["in_use"]:
             return None
-        knobs = resolve_swamp_knobs(state["repo"])
+        knobs = sources.swamp_knobs(state["repo"])
         ex = int(knobs.get("extractConcurrency", {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT))
         ll = int(knobs.get("llmConcurrency", {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
     except Exception:
@@ -2420,7 +2368,7 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
     assumed = probe_n + configured
     verdict_word = "within" if assumed <= INTERACTIVE_BURST_CAP else "past"
     return (
-        f"swamp is configured to fan out to {configured} per behavior (extract {ex} + verify {ll}) "
+        f"swamp is configured for {configured} concurrent requests per behavior (extract {ex} + verify {ll}) "
         f"- a setting, not measured traffic; this probe measured {probe_n} concurrent sessions. "
         f"If swamp ran at its configured width during such a probe, the account would see "
         f"{assumed} concurrent requests, {verdict_word} the conservative combined budget - an "
@@ -2461,7 +2409,7 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
                    f"token. Raise --max-seconds before judging it.")
     if r["admission_deaths"]:
         adj.append(f"{r['admission_deaths']}/{n} were blocked at admission (`scheduler admission timeout`). "
-                   f"For this width of fan-out, use the -background variant of the same model.")
+                   f"For {n} concurrent requests at once, use the -background variant of the same model.")
     if overflow_n:
         adj.append(f"{overflow_n} request(s) carried `overflowed-to-background`: the burst was "
                    f"wider than the interactive admission width - {CAP_COPY}.")
@@ -2514,8 +2462,8 @@ def build_compare_report(rows: list) -> report.Report:
             f"{klass} · streamed {r['streamed']} · no token {r['silent']} · "
             f"adm.blocked {r['admission_deaths']} · cut {r['cut']} · ttfb p50 {fmt(r['ttfb'], 's')}"))
     adj = ["the interactive tier admits fewer parallel requests but answers in tens of seconds; "
-           "the -background tier admits more and answers in minutes. Pick the tier by fan-out "
-           "width, not by impatience."]
+           "the -background tier admits more and answers in minutes. Pick the tier by how many "
+           "concurrent requests you hold at once, not by impatience."]
     if any(r["cut"] or r["admission_deaths"] or r["silent"] for r in rows):
         adj.append("at least one row did not stream cleanly at this width. Read the two rows against "
                    "each other before changing models: `cut` means the budget was too small to judge "
@@ -2684,6 +2632,26 @@ def _add_copy(sp) -> None:
                          "unchanged, so nothing is lost when no tool exists")
 
 
+def _add_network(sp) -> None:
+    """The offline/online pair for the commands that consume the snapshot.
+
+    The default is offline: a cached catalog serves (a stale one too, marked
+    stale), and the network is never touched. `--online` allows one
+    authenticated GET of the model catalog (refreshing the 24h cache) and a
+    probe of the not-yet-deployed /v1/limits; a network failure still never
+    turns the report into an error - what could not be fetched is reported
+    unknown.
+    """
+    grp = sp.add_mutually_exclusive_group()
+    grp.add_argument("--online", action="store_true",
+                     help="fetch the live model catalog from the gateway (one "
+                          "authenticated GET) and refresh the 24h disk cache; "
+                          "without this flag nothing leaves the machine")
+    grp.add_argument("--offline", action="store_true",
+                     help="never touch the network, even for the catalog "
+                          "(this is the default; stated for scripts)")
+
+
 def probe_required_message(cmd: str, n: int, model: str, budget_s: float) -> str:
     """What a burst would do, stated without running it.
 
@@ -2736,6 +2704,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--out", default=None, metavar="PATH",
                    help="path for the --share card PNG "
                         "(default: ./luna-doctor-share-<ts>.png)")
+    _add_network(a)
     _add_style(a)
     a.set_defaults(func=cmd_analyze)
 
@@ -2781,6 +2750,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="claude-code store to read instead of the default (repeatable)")
     f.add_argument("--json", action="store_true")
     _add_copy(f)
+    _add_network(f)
     f.set_defaults(func=None)
 
     ch = sub.add_parser("chart", help="write a standalone SVG of concurrency and latency")
@@ -2795,6 +2765,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="pi-format store to read instead of the default (repeatable)")
     ch.add_argument("--claude-root", action="append", default=None, metavar="DIR",
                     help="claude-code store to read instead of the default (repeatable)")
+    plan.add_plan_arg(ch)
     ch.add_argument("--json", action="store_true")
     _add_style(ch)
     ch.set_defaults(func=None)
@@ -2889,9 +2860,26 @@ def cmd_analyze(args) -> int:
         sw_state = swamp_state(since=now - hours * 3600)
         if sw_state["in_use"]:
             m["swamp"] = _collect_swamp_metrics(sw_state["repo"], now - hours * 3600, now)
-            m["_swamp_configured_fanout"] = m["swamp"].get("configuredConcurrency")
+            m["_swamp_configured_concurrency"] = m["swamp"].get("configuredConcurrency")
     except Exception:
         pass
+    # Combined snapshot (additive: metrics.snapshot joins the measured
+    # requests, the declared configs and the catalog; analyse()'s own
+    # numbers above are unchanged). Offline by default: a cached catalog
+    # serves, the network is touched only with --online, and a failure
+    # anywhere in here degrades to unknown, never to an error.
+    snap = None
+    try:
+        snap = sources.build_snapshot(reqs, since=now - hours * 3600, until=now,
+                                      allow_network=bool(getattr(args, "online", False)))
+        m["snapshot"] = snap.to_dict()
+    except Exception as e:
+        m["snapshot"] = {"provenance": sources.PROV_UNKNOWN,
+                         "reason": f"collection failed: {type(e).__name__}: {e}"[:200]}
+    if bool(getattr(args, "online", False)) and (snap is None or snap.catalog is None):
+        note = snap.catalog_note if snap is not None else m["snapshot"].get("reason", "")
+        print(f"luna-doctor: catalog unavailable ({note}); "
+              f"model limits are reported unknown", file=sys.stderr)
     head, adj, code = verdict(m)
     stored = None
     if m["requests"] and not getattr(args, "no_store", False):

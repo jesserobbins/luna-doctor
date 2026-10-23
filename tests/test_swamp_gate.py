@@ -2,7 +2,7 @@
 
 Six gates: five for the states an install can be in - no marker, installed
 but idle, active inside the window, idle in `discover` - plus the arithmetic
-rule that a measured peak and a configured fan-out are different kinds of
+rule that a measured peak and a configured concurrency are different kinds of
 number and never render as one sum, and the scratch key a zero-request
 window must not ship to `--json`.
 """
@@ -83,14 +83,14 @@ class SwampGate(unittest.TestCase):
                           start=1_700_000_000.0, end=1_700_000_020.0, outcome="completed")
                 for _ in range(6)]
         metrics = m.analyse(reqs, window_hours=24)
-        metrics["_swamp_configured_fanout"] = 20
+        metrics["_swamp_configured_concurrency"] = 20
         head, adj, _ = m.verdict(metrics)
         self.assertIn("6", head)
         self.assertTrue(any("configured" in line.lower() for line in [head] + adj),
-                        "swamp fan-out must be described as configuration, not measured traffic")
+                        "swamp's configured concurrency must be described as a setting, not measured traffic")
         # This test once checked only the headline, so a sum re-added to the
         # adjustments passed. No line may carry the bare sum of the measured
-        # peak (6) and the configured fan-out (20), in any voice.
+        # peak (6) and the configured concurrency (20), in any voice.
         for line in [head] + adj:
             self.assertIsNone(re.search(r"\b26\b", line),
                               f"measured + configured must not be summed: {line}")
@@ -125,7 +125,7 @@ class SwampGate(unittest.TestCase):
                         yield from keys(v)
 
             scratch = [k for k in keys(doc) if k.startswith("_")]
-            self.assertEqual(scratch, [], "no internal key may ride the schema-3 envelope")
+            self.assertEqual(scratch, [], "no internal key may ride the schema-4 envelope")
 
 
 if __name__ == "__main__":

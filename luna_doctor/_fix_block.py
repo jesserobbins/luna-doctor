@@ -2,7 +2,7 @@
 """`fix` command for luna-doctor.
 
 Executed inside luna_doctor.cli's namespace, so it may use Request, collect,
-analyse, window_hours, ADVISE_FANOUT_MAX and friends.
+analyse, window_hours, ADVISED_CONCURRENCY and friends.
 
 Design rules:
   * Never write. Print only. No shell is emitted.
@@ -31,108 +31,34 @@ import re
 RAISE_TIMEOUT_MS = 900000       # 15 min: past the ~633s background first token
 KNOWN_AGENTS = ("pi", "claude-code", "codex", "swamp")
 
-# Swamp env paths — citations point to extension source for defaults and
-# ~/.swamp.yaml + .env.swamp for live values.
-SWAMP_ENV_FILE = "~/.swamp.yaml"
-SWAMP_ENV_SWAMP = ".env.swamp"  # repo-local variant
-SWAMP_ENV_GLOBAL_SOURCES = "~/.swamp-sources.yaml"
-SWAMP_CITATION_DEFAULT = "extensions/models/obsidian_ideas.ts"
-SWAMP_DEFAULT_EXTRACT = 12   # extensions/models/obsidian_ideas.ts phase extractMany
-SWAMP_DEFAULT_LLM = 8        # extensions/models/obsidian_ideas.ts runVerifyPass
-
-# Verified paths (research/2026-10-21-agent-concurrency-knobs.md).
-PI_SETTINGS = "~/.pi/agent/settings.json"
-PI_SUBAGENT_CFG = "~/.pi/agent/extensions/subagent/config.json"
-CLAUDE_SETTINGS = "~/.claude/settings.json"
-CODEX_CONFIG = "~/.codex/config.toml"
+# Config paths, documented defaults and their citations are defined once in
+# the data-collection layer (luna_doctor/sources.py, read_configs) and
+# rendered here under the names the instructions have always used. Citations
+# point to extension source for the swamp defaults and to ~/.swamp.yaml +
+# .env.swamp for live values; knob resolution itself is sources.swamp_knobs.
+PI_SETTINGS = sources.PI_SETTINGS
+PI_SUBAGENT_CFG = sources.PI_SUBAGENT_CFG
+CLAUDE_SETTINGS = sources.CLAUDE_SETTINGS
+CODEX_CONFIG = sources.CODEX_CONFIG
+SWAMP_CITATION_DEFAULT = sources.SWAMP_CITATION_DEFAULT
+SWAMP_DEFAULT_EXTRACT = sources.SWAMP_EXTRACT_CONCURRENCY_DEFAULT   # extensions/models/obsidian_ideas.ts phase extractMany
+SWAMP_DEFAULT_LLM = sources.SWAMP_LLM_CONCURRENCY_DEFAULT        # extensions/models/obsidian_ideas.ts runVerifyPass
 
 
-def _read_json(path: str) -> dict:
-    try:
-        with open(os.path.expanduser(path)) as fh:
-            return json.load(fh)
-    except Exception:
-        return {}
+def _declared(fact) -> object:
+    """The value a config file actually declares, or None.
 
-
-def _read_text(path: str) -> str:
-    try:
-        with open(os.path.expanduser(path)) as fh:
-            return fh.read()
-    except Exception:
-        return ""
+    A documented default reads as unset here (sources.declared_value): the
+    from/to strings below must keep distinguishing a declared value from
+    "unset (default N)" exactly as they always have.
+    """
+    return sources.declared_value(fact)
 
 
 def _swamp_present(window_hours: float = 24.0) -> tuple[bool, str | None]:
     """The swamp advice gate: in use, not merely installed."""
     state = swamp_state(since=time.time() - window_hours * 3600)
     return bool(state["in_use"]), state["repo"]
-
-
-def resolve_swamp_knobs(repo_dir: str | None = None) -> dict:
-    """Effective swamp concurrency knobs with provenance."""
-    if repo_dir is None:
-        _, repo_dir = _swamp_present()
-    env_swamp_values: dict[str, str] = {}
-    if repo_dir:
-        env_path = os.path.join(repo_dir, ".env.swamp")
-        if os.path.isfile(env_path):
-            try:
-                with open(env_path) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line or line.startswith("#"):
-                            continue
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            env_swamp_values[k.strip()] = v.strip().strip('"\'')
-            except Exception:
-                pass
-    swamp_yaml_values: dict[str, str] = {}
-    for yaml_path in (os.path.expanduser(SWAMP_ENV_FILE),
-                      os.path.expanduser(SWAMP_ENV_GLOBAL_SOURCES)):
-        if os.path.isfile(yaml_path):
-            try:
-                with open(yaml_path) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line or line.startswith("#") or ":" not in line:
-                            continue
-                        k, v = line.split(":", 1)
-                        k, v = k.strip(), v.strip().strip('"\'')
-                        if k in ("SWAMP_EXTRACT_CONCURRENCY", "SWAMP_LLM_CONCURRENCY",
-                                  "SWAMP_LLM_MODEL", "SWAMP_LLM_PROVIDER"):
-                            swamp_yaml_values[k] = v
-            except Exception:
-                pass
-
-    def _resolve(key: str, default: int | str) -> dict:
-        if key in os.environ:
-            raw = os.environ[key].strip()
-            try:
-                return {"value": int(raw) if isinstance(default, int) else raw, "source": "env", "raw": raw}
-            except ValueError:
-                return {"value": raw, "source": "env", "raw": raw}
-        if key in swamp_yaml_values:
-            raw = swamp_yaml_values[key]
-            try:
-                return {"value": int(raw) if isinstance(default, int) else raw, "source": "~/.swamp.yaml", "raw": raw}
-            except ValueError:
-                return {"value": raw, "source": "~/.swamp.yaml", "raw": raw}
-        if key in env_swamp_values:
-            raw = env_swamp_values[key]
-            try:
-                return {"value": int(raw) if isinstance(default, int) else raw, "source": ".env.swamp", "raw": raw}
-            except ValueError:
-                return {"value": raw, "source": ".env.swamp", "raw": raw}
-        return {"value": default, "source": "default", "raw": str(default)}
-
-    return {
-        "extractConcurrency": _resolve("SWAMP_EXTRACT_CONCURRENCY", SWAMP_DEFAULT_EXTRACT),
-        "llmConcurrency": _resolve("SWAMP_LLM_CONCURRENCY", SWAMP_DEFAULT_LLM),
-        "model": _resolve("SWAMP_LLM_MODEL", "deepseek-4.1-flash-background"),
-        "provider": _resolve("SWAMP_LLM_PROVIDER", "lunaroute"),
-    }
 
 
 def _swamp_split() -> tuple[int, int, int]:
@@ -161,7 +87,7 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
     present, repo_dir = _swamp_present(float(m.get("window_hours") or 24.0))
     if not present:
         return []
-    knobs = resolve_swamp_knobs(repo_dir)
+    knobs = sources.swamp_knobs(repo_dir)
     extract_val = knobs["extractConcurrency"]["value"]
     llm_val = knobs["llmConcurrency"]["value"]
     try:
@@ -170,7 +96,7 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
     except (TypeError, ValueError):
         extract_n = SWAMP_DEFAULT_EXTRACT
         llm_n = SWAMP_DEFAULT_LLM
-    pi_budget = ADVISE_FANOUT_MAX
+    pi_budget = ADVISED_CONCURRENCY
     swamp_total = extract_n + llm_n
     combined = pi_budget + swamp_total
     cap = INTERACTIVE_BURST_CAP
@@ -236,7 +162,7 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
                         f"is past the conservative combined budget. Default {SWAMP_DEFAULT_LLM} from "
                         f"{SWAMP_CITATION_DEFAULT}; live from {llm_cite}. {CAP_COPY[0].upper()}{CAP_COPY[1:]}."),
                 "instruction": (f"Ask your agent: set SWAMP_LLM_CONCURRENCY={llm_rec} (was {llm_n} from {llm_cite}). "
-                                f"Check it with your swamp runner's env and restart it so the next batch respects the new fan-out."),
+                                f"Check it with your swamp runner's env and restart it so the next batch respects the new limit."),
                 "impact": f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = {combined_rec} within the combined budget.",
             },
         ],
@@ -248,19 +174,12 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
     }]
 
 
-def catalog() -> list:
-    """Model ids from the lunaroute CLI; empty when unavailable."""
-    try:
-        import subprocess
-        out = subprocess.run(["lunaroute", "models", "--json"], capture_output=True,
-                             text=True, timeout=8)
-        if out.returncode == 0:
-            data = json.loads(out.stdout)
-            if isinstance(data, list):
-                return [str(m) for m in data]
-    except Exception:
-        pass
-    return []
+# The catalog is no longer fetched here by shelling out to `lunaroute models
+# --json`: the snapshot built in cmd_fix carries the richer GET /v1/models
+# catalog (cached on disk for 24h, fetched only with --online), and
+# recommendations() receives its model ids. When the catalog is unknown the
+# ids list is empty and pick_background_model falls back to the models the
+# logs actually saw - the same degraded answer as before, never a guess.
 
 
 def pick_background_model(reqs, cat) -> list | None:
@@ -285,9 +204,9 @@ def _why(*bits: str) -> str:
 
 
 def _impact(peak: int) -> str:
-    if peak <= ADVISE_FANOUT_MAX:
+    if peak <= ADVISED_CONCURRENCY:
         return (f"no effect at your current peak of {peak} concurrent requests - this is headroom so "
-                f"the next wide fan-out cannot overflow into the background tier.")
+                f"a later burst cannot overflow into the background tier.")
     return f"your peak of {peak} concurrent requests is already past this limit, so this is the change that bites."
 
 
@@ -305,7 +224,7 @@ def demotion_note(reason: str, model: str) -> str:
 # ---- lunaroute explainer (instructions-only fix) --------------------------
 # Rendered once at the top of every non-JSON fix report so the per-agent
 # instructions make sense even to a first-time user. Short by design:
-# what LunaRoute is, what plan/tier means here, how fan-out fits, and how to
+# what LunaRoute is, what plan/tier means here, how concurrency fits, and how to
 # talk to the `lunaroute` command (with the `npx` fallback when it is not on
 # PATH).
 
@@ -318,7 +237,7 @@ LUNAROUTE_PREFACE = (
 
 LUNAROUTE_ROUTING_PREFACE = (
     "Routing: by default, non-interactive work (subagents, background tasks) "
-    "should ride the background tier — it is slower but admits wider fan-out. "
+    "should ride the background tier — it is slower but admits more concurrent requests. "
     "Interactive work (the session you are watching) rides the priority tier. "
     "Every non-interactive call should use the background variant of your model (e.g. "
     "`glm-5.3-background` rather than `glm-5.3`). If your account has no background "
@@ -344,15 +263,25 @@ def _lunaroute_preface_text() -> str:
     return "\n\n".join([LUNAROUTE_PREFACE, LUNAROUTE_ROUTING_PREFACE, LUNAROUTE_COMMAND_PREFACE])
 
 
-def recommendations(m, reqs, agents) -> list:
+def recommendations(m, reqs, agents, configs=None, catalog_ids=None) -> list:
+    """Per-agent instructions from the evidence.
+
+    `configs` is the snapshot's Configs (sources.read_configs() when not
+    given): every value comes as a Fact with provenance, and _declared() keeps
+    the from/to strings distinguishing a declared value from "unset (default
+    N)" exactly as the old direct file reads did. `catalog_ids` are the
+    snapshot catalog's model ids; empty means the catalog is unknown.
+    """
     out = []
-    cat = catalog()
+    if configs is None:
+        configs = sources.read_configs()
+    cat = list(catalog_ids or [])
     bg = pick_background_model(reqs, cat)
     peak = m["peak_concurrency"]
     dead = m["by_outcome"].get("admission_timeout", 0)
     idle_stalls = m["by_outcome"].get("client_idle_timeout", 0)
     bgcount = m["by_tier"].get("background", 0)
-    wide = peak > ADVISE_FANOUT_MAX or dead > 0
+    wide = peak > ADVISED_CONCURRENCY or dead > 0
     evidence = _why(
         f"peak concurrency {peak},",
         f"{dead} request(s) blocked at admission," if dead else "",
@@ -364,25 +293,26 @@ def recommendations(m, reqs, agents) -> list:
 
     # ---------------- pi ----------------
     if "pi" in agents:
-        settings = _read_json(PI_SETTINGS)
-        subcfg = _read_json(PI_SUBAGENT_CFG)
-        limit = subcfg.get("globalConcurrencyLimit")
-        idle_ms = settings.get("httpIdleTimeoutMs")
+        pi_cfg = configs.pi
+        limit = _declared(pi_cfg.get("globalConcurrencyLimit"))
+        idle_ms = _declared(pi_cfg.get("httpIdleTimeoutMs"))
         changes = []
 
-        if isinstance(limit, int) and limit > ADVISE_FANOUT_MAX:
+        if isinstance(limit, int) and limit > ADVISED_CONCURRENCY:
             changes.append({
                 "key": "globalConcurrencyLimit",
                 "file": PI_SUBAGENT_CFG,
                 "from": limit,
-                "to": ADVISE_FANOUT_MAX,
+                "to": ADVISED_CONCURRENCY,
                 "why": _why(evidence,
                             f"This machine caps children at {limit}, wider than the interactive "
-                            f"admission width - {CAP_COPY}. Past it, requests are demoted to the "
-                            f"background tier, where the first token takes about 600s."),
-                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISE_FANOUT_MAX} "
-                                f"(was {limit}). This caps simultaneous child agents so your burst no longer overflows "
-                                f"the interactive lane and gets demoted to background. Restart the harness after the change."),
+                            f"admission width - {CAP_COPY}. Past that width, the excess concurrent "
+                            f"requests park or overflow into background scheduling, where the first "
+                            f"token takes about 600s."),
+                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISED_CONCURRENCY} "
+                                f"(was {limit}). This caps simultaneous child agents so your concurrent requests stay "
+                                f"within the interactive admission width instead of overflowing into background "
+                                f"scheduling. Restart the harness after the change."),
                 "impact": _impact(peak),
             })
         elif limit is None:
@@ -390,11 +320,11 @@ def recommendations(m, reqs, agents) -> list:
                 "key": "globalConcurrencyLimit",
                 "file": PI_SUBAGENT_CFG,
                 "from": "unset (default 20)",
-                "to": ADVISE_FANOUT_MAX,
+                "to": ADVISED_CONCURRENCY,
                 "why": _why(evidence,
-                            "The default lets one run fan out 20 children, well past the interactive "
+                            "The default lets one run hold 20 concurrent requests, well past the interactive "
                             f"admission width - {CAP_COPY}."),
-                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISE_FANOUT_MAX}. "
+                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISED_CONCURRENCY}. "
                                 f"The current default (20) will keep overflowing the interactive tier under load; lower it. "
                                 f"Have the agent read the existing file first, preserve other keys, then apply the change."),
                 "impact": _impact(peak),
@@ -430,7 +360,7 @@ def recommendations(m, reqs, agents) -> list:
 
         if bg and wide:
             target = bg if "/" in bg else f"lunaroute/{bg}"
-            cur = (settings.get("subagents") or {}).get("defaultModel")
+            cur = _declared(pi_cfg.get("subagents.defaultModel"))
             if cur != target:
                 changes.append({
                     "key": "subagents.defaultModel",
@@ -451,15 +381,14 @@ def recommendations(m, reqs, agents) -> list:
 
     # ---------------- claude-code ----------------
     if "claude-code" in agents:
-        settings = _read_json(CLAUDE_SETTINGS)
-        env = settings.get("env") or {}
+        cc_cfg = configs.claude_code
         changes, note = [], None
-        if not settings.get("env", {}).get("ANTHROPIC_BASE_URL"):
+        if not _declared(cc_cfg.get("env.ANTHROPIC_BASE_URL")):
             note = ("This settings file has no ANTHROPIC_BASE_URL, so claude-code may not be reaching"
                     " LunaRoute at all. Run `lunaroute setup claude-code` (or `npx @lunaroute/cli setup claude-code`) "
                     "first; the tier advice below only matters once traffic is routed.")
 
-        subs = env.get("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")
+        subs = _declared(cc_cfg.get("env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"))
 
         def too_big(v, cap):
             try:
@@ -467,21 +396,21 @@ def recommendations(m, reqs, agents) -> list:
             except ValueError:
                 return True
 
-        if too_big(subs, ADVISE_FANOUT_MAX):
+        if too_big(subs, ADVISED_CONCURRENCY):
             changes.append({
                 "key": "env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
                 "file": CLAUDE_SETTINGS,
                 "from": subs if subs is not None else "unset (default 20)",
-                "to": str(ADVISE_FANOUT_MAX),
+                "to": str(ADVISED_CONCURRENCY),
                 "why": _why(evidence,
                             f"The default is 20 concurrent subagents, well past the interactive "
                             f"admission width - {CAP_COPY}."),
-                "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {ADVISE_FANOUT_MAX}. "
+                "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {ADVISED_CONCURRENCY}. "
                                 f"The default 20 keeps overflowing interactive headroom."),
                 "impact": _impact(peak),
             })
 
-        idle_env = env.get("CLAUDE_STREAM_IDLE_TIMEOUT_MS")
+        idle_env = _declared(cc_cfg.get("env.CLAUDE_STREAM_IDLE_TIMEOUT_MS"))
         if too_big(idle_env, 300000) or idle_env is None:
             changes.append({
                 "key": "env.CLAUDE_STREAM_IDLE_TIMEOUT_MS + env.API_TIMEOUT_MS",
@@ -499,7 +428,7 @@ def recommendations(m, reqs, agents) -> list:
             })
 
         if bg and wide:
-            sub_model = env.get("CLAUDE_CODE_SUBAGENT_MODEL")
+            sub_model = _declared(cc_cfg.get("env.CLAUDE_CODE_SUBAGENT_MODEL"))
             if sub_model != bg:
                 changes.append({
                     "key": "env.CLAUDE_CODE_SUBAGENT_MODEL",
@@ -526,11 +455,11 @@ def recommendations(m, reqs, agents) -> list:
 
     # ---------------- codex ----------------
     if "codex" in agents:
-        text = _read_text(CODEX_CONFIG)
+        cx_cfg = configs.codex
         keys = {}
-        if "max_concurrent_threads_per_session" not in text:
-            keys["max_concurrent_threads_per_session"] = str(ADVISE_FANOUT_MAX)
-        if bg and wide and "default_subagent_model" not in text:
+        if _declared(cx_cfg.get("agents.max_concurrent_threads_per_session")) is None:
+            keys["max_concurrent_threads_per_session"] = str(ADVISED_CONCURRENCY)
+        if bg and wide and _declared(cx_cfg.get("agents.default_subagent_model")) is None:
             keys["default_subagent_model"] = json.dumps(bg)
         if keys:
             pretty_keys = ", ".join(f"agents.{k}" for k in keys)
@@ -544,7 +473,8 @@ def recommendations(m, reqs, agents) -> list:
                     "to": desired,
                     "why": _why(evidence,
                                 "Codex has no verified request-timeout knob, so it cannot defend itself"
-                                " against a 600s first token; keep the fan-out under the advised width instead.",
+                                " against a 600s first token; keep concurrent requests under the"
+                                " advised width instead.",
                                 bg_note),
                     "instruction": (f"Ask your agent: in {CODEX_CONFIG} set {pretty_keys} to {desired}. "
                                     f"Existing keys in that file must be preserved. No shell is needed — let the agent edit the TOML directly. "
@@ -575,7 +505,10 @@ def render_fix(recs, m, as_json: bool) -> None:
                 "admission_deaths": m["by_outcome"].get("admission_timeout", 0),
                 "silent_stalls": m["by_outcome"].get("client_idle_timeout", 0),
                 "background_requests": m["by_tier"].get("background", 0),
-                "fanout_limit": ADVISE_FANOUT_MAX,
+                # The account's priority concurrency allowance, in concurrent
+                # requests. Null until the plan-derivation pass can read the
+                # account's plan: never 0, never a guessed default.
+                "priority_concurrency": None,
             },
             "agents": recs,
         }, indent=2))
@@ -589,7 +522,7 @@ def render_fix(recs, m, as_json: bool) -> None:
     for line in _wrap(_lunaroute_preface_text(), 72):
         print(line)
     print()
-    print(f"Fan-out limit for the advice below: {ADVISE_FANOUT_MAX} "
+    print(f"Advice: keep concurrent requests at or under {ADVISED_CONCURRENCY} "
           f"({CAP_COPY}).")
     print()
     for group in recs:
@@ -646,10 +579,29 @@ def cmd_fix(args) -> int:
         print(f"luna-doctor: {e}", file=sys.stderr)
         return 2
     harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
+    now = time.time()
     reqs = collect(hours, harnesses, getattr(args, "pi_root", None),
-                   getattr(args, "claude_root", None))
+                   getattr(args, "claude_root", None), now=now)
     m = analyse(reqs, hours)
-    recs = recommendations(m, reqs, agents)
+    # One combined snapshot feeds the advice: the harness configs with
+    # provenance, and the catalog (cached by default; fetched only with
+    # --online). A collection failure degrades to unset values and an empty
+    # catalog - the advice still renders from the measured logs, and a
+    # network failure is never an error.
+    try:
+        snap = sources.build_snapshot(reqs, since=now - hours * 3600, until=now,
+                                      allow_network=bool(getattr(args, "online", False)))
+        configs = snap.configs
+        catalog_ids = snap.catalog.ids() if snap.catalog is not None else []
+        if bool(getattr(args, "online", False)) and snap.catalog is None:
+            print(f"luna-doctor: catalog unavailable ({snap.catalog_note}); "
+                  f"the advice below falls back to the models seen in the logs",
+                  file=sys.stderr)
+    except Exception as e:
+        print(f"luna-doctor: snapshot collection failed ({type(e).__name__}: {e}); "
+              f"config values read as unset", file=sys.stderr)
+        configs, catalog_ids = None, []
+    recs = recommendations(m, reqs, agents, configs=configs, catalog_ids=catalog_ids)
     render_fix(recs, m, args.json)
     actionable = any(ch["from"] != ch["to"] for g in recs for ch in g["changes"])
     return 1 if actionable else 0
