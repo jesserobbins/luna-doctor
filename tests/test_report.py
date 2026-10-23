@@ -10,7 +10,7 @@ class PlainRenderer(unittest.TestCase):
                 Row("peak concurrency", "17", "bad"),
                 Row("model", "very-long-model-name-with-an-unwrap-friendly-suffix-0123456789"),
             ])],
-            adjustments=["Narrow the fan-out to 8."],
+            adjustments=["Keep concurrent requests at or under 8."],
             footnote="measured on this account",
         )
 
@@ -33,7 +33,7 @@ class PlainRenderer(unittest.TestCase):
 
     def test_adjustments_and_footnote_present(self):
         out = render_plain(self._report())
-        self.assertIn("- Narrow the fan-out to 8.", out)
+        self.assertIn("- Keep concurrent requests at or under 8.", out)
         self.assertIn("measured on this account", out)
 
     def test_empty_report_still_renders(self):

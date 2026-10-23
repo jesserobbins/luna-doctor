@@ -52,7 +52,11 @@ from luna_doctor import report
 from luna_doctor.render_pretty import render_pretty, reveal, style_for
 
 VERSION = "0.1.1-alpha.3"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
-SCHEMA_VERSION = 3         # 3: additive swamp contribution (metrics.swamp)
+SCHEMA_VERSION = 4         # 3: additive swamp contribution (metrics.swamp)
+                           # 4: capacity fields renamed for the LunaRoute
+                           #     vocabulary - the contract's advised-concurrency
+                           #     key, and the fix findings' field for the
+                           #     account's priority concurrency
 
 # ---- measured constants -----------------------------------------------------
 CONTRACT = {
@@ -64,7 +68,7 @@ CONTRACT = {
     "upstream_hold_s": 10.1,
     "keepalive_s": 10.0,
     "interactive_burst_cap": 10,
-    "advised_fanout_max": 8,
+    "advised_concurrency": 8,
 }
 
 PRE_HEADER_WAIT_S = 25.2        # fixed wait before SSE headers, load-independent
@@ -72,12 +76,11 @@ PRE_HEADER_WAIT_S = 25.2        # fixed wait before SSE headers, load-independen
 # advice and never a default for a model without observations: the deadline is
 # per model (60.3s on deepseek-4.1-flash) and `analyze` reports each model's own.
 ADMISSION_DEADLINE_GLM53_S = 120.2
-ADMISSION_DEADLINE_S = ADMISSION_DEADLINE_GLM53_S  # alias for chart block compat
 CLIENT_IDLE_TIMEOUT_S = 300.0   # pi DEFAULT_HTTP_IDLE_TIMEOUT_MS
 UPSTREAM_HOLD_S = 10.1          # 503 INFERENCE_UNAVAILABLE hold
 KEEPALIVE_S = 10.0              # SSE keep-alive cadence in background tier
 INTERACTIVE_BURST_CAP = 10      # per-burst interactive class cap: min(n, 10)
-ADVISE_FANOUT_MAX = 8           # our recommendation: below the cap, with headroom
+ADVISED_CONCURRENCY = 8         # our recommendation: below the cap, with headroom
 # What user-facing copy says wherever it used to name the gateway's cap as a
 # constant. The admitted width is specific to the account and cannot be read
 # from these logs, so copy points at the number it sits next to ("roughly
@@ -197,7 +200,8 @@ def classify(rec: dict) -> str:
     # A 429 here is this gateway's report that the account's concurrent-request
     # capacity is full: there is no separate quota dimension, so the class is
     # never a "wait it out" signal. The name stays `rate_limited` because it is
-    # part of the JSON contract; only the advice behind it is about fan-out.
+    # part of the JSON contract; only the advice behind it is about how many
+    # concurrent requests you hold at once.
     if "rate_limit_error" in low or err.startswith("429") or "would exceed your account" in low:
         return "rate_limited"
     if "aborted" in low or stop == "aborted":
@@ -1354,8 +1358,8 @@ def _bands_for(sub: list[Request], peaks: dict[int, int], min_top_n: int,
                inflation: float) -> dict:
     """`peaks` is indexed by position in the *whole* request list, not in `sub`.
 
-    Concurrency is a property of the lane, not of a model: two models each at
-    five in flight put ten requests on the gateway.
+    Concurrency is a property of the account, not of a model: two models each
+    at five in flight put ten concurrent requests on the gateway.
     """
     timed = [(peaks[i], r.duration) for i, r in sub
              if i in peaks and r.duration is not None and r.outcome == "completed"]
@@ -1730,7 +1734,7 @@ def analyse(reqs: list[Request], window_hours: float) -> dict:
                 starved += 1
                 break
 
-    win = pressure_windows(ok, ADVISE_FANOUT_MAX)
+    win = pressure_windows(ok, ADVISED_CONCURRENCY)
     longest = max(win, key=lambda w: w["seconds"]) if win else None
     by_harness_peak = {}
     for h in sorted(by_harness):
@@ -1828,16 +1832,17 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         pressure = True
         w = m["longest_pressure_window"] or {}
         adj.append(
-            f"{m['pressure_windows']} window(s) had more than {ADVISE_FANOUT_MAX} requests in flight "
-            f"at once; the longest lasted {fmt(w.get('seconds'), 's')} and peaked at "
+            f"{m['pressure_windows']} window(s) held more than {ADVISED_CONCURRENCY} concurrent "
+            f"requests at once; the longest lasted {fmt(w.get('seconds'), 's')} and peaked at "
             f"{fmt(w.get('max_concurrent'))} concurrent. {CAP_COPY[0].upper()}{CAP_COPY[1:]}; "
-            f"past that width, requests are demoted to background rather than failing."
+            f"past that width, requests park or overflow into background scheduling "
+            f"rather than fail."
         )
     if bg:
         adj.append(
-            f"{bg} request(s) already ran on the -background tier. That is the right home for wide "
-            f"fan-out, but its SLA is minutes, not seconds: budget for it and do not put a short "
-            f"client timeout in front of it."
+            f"{bg} request(s) already ran on the -background tier. That is the right home for "
+            f"concurrent requests beyond your priority concurrency, but its SLA is minutes, not "
+            f"seconds: budget for it and do not put a short client timeout in front of it."
         )
     storms = m.get("timeout_storms") or []
     if storms:
@@ -1856,7 +1861,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
             f"Latency inflates at the ceiling: p90 {fmt(top['p90'], 's')} at concurrency "
             f"{top['band']} (n={top['n']}) against a mid-band p90 of "
             f"{fmt(bands.get('mid_p90_baseline_s'), 's')} - {bands['top_inflation']}x. "
-            f"Fan-out above this band buys latency, not throughput."
+            f"Holding more concurrent requests than this band buys latency, not throughput."
         )
     unknown = m.get("unknown_errors") or []
     if unknown:
@@ -1872,9 +1877,9 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     if ocl:
         pressure = True
         adj.append(
-            f"{ocl} request(s) hit the organization concurrency cap "
-            f"(`CONCURRENT_REQUEST_LIMIT_EXCEEDED`). That is the account's whole concurrent lane, "
-            f"not one model's share: narrow the fan-out or move work to the -background tier."
+            f"{ocl} request(s) were rejected (`CONCURRENT_REQUEST_LIMIT_EXCEEDED`) - the "
+            f"account's whole priority concurrency was in use, not one model's share. Hold "
+            f"fewer concurrent requests at once, or move work to the -background tier."
         )
     mnf = m["by_outcome"].get("model_not_found", 0)
     if mnf:
@@ -1899,7 +1904,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         adj.append(
             f"{ml} request(s) hit a message-count limit (`Message limit reached`, a 400). That is "
             f"a ceiling on how many messages this account may send, not concurrency pressure - "
-            f"narrowing fan-out will not fix it."
+            f"holding fewer concurrent requests will not fix it."
         )
     hd = m["by_outcome"].get("harness_deadline", 0)
     if hd:
@@ -1912,9 +1917,10 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     if rl:
         pressure = True
         adj.append(
-            f"{rl} request(s) hit a rate-limit error (429 `rate_limit_error`). That error is the "
-            f"account's concurrent-request capacity being exceeded, nothing else: narrow the "
-            f"fan-out, or move the work to the -background tier."
+            f"{rl} request(s) were rejected (429 `rate_limit_error`). That error is the "
+            f"account's concurrent-request capacity being exceeded, nothing else: keep concurrent "
+            f"requests within your priority concurrency allowance, or move the work to the "
+            f"-background tier."
         )
 
     lat = m["latency_s"]["interactive"]
@@ -1931,12 +1937,12 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
             f"served, not slow."
         )
 
-    # ---- swamp fan-out is configuration, never measured traffic ----
-    # The peak concurrency above is an observation; swamp's fan-out is a
-    # setting. They are reported as separate labelled facts and never
-    # combined: swamp's configured figure enters no arithmetic, no sum and
-    # no stated limit here, and never reaches the headline. What the two
-    # together might mean is a risk this report does not compute, not a
+    # ---- swamp concurrency is configuration, never measured traffic ----
+    # The peak concurrency above is an observation; swamp's configured
+    # concurrency is a setting. They are reported as separate labelled facts
+    # and never combined: swamp's configured figure enters no arithmetic, no
+    # sum and no stated limit here, and never reaches the headline. What the
+    # two together might mean is a risk this report does not compute, not a
     # number this report computes.
     sw = m.get("swamp")
     configured = None
@@ -1951,19 +1957,19 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         except Exception:
             configured = None
     if configured is None:
-        # _swamp_configured_fanout carries the setting when the full in-use
-        # scan is not attached to these metrics; pop it so --json never sees
-        # the scratch key.
-        configured = m.pop("_swamp_configured_fanout", None)
+        # _swamp_configured_concurrency carries the setting when the full
+        # in-use scan is not attached to these metrics; pop it so --json
+        # never sees the scratch key.
+        configured = m.pop("_swamp_configured_concurrency", None)
     else:
-        m.pop("_swamp_configured_fanout", None)
+        m.pop("_swamp_configured_concurrency", None)
     if configured:
         peak = m.get("peak_concurrency") or 0
         adj.append(
-            f"swamp is configured to fan out to {configured} concurrent requests per behavior"
+            f"swamp is configured for {configured} concurrent requests per behavior"
             f"{split} - a setting, not measured traffic. The measured peak concurrency this "
-            f"window is {peak}, a separate observation reported above. Overlapping swamp "
-            f"fan-out on top of interactive bursts is an unmeasured risk, not a computed "
+            f"window is {peak}, a separate observation reported above. Swamp's configured "
+            f"concurrency on top of interactive bursts is an unmeasured risk, not a computed "
             f"total; the width this account actually admits cannot be read from these logs."
         )
 
@@ -1977,8 +1983,8 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         else f"{n} requests, none blocked at admission, peak concurrency {m['peak_concurrency']}."
     )
     adj.append(
-        f"Adjust: keep interactive fan-out at or under {ADVISE_FANOUT_MAX}, and move any wider "
-        f"fan-out to the -background variant of the same model."
+        f"Adjust: keep concurrent requests at or under {ADVISED_CONCURRENCY}, and move "
+        f"anything wider to the -background variant of the same model."
     )
     return head, adj, (1 if pressure else 0)
 
@@ -2077,8 +2083,8 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
     sw = m.get("swamp")
     if sw and sw.get("present"):
         # Only an in-use swamp reaches here (installed is not in use), and its
-        # configured fan-out is labelled as a setting so it can never be read
-        # as measured traffic next to the peak concurrency row above.
+        # configured concurrency is labelled as a setting so it can never be
+        # read as measured traffic next to the peak concurrency row above.
         bh = (sw.get("behaviorHistory") or {}).get("total") or 0
         wr = (sw.get("workflowRuns") or {}).get("total") or 0
         names = list(sw.get("behaviors") or [])
@@ -2093,7 +2099,7 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
             ex = int((knobs.get("extractConcurrency") or {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT))
             ll = int((knobs.get("llmConcurrency") or {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
             src = (knobs.get("extractConcurrency") or {}).get("source") or "default"
-            setting = (f"; configured fan-out {ex + ll} per behavior (extract {ex} + verify {ll}, "
+            setting = (f"; configured concurrency {ex + ll} per behavior (extract {ex} + verify {ll}, "
                        f"from {src}) - a setting, not measured traffic")
         except Exception:
             setting = ""
@@ -2215,7 +2221,7 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
         # A zero-request window returns from verdict() before the swamp
         # scratch key is consumed, and the envelope must never ship it:
         # nothing prefixed with "_" is contract data.
-        m.pop("_swamp_configured_fanout", None)
+        m.pop("_swamp_configured_concurrency", None)
         doc = envelope("analyze", {
             "headline": head,
             "adjustments": adj,
@@ -2420,7 +2426,7 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
     assumed = probe_n + configured
     verdict_word = "within" if assumed <= INTERACTIVE_BURST_CAP else "past"
     return (
-        f"swamp is configured to fan out to {configured} per behavior (extract {ex} + verify {ll}) "
+        f"swamp is configured for {configured} concurrent requests per behavior (extract {ex} + verify {ll}) "
         f"- a setting, not measured traffic; this probe measured {probe_n} concurrent sessions. "
         f"If swamp ran at its configured width during such a probe, the account would see "
         f"{assumed} concurrent requests, {verdict_word} the conservative combined budget - an "
@@ -2461,7 +2467,7 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
                    f"token. Raise --max-seconds before judging it.")
     if r["admission_deaths"]:
         adj.append(f"{r['admission_deaths']}/{n} were blocked at admission (`scheduler admission timeout`). "
-                   f"For this width of fan-out, use the -background variant of the same model.")
+                   f"For {n} concurrent requests at once, use the -background variant of the same model.")
     if overflow_n:
         adj.append(f"{overflow_n} request(s) carried `overflowed-to-background`: the burst was "
                    f"wider than the interactive admission width - {CAP_COPY}.")
@@ -2514,8 +2520,8 @@ def build_compare_report(rows: list) -> report.Report:
             f"{klass} · streamed {r['streamed']} · no token {r['silent']} · "
             f"adm.blocked {r['admission_deaths']} · cut {r['cut']} · ttfb p50 {fmt(r['ttfb'], 's')}"))
     adj = ["the interactive tier admits fewer parallel requests but answers in tens of seconds; "
-           "the -background tier admits more and answers in minutes. Pick the tier by fan-out "
-           "width, not by impatience."]
+           "the -background tier admits more and answers in minutes. Pick the tier by how many "
+           "concurrent requests you hold at once, not by impatience."]
     if any(r["cut"] or r["admission_deaths"] or r["silent"] for r in rows):
         adj.append("at least one row did not stream cleanly at this width. Read the two rows against "
                    "each other before changing models: `cut` means the budget was too small to judge "
@@ -2889,7 +2895,7 @@ def cmd_analyze(args) -> int:
         sw_state = swamp_state(since=now - hours * 3600)
         if sw_state["in_use"]:
             m["swamp"] = _collect_swamp_metrics(sw_state["repo"], now - hours * 3600, now)
-            m["_swamp_configured_fanout"] = m["swamp"].get("configuredConcurrency")
+            m["_swamp_configured_concurrency"] = m["swamp"].get("configuredConcurrency")
     except Exception:
         pass
     head, adj, code = verdict(m)

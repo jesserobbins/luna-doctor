@@ -9,7 +9,7 @@ Emits a standalone SVG: no fonts, scripts or CDNs, so it opens anywhere and can
 be pasted into a doc. Two panels share one time axis:
 
   top     how many requests were in flight, split by tier. This is the shape of
-          the fan-out, which is what the gateway prices.
+          your concurrent requests, which is what the gateway prices.
   bottom  every request's latency, on a log axis, with the two measured walls
           drawn as reference lines: the 120.2s admission deadline and the 300s
           client idle budget. Failures sit on those lines, which is the point:
@@ -194,7 +194,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
     # the advice. The label names no number: the footer says the level is per
     # account and not readable from these logs, so the rule itself is the only "this many".
     for value, label, colour in ((INTERACTIVE_BURST_CAP, "gateway admission level", c["stall"]),
-                                 (ADVISE_FANOUT_MAX, "advised 8", c["muted"])):
+                                 (ADVISED_CONCURRENCY, "advised 8", c["muted"])):
         if value <= y_max:
             y = y_conc(value)
             add(Line(pad_l, y, pad_l + plot_w, y, colour, 1.0, (2, 4), 0.8))
@@ -210,11 +210,11 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
 
     # say the quiet part out loud: most machines never get near the cap, and that is
     # the finding, not a missing chart
-    if peak_total <= ADVISE_FANOUT_MAX:
-        verdict_line = f"never reached the advised fan-out of {ADVISE_FANOUT_MAX}"
+    if peak_total <= ADVISED_CONCURRENCY:
+        verdict_line = f"never reached the advised concurrency of {ADVISED_CONCURRENCY}"
         vcolour = c["muted"]
     else:
-        verdict_line = f"crossed the advised fan-out of {ADVISE_FANOUT_MAX}"
+        verdict_line = f"crossed the advised concurrency of {ADVISED_CONCURRENCY}"
         vcolour = c["stall"]
     add(Text(pad_l + plot_w, top_a - 8, verdict_line, size=11.5, anchor="end", fill=vcolour))
 
@@ -224,7 +224,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
 
     # latency reference walls: labels sit inside the panel, on a pale plate, so they
     # never collide with the plot edge
-    for value, label in ((ADMISSION_DEADLINE_S, "120.2s: admission deadline"),
+    for value, label in ((ADMISSION_DEADLINE_GLM53_S, "120.2s: admission deadline"),
                          (CLIENT_IDLE_TIMEOUT_S, "300s: client idle budget")):
         y = y_lat(value)
         add(Line(pad_l, y, pad_l + plot_w, y, c["admission"], 1.0, (5, 4), 0.5))
@@ -283,7 +283,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
             continue
         cx = x_of(r.end)
         if r.outcome == "admission_timeout":
-            cy = y_lat(ADMISSION_DEADLINE_S)
+            cy = y_lat(ADMISSION_DEADLINE_GLM53_S)
             colour, glyph = c["admission"], "\u2715"
         elif r.outcome == "client_idle_timeout":
             cy = y_lat(CLIENT_IDLE_TIMEOUT_S)
@@ -320,7 +320,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
     # footer note
     add(Text(pad_l, height - 14,
              f"luna-doctor v{VERSION} \u00b7 {CAP_COPY} "
-             f"\u00b7 advised fan-out \u2264 {ADVISE_FANOUT_MAX}",
+             f"\u00b7 advised concurrency \u2264 {ADVISED_CONCURRENCY}",
              size=10.5, fill=c["muted"]))
 
     return Scene(width, height, "#ffffff", shapes, font=CHART_FONT)

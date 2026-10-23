@@ -36,7 +36,7 @@ luna-doctor analyze --since 7d --json   # machine-readable, for cron/CI
 luna-doctor analyze --style plain       # undecorated text, for a paste or a pipe
 luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # …or one agent at a time (pi | claude-code | codex | swamp)
-luna-doctor chart --since 24h # SVG: fan-out over time + every request's latency
+luna-doctor chart --since 24h # SVG: concurrent requests over time + every request's latency
 luna-doctor chart --since 24h --open  # …and open it in your browser
 luna-doctor analyze --share          # WhatsApp text + PNG card, for pasting into a chat
 ```
@@ -101,7 +101,7 @@ Prints one block per agent: the exact file, the snippet, and a command that back
 
 ### `chart` — one picture
 
-A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requests in flight over time, split by tier, with the gateway's rough admission level and the advised fan-out as dashed rules. Bottom panel: every request end-to-end on a log axis, with reference walls for admission and idle budgets — failures sit on the wall that stopped them. A burst in the top panel at the same x as a cluster of failures below is the whole diagnosis.
+A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requests in flight over time, split by tier, with the gateway's rough admission level and the advised concurrency as dashed rules. Bottom panel: every request end-to-end on a log axis, with reference walls for admission and idle budgets — failures sit on the wall that stopped them. A burst in the top panel at the same x as a cluster of failures below is the whole diagnosis.
 
 ### `probe` / `compare` — what the gateway will actually admit
 
@@ -128,9 +128,9 @@ Read-only and offline for `discover` / `analyze` / `fix` / `chart`:
 Swamp is counted only when it is in use: files under `.swamp/data` or
 `.swamp/workflow-runs` modified inside the window. A populated but idle swamp
 store is installed, not running, and `analyze` says nothing about it — installed
-is not traffic. When swamp does appear, its fan-out is described as configured
-(its extract and verify settings, and where they came from), never as measured
-concurrency.
+is not traffic. When swamp does appear, its concurrency is described as
+configured (its extract and verify settings, and where they came from), never
+as measured concurrency.
 
 `probe` and `compare` are the only commands that touch the network, and they use the routing key already stored by `lunaroute login`.
 
@@ -177,10 +177,10 @@ Semantic versioning with prerelease identifiers (`0.1.1-alpha.1`, `0.1.1-beta.1`
 | version number | `VERSION`, mirrored in `luna_doctor/cli.py` |
 | history | `CHANGELOG.md` (Keep a Changelog) |
 | releases | annotated git tags, `vX.Y.Z` and `vX.Y.Z-prerelease` (e.g. `v0.1.1-alpha.1`) |
-| JSON document shape | `"schema": 3` in every `--json` envelope — bumped independently when the shape changes |
+| JSON document shape | `"schema": 4` in every `--json` envelope — bumped independently when the shape changes |
 | measured gateway facts | `"contract": {...}` in every `--json` envelope |
 
-Every `--json` document carries `schema`, `version`, and `command`. The reporting commands (`discover`, `analyze`, `fix`, `probe`, `compare`) also carry `contract`, so a saved report stays readable after the tool moves on. Usage errors print to stderr and exit `2` with no JSON document.
+Every `--json` document carries `schema`, `version`, and `command`. The reporting commands (`discover`, `analyze`, `fix`, `probe`, `compare`) also carry `contract`, so a saved report stays readable after the tool moves on. While the project is prerelease, `schema` is bumped freely — the envelope has no stable consumers to protect yet. Usage errors print to stderr and exit `2` with no JSON document.
 
 Bumping a version updates the number in both places, opens a dated changelog section, and prints the tag and push commands. It never pushes:
 

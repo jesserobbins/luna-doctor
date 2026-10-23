@@ -76,9 +76,9 @@ class PrettyRenderer(unittest.TestCase):
         from luna_doctor.render_pretty import render_pretty
         style = resolve_style("plain", _Tty(), {})
         rep = Report("h", [Section("s", [Row("a", "1")])],
-                     ["Narrow the fan-out to 8."], "measured on this account")
+                     ["Keep concurrent requests at or under 8."], "measured on this account")
         out = render_pretty(rep, style)
-        self.assertIn("- Narrow the fan-out to 8.", out)
+        self.assertIn("- Keep concurrent requests at or under 8.", out)
         self.assertIn("measured on this account", out)
 
 

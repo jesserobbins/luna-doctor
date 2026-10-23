@@ -89,7 +89,7 @@ class JsonEnvelope(unittest.TestCase):
         code, out, err = run(*args)
         self.assertIn(code, (0, 1, 2), f"unexpected exit {code}: {err}")
         doc = json.loads(out)          # must be pure JSON on stdout
-        self.assertEqual(doc["schema"], 3)
+        self.assertEqual(doc["schema"], 4)
         self.assertRegex(doc["version"], SEMVER)
         self.assertIn("command", doc)
         return code, doc
@@ -188,7 +188,7 @@ class Chart(unittest.TestCase):
         self.assertEqual(code, 0)
         doc = json.loads(stdout)
         self.assertEqual(doc["command"], "chart")
-        self.assertEqual(doc["schema"], 3)
+        self.assertEqual(doc["schema"], 4)
         self.assertEqual(doc["path"], out)
         self.assertIn("contract", doc)
 
@@ -389,9 +389,9 @@ class RateLimitIsConcurrency(unittest.TestCase):
     The gateway has no quota or token-budget dimension. Every 429,
     `rate_limit_error` and "quota"-looking rejection is concurrent requests
     overrunning what the account admits, so the advice has to send the reader
-    to fan-out or the -background tier. `message_limit` is the one exception:
-    a message-count ceiling, which fan-out genuinely cannot fix - but it is
-    still not a quota.
+    to fewer concurrent requests or the -background tier. `message_limit` is
+    the one exception: a message-count ceiling, which holding fewer concurrent
+    requests genuinely cannot fix - but it is still not a quota.
     """
 
     def setUp(self):
@@ -409,23 +409,24 @@ class RateLimitIsConcurrency(unittest.TestCase):
         joined = self._advice("rate_limited")
         self.assertIn("429", joined)
         self.assertIn("concurrent-request capacity", joined)
-        self.assertIn("narrow the fan-out", joined)
+        self.assertIn("priority concurrency allowance", joined)
         self.assertIn("-background", joined)
-        # The old advice told the reader that narrowing fan-out would not help.
+        # The old advice told the reader that narrowing concurrent requests
+        # would not help.
         self.assertNotIn("will not fix it", joined)
         self.assertNotIn("not concurrency", joined)
 
-    def test_org_lane_total_advice_is_about_the_whole_lane(self):
+    def test_org_limit_advice_is_about_the_whole_priority_concurrency(self):
         joined = self._advice("org_concurrency_limit")
-        self.assertIn("concurrent lane", joined)
-        self.assertIn("narrow the fan-out", joined)
+        self.assertIn("priority concurrency", joined)
+        self.assertIn("Hold fewer concurrent requests", joined)
         self.assertNotIn("not a rate limit", joined)
 
     def test_message_limit_is_a_message_count_ceiling(self):
         joined = self._advice("message_limit")
         self.assertIn("message-count limit", joined)
         self.assertIn("not concurrency pressure", joined)
-        self.assertIn("fan-out will not fix it", joined)
+        self.assertIn("holding fewer concurrent requests will not fix it", joined)
 
     def test_no_rendered_advice_says_quota(self):
         """Regression: the tool must never tell a reader a quota exists."""
@@ -666,7 +667,7 @@ class ExtractionStore(unittest.TestCase):
             self.assertTrue(os.path.isfile(first["path"]))
             with open(first["path"]) as fh:
                 doc = json.load(fh)
-            self.assertEqual(doc["schema"], 3)
+            self.assertEqual(doc["schema"], 4)
             with open(first["ledger"]) as fh:
                 lines = [json.loads(x) for x in fh if x.strip()]
                 events = self.m.ledger_rows(m, "stores:default")
@@ -678,16 +679,20 @@ class ExtractionStore(unittest.TestCase):
             self.assertEqual(len(lines2), len(lines), "the ledger is append-only, not duplicated")
 
 
-class SchemaTwo(unittest.TestCase):
-    def test_analyze_envelope_is_schema_2_and_drops_the_borrowed_deadline(self):
+class EnvelopeSchema(unittest.TestCase):
+    def test_analyze_envelope_contract_drops_the_borrowed_deadline(self):
         code, out, err = run("analyze", "--since", "1h", "--json")
         self.assertIn(code, (0, 1, 2), err)
         doc = json.loads(out)
-        self.assertEqual(doc["schema"], 3)
+        self.assertEqual(doc["schema"], 4)
         self.assertNotIn("admission_deadline_s", doc["contract"],
                          "per-model deadlines replace the borrowed constant")
-        for key in ("pre_header_wait_s", "client_idle_timeout_s", "interactive_burst_cap"):
+        for key in ("pre_header_wait_s", "client_idle_timeout_s", "interactive_burst_cap",
+                    "advised_concurrency"):
             self.assertIn(key, doc["contract"])
+        self.assertNotIn("advised_fanout_max", doc["contract"],
+                         "schema 4 renamed the advised-contract key to the"
+                         " LunaRoute vocabulary")
 
 
 # The reproduction store is supplied by the environment: the path names a private
@@ -1253,8 +1258,8 @@ class ThirdReviewRegressions(unittest.TestCase):
             self.assertNotEqual(a["path"], b["path"])
             self.assertEqual(len({x["path"] for x in (c, d)}), 2, "close lengths differ too")
 
-    def test_mixed_model_load_is_measured_on_the_lane(self):
-        """codex: concurrency per model hid a lane that was actually saturated."""
+    def test_mixed_model_load_is_measured_on_the_account(self):
+        """codex: per-model concurrency hid account-wide saturation."""
         base = 1_700_000_000.0
         reqs = []
         for model in ("model-a", "model-b"):
@@ -1748,7 +1753,7 @@ class SixthReviewRegressions(unittest.TestCase):
                                outcome="request_timeout")
                 for off in (0, 10, 20)]
         self.assertEqual(self.m.timeout_storms(reqs), [],
-                         "peak concurrency of one is a slow client, not a fan-out")
+                         "peak concurrency of one is a slow client, not a burst of concurrent requests")
 
     def test_roots_sharing_a_basename_stay_distinct(self):
         """codex: /archive-a/pi and /archive-b/pi both reduced to pi/project."""
@@ -1991,7 +1996,7 @@ class CopyToClipboard(unittest.TestCase):
         self.assertEqual(copied, proc.stdout)
         doc = json.loads(copied)               # the whole document, nothing more
         self.assertEqual(doc["command"], "analyze")
-        self.assertEqual(doc["schema"], 3)
+        self.assertEqual(doc["schema"], 4)
 
 
 class DemotionReason(unittest.TestCase):

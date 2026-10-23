@@ -1,6 +1,6 @@
 ---
 name: luna-doctor
-description: Diagnose LunaRoute concurrency trouble from local agent logs. Use when an agent session on LunaRoute feels stuck, slow, or silently hangs; when the user asks why requests take minutes or die with "Stream ended without finish_reason" or "scheduler admission timeout"; when deciding between a model and its -background twin; or when fanning out subagents and wondering how wide is safe.
+description: Diagnose LunaRoute concurrency trouble from local agent logs. Use when an agent session on LunaRoute feels stuck, slow, or silently hangs; when the user asks why requests take minutes or die with "Stream ended without finish_reason" or "scheduler admission timeout"; when deciding between a model and its -background twin; or when running many subagents at once and wondering how many concurrent requests are safe.
 ---
 
 # luna-doctor
@@ -21,7 +21,7 @@ luna-doctor analyze --style plain   # undecorated text, for pasting to the user
 luna-doctor analyze --copy          # same text, also on the clipboard, plain
 luna-doctor fix                # copy-paste config per agent, justified by the numbers
 luna-doctor fix --agent pi     # one agent at a time
-luna-doctor chart --since 24h  # SVG: fan-out over time + every request's latency
+luna-doctor chart --since 24h  # SVG: concurrent requests over time + every request's latency
 luna-doctor discover           # when the analysis says "no data"
 luna-doctor probe --n 8 --model <model> --enable-probe   # live burst, 8 concurrent sessions
 luna-doctor compare --n 8 --model <model> --enable-probe # model vs its -background twin
@@ -56,7 +56,7 @@ clipboard tool. `--json` is copied exactly.
 | `admission_timeout` | blocked at the gateway's ~120.2s admission deadline. Concurrency was exhausted; the request was never admitted. |
 | `client_idle_timeout` | stalled until the harness's ~300s idle budget killed the stream. Almost always the silent background demotion. |
 | `upstream_unavailable` / `upstream_error` | 503/500/502 propagation. Not concurrency; check service health. |
-| `rate_limited` | 429 `rate_limit_error`. The account's concurrent-request capacity was exceeded — there is no separate quota dimension behind this error. Narrowing fan-out and moving work to the `-background` tier is exactly the fix. |
+| `rate_limited` | 429 `rate_limit_error`. The account's concurrent-request capacity was exceeded — there is no separate quota dimension behind this error. Keeping concurrent requests within your priority concurrency allowance and moving work to the `-background` tier is exactly the fix. |
 | `connection_error` / `request_timeout` | transport-level trouble, not the tier. Retry once, then look elsewhere. |
 | `aborted` | the user or a tool cancelled it. |
 
@@ -72,7 +72,7 @@ Two metrics carry most of the diagnosis:
 ## Reading the chart
 
 `luna-doctor chart` draws the same window as two stacked panels. Top: requests in
-flight, split by tier, with the advised fan-out (8) and the gateway's rough
+flight, split by tier, with the advised concurrency (8) and the gateway's rough
 admission level as dashed rules. Bottom: every request end to end on a log
 axis, with the 120.2s
 admission deadline and the 300s client idle budget as dashed walls — failures sit
@@ -81,16 +81,16 @@ on the wall that stopped them (red crosses at 120.2s, amber dots at 300s).
 Use it before quoting numbers: a burst in the top panel at the same x as a
 cluster of red crosses below is the diagnosis in one picture. When the top panel
 never reaches the dashed rules, say that plainly — on a quiet machine the honest
-answer is that fan-out is not the problem.
+answer is that concurrency is not the problem.
 
 ## What to recommend
 
-1. **Keep interactive fan-out at or under 8.** The gateway admits roughly this many
+1. **Keep concurrent requests at or under 8.** The gateway admits roughly this many
    interactive requests at once; the admitted width is specific to the account
    and cannot be read from these logs. Anything past that width is demoted to
    background, where the answer can take ten minutes to start. Never state a cap as a
    gateway fact: the number is per account and only a probe can tell you yours.
-2. **Move wide fan-out to the `-background` variant** of the same model. More
+2. **Move anything wider to the `-background` variant** of the same model. More
    concurrency, much slower SLA. That is the trade, and it is deliberate.
    `luna-doctor fix` emits the exact key for whichever agent the user runs.
 3. **Never put a short client timeout in front of a background request.** pi's
@@ -112,9 +112,9 @@ answer is that fan-out is not the problem.
 Swamp appears only when it is in use — files under `.swamp/data` or
 `.swamp/workflow-runs` written inside the window. Installed but idle is not
 traffic, and the report says nothing about it. When swamp does appear, its
-fan-out is the configured setting (extract + verify, plus where the setting came
-from) — a number to reason with, not a measurement. Only the peak concurrency
-row is measured. Keep the two separate when you quote them.
+configured concurrency is the setting to quote (extract + verify, plus where the
+setting came from) — a number to reason with, not a measurement. Only the peak
+concurrency row is measured. Keep the two separate when you quote them.
 
 ## Rules for the agent using this skill
 
