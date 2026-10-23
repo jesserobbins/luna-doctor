@@ -103,7 +103,7 @@ def svg_from(scene: Scene) -> str:
         f'fill="{scene.background}"/>')
     for sh in scene.shapes:
         if isinstance(sh, Rect):
-            add(f'<rect {_attrs((
+            attrs = _attrs((
                 ("x", _num(sh.x)), ("y", _num(sh.y)),
                 ("width", _num(sh.w)), ("height", _num(sh.h)),
                 ("fill", sh.fill or "none"),
@@ -111,32 +111,36 @@ def svg_from(scene: Scene) -> str:
                 ("stroke", sh.stroke),
                 ("stroke-width", None if sh.stroke_width == 1.0 else _num(sh.stroke_width)),
                 ("stroke-opacity", None if sh.stroke_opacity is None else _num(sh.stroke_opacity)),
-            ))}/>')
+            ))
+            add(f'<rect {attrs}/>')
         elif isinstance(sh, Line):
-            add(f'<line {_attrs((
+            attrs = _attrs((
                 ("x1", _num(sh.x1)), ("y1", _num(sh.y1)),
                 ("x2", _num(sh.x2)), ("y2", _num(sh.y2)),
                 ("stroke", sh.stroke),
                 ("stroke-width", None if sh.stroke_width == 1.0 else _num(sh.stroke_width)),
                 ("stroke-dasharray", " ".join(_num(d) for d in sh.dash) or None),
                 ("stroke-opacity", None if sh.opacity is None else _num(sh.opacity)),
-            ))}/>')
+            ))
+            add(f'<line {attrs}/>')
         elif isinstance(sh, Circle):
-            add(f'<circle {_attrs((
+            attrs = _attrs((
                 ("cx", _num(sh.cx)), ("cy", _num(sh.cy)), ("r", _num(sh.r)),
                 ("fill", sh.fill or "none"),
                 ("fill-opacity", None if sh.fill_opacity is None else _num(sh.fill_opacity)),
                 ("stroke", sh.stroke),
                 ("stroke-width", None if sh.stroke_width == 1.0 else _num(sh.stroke_width)),
-            ))}>{_title(sh)}</circle>')
+            ))
+            add(f'<circle {attrs}>{_title(sh)}</circle>')
         elif isinstance(sh, Text):
-            add(f'<text {_attrs((
+            attrs = _attrs((
                 ("x", _num(sh.x)), ("y", _num(sh.y)),
                 ("font-size", _num(sh.size)),
                 ("text-anchor", None if sh.anchor == "start" else sh.anchor),
                 ("font-weight", None if sh.weight == "normal" else sh.weight),
                 ("fill", sh.fill),
-            ))}>{escape(sh.s)}{_title(sh)}</text>')
+            ))
+            add(f'<text {attrs}>{escape(sh.s)}{_title(sh)}</text>')
         else:
             raise TypeError(f"unknown shape: {sh!r}")
     add("</svg>")
