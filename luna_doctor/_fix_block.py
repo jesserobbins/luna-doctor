@@ -4,15 +4,29 @@
 Executed inside luna_doctor.cli's namespace, so it may use Request, collect,
 analyse, window_hours, ADVISE_FANOUT_MAX and friends.
 
-Design rules, learned from verification:
-  * Never write. Print only.
-  * A config the tool cannot parse is a config the tool refuses to touch.
-  * Every emitted key must be VERIFIED in
-    its own documentation and code path.
-  * Say plainly when a recommendation cannot change current behaviour.
+Design rules:
+  * Never write. Print only. No shell is emitted.
+  * `fix` generates instructions for the user to paste to their agent.
+    The agent is the only writer. The tool never does it itself.
+  * A config the tool cannot parse is still reported — but instructions say
+    to fix the parse error first.
+  * Every emitted key must be VERIFIED in its own documentation and code path.
   * Do not re-compress a value the user already set more permissively
-    (`httpIdleTimeoutMs: 0` means disabled).
+    (httpIdleTimeoutMs: 0 means disabled — leave it).
 """
+
+import re
+
+# ---- lunaroute preface ----------------------------------------------------
+# What LunaRoute is (short, no links required), how to check it, and the
+# only two routing ideas the user needs before touching config. Every
+# rendered fix opens with this block unless --json is set.
+#
+# Detection order the instructions rely on:
+#   1. `lunaroute` on PATH (local install / setup tool), else
+#   2. `npx @lunaroute/cli …` (works from any shell with node)
+# If neither responds, the user can still follow the instructions — the
+# diagnosis side is offline.
 
 RAISE_TIMEOUT_MS = 900000       # 15 min: past the ~633s background first token
 KNOWN_AGENTS = ("pi", "claude-code", "codex", "swamp")
@@ -50,22 +64,13 @@ def _read_text(path: str) -> str:
 
 
 def _swamp_present(window_hours: float = 24.0) -> tuple[bool, str | None]:
-    """The swamp advice gate: in use, not merely installed.
-
-    swamp_state() (defined in cli.py, whose namespace this block executes in)
-    counts files changed inside the window, so an idle install gets no advice
-    block at all and swamp is never spawned to find out.
-    """
+    """The swamp advice gate: in use, not merely installed."""
     state = swamp_state(since=time.time() - window_hours * 3600)
     return bool(state["in_use"]), state["repo"]
 
 
 def resolve_swamp_knobs(repo_dir: str | None = None) -> dict:
-    """Effective swamp concurrency knobs with provenance.
-
-    Precedence: env var > repo .env.swamp > extension source default.
-    Each knob carries {value, source} where source in {env, .env.swamp, default}.
-    """
+    """Effective swamp concurrency knobs with provenance."""
     if repo_dir is None:
         _, repo_dir = _swamp_present()
     env_swamp_values: dict[str, str] = {}
@@ -131,7 +136,7 @@ def resolve_swamp_knobs(repo_dir: str | None = None) -> dict:
 
 
 def _swamp_split() -> tuple[int, int, int]:
-    """Recommended split with pi+extract+llm <= INTERACTIVE_BURST_CAP. Never 8+8+12=28."""
+    """Recommended split with pi+extract+llm <= INTERACTIVE_BURST_CAP."""
     cap = INTERACTIVE_BURST_CAP
     pi_rec, sw_extract, sw_llm = 4, 3, 2
     total = pi_rec + sw_extract + sw_llm
@@ -149,24 +154,8 @@ def _swamp_split() -> tuple[int, int, int]:
     return pi_rec, sw_extract, sw_llm
 
 
-def _swamp_env_apply(repo_dir: str | None, key: str, value: str) -> str:
-    """Copy-paste block for swamp env vars with mkdir -p + cp backup parity plus .env.swamp variant."""
-    shell_path = "~/.config/swamp/env" if repo_dir is None else os.path.join(repo_dir, ".env.swamp")
-    lines = [
-        f"f={shell_path}",
-        'mkdir -p "$(dirname "$f")"',
-        '[ -f "$f" ] || : > "$f"',
-        'cp "$f" "$f.bak.$(date +%Y%m%d%H%M%S)"',
-        f"# export {key}={value} — add to {shell_path} or export in your shell profile",
-        f'grep -q "^{key}=" "$f" 2>/dev/tty && sed -i.bak "s|^{key}=.*|{key}={value}|" "$f" || echo "{key}={value}" >> "$f"   # swamp {key}',
-    ]
-    if repo_dir:
-        lines.append(f"# repo-local variant also works: {os.path.join(repo_dir, '.env.swamp')}")
-    return "\n".join(lines)
-
-
 def recommendations_swamp(m: dict, agents: list[str]) -> list:
-    """Swamp block — only when agents includes swamp and swamp is in use."""
+    """Swamp advice — only when agents includes swamp and swamp is in use."""
     if "swamp" not in agents:
         return []
     present, repo_dir = _swamp_present(float(m.get("window_hours") or 24.0))
@@ -211,14 +200,11 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
                 "from": f"extract={extract_n} ({extract_cite}), llm={llm_n} ({llm_cite})",
                 "to": f"extract={extract_n}, llm={llm_n} (within budget)",
                 "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + llm {llm_n} = {combined} "
-                        f"fits the conservative combined budget, so no adjustment is needed; keep the "
-                        f"combined total within it when tuning swamp concurrency. "
-                        f"Defaults: {SWAMP_CITATION_DEFAULT} extract={SWAMP_DEFAULT_EXTRACT}, "
-                        f"llm={SWAMP_DEFAULT_LLM}. Live: ~/.swamp.yaml + .env.swamp. "
-                        f"{CAP_COPY[0].upper()}{CAP_COPY[1:]}."),
+                        f"fits the conservative combined budget. Keep the combined total within it when tuning. "
+                        f"Defaults: {SWAMP_CITATION_DEFAULT} extract={SWAMP_DEFAULT_EXTRACT}, llm={SWAMP_DEFAULT_LLM}."),
+                "instruction": (f"Your swamp setup already fits the combined budget. No change needed — tell your agent: keep swamp at extract {extract_n} / verify {llm_n}. "
+                                f"If you retune, keep pi + swamp ≤ {cap}."),
                 "impact": "no change needed; swamp is already within the combined budget.",
-                "apply": f"true   # within budget: {combined}",
-                "snippet": f"SWAMP_EXTRACT_CONCURRENCY={extract_n}\nSWAMP_LLM_CONCURRENCY={llm_n}",
             }],
         }]
     pi_rec, extract_rec, llm_rec = _swamp_split()
@@ -232,30 +218,26 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
                 "file": os.path.join(repo_dir, ".env.swamp") if repo_dir else "~/.swamp.yaml",
                 "from": f"{extract_n} ({extract_cite})",
                 "to": str(extract_rec),
-                "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + phase-6 {llm_n} = {combined} "
+                "why": (f"Combined pi {pi_budget} + extract {extract_n} + phase-6 {llm_n} = {combined} "
                         f"is past the conservative combined budget: swamp alone would fill the "
-                        f"interactive admission width even before pi traffic. "
-                        f"Default {SWAMP_DEFAULT_EXTRACT} from {SWAMP_CITATION_DEFAULT} "
-                        f"(extractMany worker count). Live value from {extract_cite}."),
-                "impact": (f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = "
-                           f"{combined_rec}, within the combined budget."),
-                "apply": _swamp_env_apply(repo_dir, "SWAMP_EXTRACT_CONCURRENCY", str(extract_rec)),
-                "snippet": f"SWAMP_EXTRACT_CONCURRENCY={extract_rec}",
+                        f"interactive admission width even before pi traffic. Default {SWAMP_DEFAULT_EXTRACT} "
+                        f"from {SWAMP_CITATION_DEFAULT}; live from {extract_cite}."),
+                "instruction": (f"Ask your agent: in {os.path.join(repo_dir, '.env.swamp') if repo_dir else '.env.swamp'} set SWAMP_EXTRACT_CONCURRENCY={extract_rec} "
+                                f"(was {extract_n} from {extract_cite}). Export it in your shell too if your swamp runner reads env vars. "
+                                f"Target combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = {combined_rec} ≤ {cap}."),
+                "impact": f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = {combined_rec} within the combined budget.",
             },
             {
                 "key": "SWAMP_LLM_CONCURRENCY",
                 "file": os.path.join(repo_dir, ".env.swamp") if repo_dir else "~/.swamp.yaml",
                 "from": f"{llm_n} ({llm_cite})",
                 "to": str(llm_rec),
-                "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + phase-6 {llm_n} = {combined} "
-                        f"is past the conservative combined budget: swamp phase-6 alone overfills the "
-                        f"interactive admission width without headroom for pi. Default {SWAMP_DEFAULT_LLM} from "
-                        f"{SWAMP_CITATION_DEFAULT} (runVerifyPass batch concurrency). Live value from {llm_cite}. "
-                        f"{CAP_COPY[0].upper()}{CAP_COPY[1:]}."),
-                "impact": (f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = "
-                           f"{combined_rec}, within the combined budget."),
-                "apply": _swamp_env_apply(repo_dir, "SWAMP_LLM_CONCURRENCY", str(llm_rec)),
-                "snippet": f"SWAMP_LLM_CONCURRENCY={llm_rec}",
+                "why": (f"Combined pi {pi_budget} + extract {extract_n} + phase-6 {llm_n} = {combined} "
+                        f"is past the conservative combined budget. Default {SWAMP_DEFAULT_LLM} from "
+                        f"{SWAMP_CITATION_DEFAULT}; live from {llm_cite}. {CAP_COPY[0].upper()}{CAP_COPY[1:]}."),
+                "instruction": (f"Ask your agent: set SWAMP_LLM_CONCURRENCY={llm_rec} (was {llm_n} from {llm_cite}). "
+                                f"Check it with your swamp runner's env and restart it so the next batch respects the new fan-out."),
+                "impact": f"keeps combined pi {pi_rec} + extract {extract_rec} + phase-6 {llm_rec} = {combined_rec} within the combined budget.",
             },
         ],
         "combined_budget": {
@@ -281,7 +263,7 @@ def catalog() -> list:
     return []
 
 
-def pick_background_model(reqs, cat) -> str | None:
+def pick_background_model(reqs, cat) -> list | None:
     counts = {}
     for r in reqs:
         if r.tier == "interactive" and r.model:
@@ -291,90 +273,11 @@ def pick_background_model(reqs, cat) -> str | None:
         top = max(counts, key=counts.get)
         twin = top if top.endswith("-background") else top + "-background"
         if twin in known:
-            return twin
+            return [twin]
     for cand in sorted(known):
         if cand.endswith("-background"):
-            return cand
+            return [cand]
     return None
-
-
-def _jq_apply(path: str, filter_: str, label: str) -> str:
-    """Back up, validate, merge into a temp file, then move it into place.
-
-    The earlier version piped jq straight into the live file, which truncated
-    the config to zero bytes whenever jq failed or was missing.
-    """
-    return "\n".join([
-        f"f={path}",
-        'mkdir -p "$(dirname "$f")"',
-        '[ -f "$f" ] || echo \'{}\' > "$f"',
-        'command -v jq >/dev/null || { echo "refusing: jq is not installed (brew install jq)"; exit 1; }',
-        'jq -e . "$f" >/dev/null || { echo "refusing: $f is not valid JSON, fix it first"; exit 1; }',
-        'cp "$f" "$f.bak.$(date +%Y%m%d%H%M%S)"',
-        f"jq '{filter_}' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"   # {label}",
-        'jq -e . "$f" >/dev/null && echo ok',
-    ])
-
-
-def _toml_agents_apply(path: str, keys: dict) -> str:
-    """Merge keys into the existing [agents] table, or create it.
-
-    Appending a second `[agents]` header is a TOML error, and a heredoc whose
-    terminator gets indented never terminates - so the merge is done by python
-    reading the file, and the emitted block is never indented by the renderer.
-    """
-    keys_lit = "{" + ", ".join(f"{k!r}: {v!r}" for k, v in keys.items()) + "}"
-    body = "\n".join([
-        "import os, re, tomllib",
-        'p = os.environ["F"]',
-        f"keys = {keys_lit}",
-        'src = open(p).read().splitlines() if os.path.exists(p) else []',
-        "out = list(src)",
-        "idx = next((i for i, l in enumerate(out) if re.match(r'^\\[agents\\]\\s*(#.*)?$', l.strip())), None)",
-        "if idx is None:",
-        "    if out and out[-1].strip():",
-        '        out.append("")',
-        '    out.append("[agents]")',
-        "    out += [f'{k} = {v}' for k, v in keys.items()]",
-        "else:",
-        "    end = len(out)",
-        "    for j in range(idx + 1, len(out)):",
-        "        if out[j].startswith('['):",
-        "            end = j",
-        "            break",
-        "    block = out[idx + 1:end]",
-        "    left = dict(keys)",
-        "    for i, l in enumerate(block):",
-        "        m = re.match(r'\\s*([A-Za-z0-9_]+)\\s*=', l)",
-        "        if m and m.group(1) in left:",
-        "            block[i] = f'{m.group(1)} = {left.pop(m.group(1))}'",
-        "    block += [f'{k} = {v}' for k, v in left.items()]",
-        "    if end < len(out) and block and block[-1].strip():",
-        '        block.append("")',
-        "    out[idx + 1:end] = block",
-        "text = '\\n'.join(out) + '\\n'",
-        "try:",
-        "    doc = tomllib.loads(text)",
-        "except Exception as e:",
-        '    print("FAILED: merged TOML would not parse:", e)',
-        "    raise SystemExit(1)",
-        "got = doc.get('agents') or {}",
-        "missing = [k for k in keys if k not in got]",
-        "if missing:",
-        '    print("FAILED: keys missing after merge:", missing)',
-        "    raise SystemExit(1)",
-        "import shutil, time",
-        'shutil.copy2(p, p + ".bak." + time.strftime("%Y%m%d%H%M%S"))',
-        'open(p, "w").write(text)',
-        "print('ok:', {k: got[k] for k in keys})",
-    ])
-    head = "\n".join([
-        f"f={path}",
-        'mkdir -p "$(dirname "$f")"',
-        '[ -f "$f" ] || : > "$f"',
-        'F="$f" python3 - <<\'PY\'',
-    ])
-    return head + "\n" + body + "\n" + "PY"
 
 
 def _why(*bits: str) -> str:
@@ -389,14 +292,6 @@ def _impact(peak: int) -> str:
 
 
 def demotion_note(reason: str, model: str) -> str:
-    """Plain sentence on how `-background` traffic is really being served.
-
-    `reason` is what a probe saw (`tier_of`'s third value): "no_entitlement"
-    when a `-background` request was downgraded into the priority pool, or
-    "" when nothing has said - which is all log records can ever say, since
-    pi and claude-code keep no response headers. The hedge in the "" branch
-    is the point: `fix` must not imply it knows the served tier.
-    """
     if reason == "no_entitlement":
         return (f"`{model}` is being served on priority concurrency: this account has no background "
                 f"entitlement, so its `-background` requests are downgraded into the priority pool "
@@ -405,6 +300,48 @@ def demotion_note(reason: str, model: str) -> str:
             f"no background entitlement, `{model}` requests are downgraded into the priority pool, "
             f"which is why a background model can still be squeezed. Only a probe can see the "
             f"served tier.")
+
+
+# ---- lunaroute explainer (instructions-only fix) --------------------------
+# Rendered once at the top of every non-JSON fix report so the per-agent
+# instructions make sense even to a first-time user. Short by design:
+# what LunaRoute is, what plan/tier means here, how fan-out fits, and how to
+# talk to the `lunaroute` command (with the `npx` fallback when it is not on
+# PATH).
+
+LUNAROUTE_PREFACE = (
+    "LunaRoute is a gateway that sits between your harness and the model. "
+    "It multiplexes many concurrent sessions over one account. "
+    "Your plan determines how many concurrent requests the gateway will admit "
+    "and which tier they ride on."
+)
+
+LUNAROUTE_ROUTING_PREFACE = (
+    "Routing: by default, non-interactive work (subagents, background tasks) "
+    "should ride the background tier — it is slower but admits wider fan-out. "
+    "Interactive work (the session you are watching) rides the priority tier. "
+    "Every non-interactive call should use the background variant of your model (e.g. "
+    "`glm-5.3-background` rather than `glm-5.3`). If your account has no background "
+    "entitlement, background requests are downgraded into the priority pool and still "
+    "count against the same budget — a probe shows the served tier either way."
+)
+
+LUNAROUTE_COMMAND_PREFACE = (
+    "To inspect your LunaRoute setup, use the `lunaroute` command:\n"
+    "  lunaroute whoami          # who is signed in and on what plan\n"
+    "  lunaroute models --json   # what models are available on this account\n"
+    "  lunaroute usage --json    # remaining budget / concurrency headroom\n"
+    "If `lunaroute` is not on your PATH, run it via npx instead:\n"
+    "  npx @lunaroute/cli whoami\n"
+    "  npx @lunaroute/cli models --json\n"
+    "The `fix` instructions below name the exact config key and desired value. "
+    "Do not paste generated code — paste the instruction to your agent and let "
+    "the agent apply it."
+)
+
+
+def _lunaroute_preface_text() -> str:
+    return "\n\n".join([LUNAROUTE_PREFACE, LUNAROUTE_ROUTING_PREFACE, LUNAROUTE_COMMAND_PREFACE])
 
 
 def recommendations(m, reqs, agents) -> list:
@@ -422,8 +359,6 @@ def recommendations(m, reqs, agents) -> list:
         f"{idle_stalls} silent stall(s)," if idle_stalls else "",
         f"{bgcount} request(s) already on the background tier." if bgcount else "",
     )
-    # Log records carry no response headers, so a reason only reaches us from
-    # a live observation; the "" case is what logs can ever say.
     demotion = next((r.reason for r in reqs if r.reason), "")
     bg_note = demotion_note(demotion, bg) if bg else ""
 
@@ -445,11 +380,10 @@ def recommendations(m, reqs, agents) -> list:
                             f"This machine caps children at {limit}, wider than the interactive "
                             f"admission width - {CAP_COPY}. Past it, requests are demoted to the "
                             f"background tier, where the first token takes about 600s."),
+                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISE_FANOUT_MAX} "
+                                f"(was {limit}). This caps simultaneous child agents so your burst no longer overflows "
+                                f"the interactive lane and gets demoted to background. Restart the harness after the change."),
                 "impact": _impact(peak),
-                "apply": _jq_apply(PI_SUBAGENT_CFG,
-                                   f".globalConcurrencyLimit = {ADVISE_FANOUT_MAX}",
-                                   "cap simultaneous children"),
-                "snippet": json.dumps({"globalConcurrencyLimit": ADVISE_FANOUT_MAX}),
             })
         elif limit is None:
             changes.append({
@@ -460,14 +394,12 @@ def recommendations(m, reqs, agents) -> list:
                 "why": _why(evidence,
                             "The default lets one run fan out 20 children, well past the interactive "
                             f"admission width - {CAP_COPY}."),
+                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISE_FANOUT_MAX}. "
+                                f"The current default (20) will keep overflowing the interactive tier under load; lower it. "
+                                f"Have the agent read the existing file first, preserve other keys, then apply the change."),
                 "impact": _impact(peak),
-                "apply": _jq_apply(PI_SUBAGENT_CFG,
-                                   f".globalConcurrencyLimit = {ADVISE_FANOUT_MAX}",
-                                   "cap simultaneous children"),
-                "snippet": json.dumps({"globalConcurrencyLimit": ADVISE_FANOUT_MAX}),
             })
 
-        # 0 means disabled, which is already more permissive than our value.
         if isinstance(idle_ms, int) and 0 < idle_ms < 600000:
             changes.append({
                 "key": "httpIdleTimeoutMs",
@@ -478,11 +410,10 @@ def recommendations(m, reqs, agents) -> list:
                             f"pi's idle budget is {idle_ms}ms. A demoted background stream can stay silent"
                             f" for about 600s while emitting keep-alives, so a shorter budget converts a"
                             f" slow success into `Stream ended without finish_reason`."),
+                "instruction": (f"Ask your agent: in {PI_SETTINGS} raise httpIdleTimeoutMs to {RAISE_TIMEOUT_MS} (from {idle_ms}). "
+                                f"Anything shorter kills a slow background request before it answers. If your harness reads its "
+                                f"timeout from env instead (e.g. HTTP_IDLE_TIMEOUT_MS), update that instead."),
                 "impact": "prevents a background request from being killed by the client before it speaks.",
-                "apply": _jq_apply(PI_SETTINGS,
-                                   f".httpIdleTimeoutMs = {RAISE_TIMEOUT_MS}",
-                                   "outlast the background tier"),
-                "snippet": json.dumps({"httpIdleTimeoutMs": RAISE_TIMEOUT_MS}),
             })
         elif idle_ms == 0:
             changes.append({
@@ -493,9 +424,8 @@ def recommendations(m, reqs, agents) -> list:
                 "why": _why(evidence,
                             "Already `0`, which means the idle budget is disabled - as permissive as this"
                             " setting gets. No change needed."),
+                "instruction": "No change needed — httpIdleTimeoutMs is already disabled (0), which is the correct posture for background-heavy traffic.",
                 "impact": "nothing to do; recorded so the verdict is not silent about it.",
-                "apply": "true   # nothing to apply",
-                "snippet": json.dumps({"httpIdleTimeoutMs": 0}),
             })
 
         if bg and wide:
@@ -511,11 +441,10 @@ def recommendations(m, reqs, agents) -> list:
                                 f"Children currently inherit the interactive model. `{bg}` is the tier with"
                                 f" the larger concurrency allowance; the trade is a much slower SLA.",
                                 bg_note),
+                    "instruction": (f"Ask your agent: in {PI_SETTINGS} set your default background model to {target} "
+                                    f"so child agents ride the background tier by default (was {cur!r}). Ask it to verify the model "
+                                    f"exists via: lunaroute models --json   (or: npx @lunaroute/cli models --json)."),
                     "impact": _impact(peak),
-                    "apply": _jq_apply(PI_SETTINGS,
-                                       f'.subagents.defaultModel = "{target}"',
-                                       "send children to the background tier"),
-                    "snippet": json.dumps({"subagents": {"defaultModel": target}}),
                 })
         if changes:
             out.append({"agent": "pi", "changes": changes})
@@ -527,8 +456,8 @@ def recommendations(m, reqs, agents) -> list:
         changes, note = [], None
         if not settings.get("env", {}).get("ANTHROPIC_BASE_URL"):
             note = ("This settings file has no ANTHROPIC_BASE_URL, so claude-code may not be reaching"
-                    " LunaRoute at all. Run `lunaroute setup claude-code` first; the tier advice below"
-                    " only matters once traffic is routed.")
+                    " LunaRoute at all. Run `lunaroute setup claude-code` (or `npx @lunaroute/cli setup claude-code`) "
+                    "first; the tier advice below only matters once traffic is routed.")
 
         subs = env.get("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")
 
@@ -547,11 +476,9 @@ def recommendations(m, reqs, agents) -> list:
                 "why": _why(evidence,
                             f"The default is 20 concurrent subagents, well past the interactive "
                             f"admission width - {CAP_COPY}."),
+                "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {ADVISE_FANOUT_MAX}. "
+                                f"The default 20 keeps overflowing interactive headroom."),
                 "impact": _impact(peak),
-                "apply": _jq_apply(CLAUDE_SETTINGS,
-                                   f'.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = "{ADVISE_FANOUT_MAX}"',
-                                   "cap concurrent subagents"),
-                "snippet": json.dumps({"env": {"CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": str(ADVISE_FANOUT_MAX)}}),
             })
 
         idle_env = env.get("CLAUDE_STREAM_IDLE_TIMEOUT_MS")
@@ -565,13 +492,10 @@ def recommendations(m, reqs, agents) -> list:
                             "The stream idle floor is 300s and the API timeout is shorter than the background"
                             " tier's time to first token. Both belong in the `env` block: the top-level"
                             " settings keys are ignored behind a custom base URL, which LunaRoute is."),
+                "instruction": (f"Ask your agent to raise CLAUDE_STREAM_IDLE_TIMEOUT_MS and API_TIMEOUT_MS to {RAISE_TIMEOUT_MS} "
+                                f"in {CLAUDE_SETTINGS} (env block). This is what prevents a background request from being killed on the "
+                                f"client side before the gateway answers. Top-level timeout keys do not take effect when LunaRoute is the base URL."),
                 "impact": "prevents a demoted request from being killed before it speaks.",
-                "apply": _jq_apply(CLAUDE_SETTINGS,
-                                   f'.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS = "{RAISE_TIMEOUT_MS}"\n'
-                                   f'   | .env.API_TIMEOUT_MS = "{RAISE_TIMEOUT_MS}"',
-                                   "outlast the background tier (two keys)"),
-                "snippet": json.dumps({"env": {"CLAUDE_STREAM_IDLE_TIMEOUT_MS": str(RAISE_TIMEOUT_MS),
-                                               "API_TIMEOUT_MS": str(RAISE_TIMEOUT_MS)}}),
             })
 
         if bg and wide:
@@ -586,11 +510,10 @@ def recommendations(m, reqs, agents) -> list:
                                 f"Children inherit the parent model unless this is set; `{bg}` carries the"
                                 f" larger concurrency allowance.",
                                 bg_note),
+                    "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_SUBAGENT_MODEL to {bg} "
+                                    f"so spawned subagents use the background model. Verify with: lunaroute models --json | grep {bg} "
+                                    f"(or npx @lunaroute/cli models --json)."),
                     "impact": _impact(peak),
-                    "apply": _jq_apply(CLAUDE_SETTINGS,
-                                       f'.env.CLAUDE_CODE_SUBAGENT_MODEL = "{bg}"',
-                                       "send children to the background tier"),
-                    "snippet": json.dumps({"env": {"CLAUDE_CODE_SUBAGENT_MODEL": bg}}),
                 })
         if changes:
             out.append({"agent": "claude-code", "changes": changes, "note": note})
@@ -610,20 +533,24 @@ def recommendations(m, reqs, agents) -> list:
         if bg and wide and "default_subagent_model" not in text:
             keys["default_subagent_model"] = json.dumps(bg)
         if keys:
+            pretty_keys = ", ".join(f"agents.{k}" for k in keys)
+            desired = ", ".join(str(v).strip('"') for v in keys.values())
             out.append({
                 "agent": "codex",
                 "changes": [{
-                    "key": ", ".join(f"agents.{k}" for k in keys),
+                    "key": pretty_keys,
                     "file": CODEX_CONFIG,
                     "from": "unset",
-                    "to": ", ".join(str(v).strip('"') for v in keys.values()),
+                    "to": desired,
                     "why": _why(evidence,
                                 "Codex has no verified request-timeout knob, so it cannot defend itself"
                                 " against a 600s first token; keep the fan-out under the advised width instead.",
                                 bg_note),
+                    "instruction": (f"Ask your agent: in {CODEX_CONFIG} set {pretty_keys} to {desired}. "
+                                    f"Existing keys in that file must be preserved. No shell is needed — let the agent edit the TOML directly. "
+                                    f"Remember codex reads [agents] from config.toml, but a LunaRoute profile in "
+                                    f"~/.codex/lunaroute.config.toml can override tier — keep tier there, limits here."),
                     "impact": _impact(peak),
-                    "apply": _toml_agents_apply(CODEX_CONFIG, keys),
-                    "snippet": "[agents]\n" + "\n".join(f"{k} = {v}" for k, v in keys.items()),
                 }],
                 "note": ("Codex reads `[agents]` from config.toml, but a LunaRoute profile lives in"
                          " ~/.codex/lunaroute.config.toml and wins for the keys it sets. Keep tier changes"
@@ -656,8 +583,13 @@ def render_fix(recs, m, as_json: bool) -> None:
     if not recs:
         print("Nothing to change: no agent is configured in a way that can overflow the gateway.")
         return
-    print("Copy-paste fixes. Nothing below runs on its own; each block backs the file up first.")
-    print(f"Fan-out limit used throughout: {ADVISE_FANOUT_MAX} "
+    print("These are instructions for your agent. luna-doctor does not edit files itself —"
+          " copy the relevant block and paste it to the agent that owns the harness.")
+    print()
+    for line in _wrap(_lunaroute_preface_text(), 72):
+        print(line)
+    print()
+    print(f"Fan-out limit for the advice below: {ADVISE_FANOUT_MAX} "
           f"({CAP_COPY}).")
     print()
     for group in recs:
@@ -681,15 +613,9 @@ def render_fix(recs, m, as_json: bool) -> None:
             for line in _wrap("impact: " + ch["impact"], 70):
                 print("    " + line)
             print()
-            print("  apply (copy these lines exactly):")
+            print("  Tell your agent (copy-paste):")
             print()
-            for line in ch["apply"].splitlines():
-                print(line)
-            print()
-            where = ("inside the existing [agents] table" if ch["file"].endswith(".toml")
-                     else "inside the existing top-level object")
-            print(f"  or edit by hand: ADD these keys {where}. Do not replace the file.")
-            for line in ch["snippet"].splitlines():
+            for line in _wrap(ch["instruction"], 68):
                 print("    " + line)
         print()
 

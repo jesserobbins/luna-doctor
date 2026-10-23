@@ -298,10 +298,13 @@ class Sources(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, f"{rel}: {proc.stderr}")
 
     def test_emitted_apply_blocks_never_write_on_their_own(self):
-        """`fix` must print, never apply."""
+        """`fix` must print instructions, never shell that writes."""
         code, out, _ = run("fix", "--since", "24h")
         self.assertIn(code, (0, 1))
-        self.assertIn("Nothing below runs on its own", out)
+        self.assertIn("does not edit files itself", out)
+        self.assertIn("Tell your agent", out)
+        for bad in ('jq \'', ' > "$f.tmp"', 'cp "$f"', "sed -i"):
+            self.assertNotIn(bad, out, f"fix emitted shell code: {bad!r}")
 
 
 def _load_cli():
