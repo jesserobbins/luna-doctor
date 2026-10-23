@@ -7,6 +7,7 @@ Run from the repo root:
 
 import collections
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -106,6 +107,69 @@ class ShareText(unittest.TestCase):
         self.assertIn("*peak concurrency:* 6", text)
         # 6 measured + 20 configured must never be presented as 26 of anything.
         self.assertNotIn("26", text)
+
+    def _busy_m(self):
+        """The shape of a real pressured run: measured figures, swamp in use."""
+        return self._m(requests=6654, peak_concurrency=17,
+                        by_harness={"pi": 5884, "claude-code": 770},
+                        by_outcome={"admission_timeout": 20, "client_idle_timeout": 3},
+                        pressure_windows=21,
+                        swamp={"present": True, "configuredConcurrency": 20})
+
+    def _busy_rep(self):
+        return Report(
+            "Concurrency pressure across 6654 requests: 20 admission death(s), "
+            "3 silent stall(s), peak concurrency 17.",
+            [Section("traffic", [Row("peak concurrency", "17", "bad")])],
+            [
+                "20 request(s) died on admission (`scheduler admission timeout`).",
+                "3 request(s) stalled until the harness's own ~300s idle budget killed them.",
+                "21 window(s) had more than 8 requests in flight at once.",
+                "1577 request(s) already ran on the -background tier.",
+                "1 request(s) hit an account rate limit (429 rate_limit_error).",
+                "8 stalled request(s) had another request to the same model complete "
+                "inside their own window.",
+                "swamp is configured to fan out to 20 concurrent requests per behavior - "
+                "a setting, not measured traffic.",
+                "Adjust: keep interactive fan-out at or under 8, and move any wider "
+                "fan-out to the -background variant of the same model.",
+            ])
+
+    def test_message_is_trimmed_for_a_group_chat(self):
+        """One headline, at most five value lines, at most three bullets,
+        one provenance line - a chat message, not the terminal report."""
+        text = render_share_text(self._busy_rep(), self._busy_m())
+        lines = text.rstrip("\n").split("\n")
+        self.assertTrue(lines[0].startswith("> "), "the headline opens the message")
+        self.assertEqual(len([l for l in lines if l.startswith("> ")]), 1)
+        value_lines = [l for l in lines if re.match(r"^\*[^*]+\*: ", l)]
+        self.assertLessEqual(len(value_lines), 5)
+        bullets = [l for l in lines if l.startswith("- ")]
+        self.assertLessEqual(len(bullets), 3)
+        # The three that decide something: the overflow cause, the stall
+        # cause, the action - and the action closes the message body.
+        self.assertTrue(any("probe --enable-probe" in b for b in bullets),
+                        "the overflow bullet points at the probe")
+        self.assertTrue(any("silent-overflow" in b for b in bullets),
+                        "the stall bullet names the signature")
+        self.assertEqual(bullets[-1],
+                         "- Keep interactive fan-out at or under 8, and move any wider "
+                         "fan-out to the -background variant of the same model.")
+        self.assertEqual(lines[-1], "measured on this account, last 1d")
+        # Swamp is in use, so it gets exactly one mention - its configured
+        # value line - and the latency line yields its slot to stay at five.
+        self.assertEqual(len([l for l in lines if "swamp" in l.lower()]), 1)
+        self.assertNotIn("interactive latency", text)
+        # No bullet may repeat a number the value lines already carry.
+        value_numbers = set(re.findall(r"\d+(?:\.\d+)?", " ".join(value_lines)))
+        for b in bullets:
+            self.assertEqual(set(re.findall(r"\d+(?:\.\d+)?", b)) & value_numbers, set(),
+                             f"bullet repeats a value-line number: {b}")
+
+    def test_swamp_is_silent_when_not_in_use(self):
+        """Installed is not in use: no value line, no bullet, no mention."""
+        text = render_share_text(self._busy_rep(), self._m())
+        self.assertNotIn("swamp", text.lower())
 
 
 class ShareCard(unittest.TestCase):

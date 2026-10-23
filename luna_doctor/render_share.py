@@ -43,11 +43,14 @@ def wa_safe(s: str) -> str:
 
 
 def _share_numbers(m: dict) -> list:
-    """The four or five numbers that earn a place on a phone screen.
+    """The numbers that earn a place on a phone screen: at most five.
 
-    Measured figures only: swamp's configured fan-out, when swamp is in use,
-    is a setting and gets its own line labelled "configured" - it is never
-    summed into the measured peak beside it.
+    Measured figures only: swamp's configured fan-out, when swamp is in
+    use, is a setting and gets its own line labelled "configured" - it is
+    never summed into the measured peak beside it. When swamp is in use
+    that line takes the fifth slot in place of interactive latency, which
+    the share card still carries, so the message never grows past five
+    value lines.
     """
     harnesses = ", ".join(f"{k} {v}" for k, v in sorted((m.get("by_harness") or {}).items()))
     reqs = m.get("requests", 0)
@@ -59,14 +62,47 @@ def _share_numbers(m: dict) -> list:
     out.append(("admission deaths", str(by_outcome.get("admission_timeout", 0))))
     out.append(("silent stalls", str(by_outcome.get("client_idle_timeout", 0))))
     lat = ((m.get("latency_s") or {}).get("interactive") or {})
-    if lat.get("p50") is not None:
-        p90 = f", p90 {lat['p90']:.1f}s" if lat.get("p90") is not None else ""
-        out.append(("interactive latency", f"p50 {lat['p50']:.1f}s{p90}"))
     sw = m.get("swamp") or {}
     if sw.get("present") and sw.get("configuredConcurrency"):
         out.append(("swamp fan-out (configured)",
                     f"{sw['configuredConcurrency']} - a setting, not measured traffic"))
+    elif lat.get("p50") is not None:
+        p90 = f", p90 {lat['p90']:.1f}s" if lat.get("p90") is not None else ""
+        out.append(("interactive latency", f"p50 {lat['p50']:.1f}s{p90}"))
     return out
+
+
+def _share_bullets(m: dict, adjustments) -> list:
+    """The at-most-three bullets that decide something, written for a chat.
+
+    The terminal report keeps every adjustment; a group chat gets three:
+    why requests overflowed, why they stalled, and what to do. They are
+    written without the counts, which the value lines above already
+    carry, and without session shorthand or local paths, because the
+    reader was not there. Swamp never earns a bullet: when it is in use
+    it already has its single configured line, and it is never summed
+    with anything.
+    """
+    by_outcome = m.get("by_outcome") or {}
+    bullets = []
+    if m.get("pressure_windows"):
+        bullets.append(
+            "Bursts wider than the account's interactive admission width are "
+            "demoted to the background tier rather than failing; measure yours "
+            "with probe --enable-probe.")
+    if (by_outcome.get("client_idle_timeout") or 0) > 0:
+        bullets.append(
+            "Some requests stalled until the harness's own idle limit killed "
+            "them - the silent-overflow signature: the request was likely "
+            "demoted to the background tier, which streams only keep-alives "
+            "for minutes.")
+    if adjustments:
+        action = adjustments[-1]
+        if action.startswith("Adjust: "):
+            action = action[len("Adjust: "):]
+            action = action[0].upper() + action[1:]
+        bullets.append(action)
+    return bullets[:3]
 
 
 def _provenance(m: dict) -> str:
@@ -79,15 +115,16 @@ def _provenance(m: dict) -> str:
 def render_share_text(report, m: dict) -> str:
     """The report as a WhatsApp message, ending in a single newline.
 
-    `>` quotes the headline, `*label:* value` lines carry the numbers, `- `
-    bullets carry the advice, and one provenance line closes it. WhatsApp
-    markup only: no monospace, no alignment, no ANSI, no emoji.
+    `>` quotes the headline, `*label:* value` lines carry the numbers,
+    `- ` bullets carry the curated advice (see `_share_bullets`), and one
+    provenance line closes it. WhatsApp markup only: no monospace, no
+    alignment, no ANSI, no emoji.
     """
     lines = ["> " + wa_safe(report.headline)]
     for label, value in _share_numbers(m):
         lines.append(f"*{wa_safe(label)}:* {wa_safe(value)}")
-    for adj in report.adjustments:
-        lines.append("- " + wa_safe(adj))
+    for bullet in _share_bullets(m, report.adjustments):
+        lines.append("- " + wa_safe(bullet))
     lines.append(wa_safe(_provenance(m)))
     return "\n".join(lines) + "\n"
 
