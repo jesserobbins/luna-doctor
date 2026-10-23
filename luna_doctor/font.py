@@ -141,7 +141,7 @@ ASCII_FOLD = {
     "\u201d": '"',
     "\u00b0": "deg",  # DEGREE SIGN
     "\u00a0": " ",   # NO-BREAK SPACE
-    "\u2715": "x",    # the chart's admission-death legend mark
+    "\u2715": "x",    # the chart's blocked-at-admission legend mark
     "\u25cf": "o",    # the chart's silent-stall legend mark
 }
 

@@ -155,7 +155,7 @@ CARD_PALETTE = {
     "star": "#e2e8f0",
     "text": "#f1f5f9",
     "muted": "#94a3b8",
-    "bad": "#f87171",     # admission deaths
+    "bad": "#f87171",     # blocked-at-admission count
     "warn": "#fbbf24",    # silent stalls
     "good": "#34d399",   # a clean zero
 }
@@ -203,7 +203,7 @@ def _card_pairs(m: dict, p: dict) -> list:
     pairs = [
         ("requests", str(m.get("requests", 0)), p["text"]),
         ("peak concurrency", str(m.get("peak_concurrency", 0)), p["text"]),
-        ("admission deaths", str(dead), p["bad"] if dead else p["good"]),
+        ("blocked at admission", str(dead), p["bad"] if dead else p["good"]),
         ("silent stalls", str(stalls), p["warn"] if stalls else p["good"]),
     ]
     lat = ((m.get("latency_s") or {}).get("interactive") or {})

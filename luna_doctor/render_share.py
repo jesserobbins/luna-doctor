@@ -59,7 +59,7 @@ def _share_numbers(m: dict) -> list:
         ("peak concurrency", str(m.get("peak_concurrency", 0))),
     ]
     by_outcome = m.get("by_outcome") or {}
-    out.append(("admission deaths", str(by_outcome.get("admission_timeout", 0))))
+    out.append(("blocked at admission", str(by_outcome.get("admission_timeout", 0))))
     out.append(("silent stalls", str(by_outcome.get("client_idle_timeout", 0))))
     lat = ((m.get("latency_s") or {}).get("interactive") or {})
     sw = m.get("swamp") or {}
@@ -88,8 +88,7 @@ def _share_bullets(m: dict, adjustments) -> list:
     if m.get("pressure_windows"):
         bullets.append(
             "Bursts wider than the account's interactive admission width are "
-            "demoted to the background tier rather than failing; measure yours "
-            "with probe --enable-probe.")
+            "demoted to the background tier rather than failing.")
     if (by_outcome.get("client_idle_timeout") or 0) > 0:
         bullets.append(
             "Some requests stalled until the harness's own idle limit killed "

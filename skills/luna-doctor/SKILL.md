@@ -47,7 +47,7 @@ to the user, use `--style plain`.
 
 | outcome in the report | what it means |
 |---|---|
-| `admission_timeout` | died at the gateway's ~120.2s admission deadline. Concurrency was exhausted; the request was never admitted. |
+| `admission_timeout` | blocked at the gateway's ~120.2s admission deadline. Concurrency was exhausted; the request was never admitted. |
 | `client_idle_timeout` | stalled until the harness's ~300s idle budget killed the stream. Almost always the silent background demotion. |
 | `upstream_unavailable` / `upstream_error` | 503/500/502 propagation. Not concurrency; check service health. |
 | `rate_limited` | 429 `rate_limit_error` — the subscription quota. Narrowing fan-out will not fix it. |
@@ -57,7 +57,7 @@ to the user, use `--style plain`.
 Two metrics carry most of the diagnosis:
 
 - **admission conversion** — the share of interactive requests that were served
-  rather than killed on admission. Low conversion means the interactive tier is
+  rather than blocked at admission. Low conversion means the interactive tier is
   oversubscribed.
 - **starved-peer evidence** — stalled requests where another request to the same
   model completed inside their own window. When this is non-zero the model was
@@ -70,7 +70,7 @@ flight, split by tier, with the advised fan-out (8) and the gateway's rough
 admission level as dashed rules. Bottom: every request end to end on a log
 axis, with the 120.2s
 admission deadline and the 300s client idle budget as dashed walls — failures sit
-on the wall that killed them (red crosses at 120.2s, amber dots at 300s).
+on the wall that stopped them (red crosses at 120.2s, amber dots at 300s).
 
 Use it before quoting numbers: a burst in the top panel at the same x as a
 cluster of red crosses below is the diagnosis in one picture. When the top panel
@@ -80,8 +80,8 @@ answer is that fan-out is not the problem.
 ## What to recommend
 
 1. **Keep interactive fan-out at or under 8.** The gateway admits roughly this many
-   interactive requests at once, per account; measure yours with
-   `luna-doctor probe --enable-probe`. Anything past that width is demoted to
+   interactive requests at once; the admitted width is specific to the account
+   and cannot be read from these logs. Anything past that width is demoted to
    background, where the answer can take ten minutes to start. Never state a cap as a
    gateway fact: the number is per account and only a probe can tell you yours.
 2. **Move wide fan-out to the `-background` variant** of the same model. More
@@ -115,6 +115,6 @@ row is measured. Keep the two separate when you quote them.
 - Run the tool; do not diagnose from the error string alone. `Stream ended
   without finish_reason` is a pi client string and says nothing about the gateway.
 - Quote the numbers from the report rather than paraphrasing them.
-- If `analyze` shows no pressure and the user is still slow, say so, and offer
-  `probe`/`compare` as the next step — they open concurrent sessions on the
-  account, so ask first.
+- If `analyze` shows no pressure and the user is still slow, say so.
+  `probe`/`compare` can measure the wait directly, but they open concurrent
+  sessions on the account — never run them unless the user asks.

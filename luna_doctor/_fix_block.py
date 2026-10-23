@@ -418,7 +418,7 @@ def recommendations(m, reqs, agents) -> list:
     wide = peak > ADVISE_FANOUT_MAX or dead > 0
     evidence = _why(
         f"peak concurrency {peak},",
-        f"{dead} admission death(s)," if dead else "",
+        f"{dead} request(s) blocked at admission," if dead else "",
         f"{idle_stalls} silent stall(s)," if idle_stalls else "",
         f"{bgcount} request(s) already on the background tier." if bgcount else "",
     )
@@ -692,10 +692,6 @@ def render_fix(recs, m, as_json: bool) -> None:
             for line in ch["snippet"].splitlines():
                 print("    " + line)
         print()
-    print("=" * 72)
-    print("Then confirm the shape of your traffic, not just the config:")
-    print(f"  luna-doctor probe   --n {ADVISE_FANOUT_MAX} --model <interactive model> --max-seconds 200")
-    print(f"  luna-doctor compare --n {ADVISE_FANOUT_MAX} --model <interactive model> --max-seconds 200")
 
 
 def _wrap(text: str, width: int) -> list:

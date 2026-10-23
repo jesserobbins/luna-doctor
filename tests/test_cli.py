@@ -278,7 +278,7 @@ class Sources(unittest.TestCase):
         # minute 1: request 1 still in flight across the boundary, not reset to 0
         self.assertEqual(series[1]["max_concurrent"], 2)
         self.assertEqual(series[1]["started"], 1)
-        # minute 2: the admission death lands in the minute it died
+        # minute 2: the admission block lands in the minute it ended
         self.assertEqual(series[2]["max_concurrent"], 1)
         self.assertEqual(series[2]["started"], 1)
         self.assertEqual(series[2]["admission_deaths"], 1)
@@ -1225,14 +1225,14 @@ class ThirdReviewRegressions(unittest.TestCase):
         self.assertEqual(sorted(r.run for r in forward), sorted(r.run for r in backward))
 
     def test_unknown_deadline_reports_the_raw_observation_count(self):
-        """pi reviewer: five deaths with unusable durations read as 'fewer than 3'."""
+        """pi reviewer: five blocks with unusable durations read as 'fewer than 3'."""
         reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
                                start=0.0, end=90000.0, outcome="admission_timeout")
                 for _ in range(5)]
         m = self.m.analyse(reqs, 1.0)
         self.assertEqual(m["per_model_deadlines"]["glm-5.3"]["seen_n"], 5)
         _, adj, _ = self.m.verdict(m)
-        self.assertIn("5 death(s)", " ".join(adj))
+        self.assertIn("5 blocked at admission", " ".join(adj))
 
     def test_an_implausible_interval_never_reaches_the_minute_bins(self):
         """codex: a seconds-based archive allocated 28 million minute buckets."""
@@ -1772,7 +1772,7 @@ class OtherSurfacesUseReports(unittest.TestCase):
         from luna_doctor.report import render_plain
         out = render_plain(rep)
         self.assertIn("glm-5.3", out)
-        self.assertIn("admission deaths 0", out)
+        self.assertIn("blocked at admission 0", out)
 
 
 class StyleAndJson(unittest.TestCase):

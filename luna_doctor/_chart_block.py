@@ -171,7 +171,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
     conv = m["admission_conversion"]["interactive"]["admitted_pct"]
     add(Text(pad_l, 56,
              f"{m['requests']} requests \u00b7 peak concurrency {m['peak_concurrency']} "
-             f"\u00b7 {dead} died at the admission deadline \u00b7 {stalls} silent stall(s) "
+             f"\u00b7 {dead} blocked at the admission deadline \u00b7 {stalls} silent stall(s) "
              f"\u00b7 {bgshare}% on the background tier \u00b7 {conv}% of interactive served",
              size=12.5, fill=c["muted"]))
 
@@ -192,7 +192,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
 
     # the two rules that matter: the admission level you get demoted past, and
     # the advice. The label names no number: the footer says the level is per
-    # account and measured with probe, so the rule itself is the only "this many".
+    # account and not readable from these logs, so the rule itself is the only "this many".
     for value, label, colour in ((INTERACTIVE_BURST_CAP, "gateway admission level", c["stall"]),
                                  (ADVISE_FANOUT_MAX, "advised 8", c["muted"])):
         if value <= y_max:
@@ -268,7 +268,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
 
     add(Text(pad_l, top_b - 8, "each request, end to end", size=12, weight="600", fill=c["text"]))
     add(Text(pad_l + 148, top_b - 8,
-             "log scale \u00b7 a dot on a dashed line was killed by that wall",
+             "log scale \u00b7 a dot on a dashed line was stopped by that wall",
              size=11.5, fill=c["muted"]))
 
     # dots: every failure, sampled successes so a 3000-request window stays legible
@@ -313,7 +313,7 @@ def build_chart_scene(reqs, m, hours: float, width: int = 1120, height: int = 64
         add(Rect(lx, ly - 8, 10, 10, fill=colour))
         add(Text(lx + 15, ly + 1, name, size=11.5, fill=c["text"]))
         lx += 132
-    add(Text(lx, ly + 1, "\u2715 admission death", size=11.5, fill=c["admission"]))
+    add(Text(lx, ly + 1, "\u2715 blocked at admission", size=11.5, fill=c["admission"]))
     lx += 128
     add(Text(lx, ly + 1, "\u25cf silent stall", size=11.5, fill=c["stall"]))
 
@@ -361,7 +361,7 @@ def cmd_chart(args) -> int:
     else:
         print(f"wrote {os.path.abspath(out)}  ({len(svg) / 1024:.0f} KB)")
         print(f"  {m['requests']} requests, peak concurrency {m['peak_concurrency']}, "
-              f"{m['by_outcome'].get('admission_timeout', 0)} admission death(s)")
+              f"{m['by_outcome'].get('admission_timeout', 0)} blocked admission(s)")
         if args.open:
             import webbrowser
             webbrowser.open("file://" + os.path.abspath(out))

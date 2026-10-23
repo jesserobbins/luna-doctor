@@ -76,11 +76,13 @@ KEEPALIVE_S = 10.0              # SSE keep-alive cadence in background tier
 INTERACTIVE_BURST_CAP = 10      # per-burst interactive class cap: min(n, 10)
 ADVISE_FANOUT_MAX = 8           # our recommendation: below the cap, with headroom
 # What user-facing copy says wherever it used to name the gateway's cap as a
-# constant. The admission width is per account and only a probe can see it, so
-# copy points at the number it sits next to ("roughly this many") and tells the
-# reader to measure. INTERACTIVE_BURST_CAP stays for arithmetic, never prose.
-CAP_COPY = ("the gateway admits roughly this many interactive requests at once, per account; "
-            "measure yours with `probe --enable-probe`")
+# constant. The admitted width is specific to the account and cannot be read
+# from these logs, so copy points at the number it sits next to ("roughly
+# this many") and says so - it never tells the reader to go measure.
+# INTERACTIVE_BURST_CAP stays for arithmetic, never prose.
+CAP_COPY = ("the gateway admits roughly this many interactive requests at once; "
+            "the admitted width is specific to the account and cannot be read "
+            "from these logs")
 
 PI_STORE = "~/.pi/agent/sessions"
 CLAUDE_STORE = "~/.claude/projects"
@@ -1022,7 +1024,7 @@ def concurrency_by_minute(reqs: list[Request]) -> list[dict]:
     agentsview's finest activity bucket is 5 minutes, which is too coarse to
     line a burst up against the 120 s admission deadline. Request windows here
     have second resolution, so bin them per UTC minute: max requests in flight,
-    how many started, and how many died on admission inside that minute.
+    how many started, and how many were blocked at admission inside that minute.
     """
     events: list[tuple[float, int]] = []
     for r in reqs:
@@ -1441,7 +1443,7 @@ def _by_run(reqs: list[Request]) -> list[dict]:
         for r in tr:
             if r.outcome in ("client_idle_timeout", "request_timeout") and r.duration:
                 walls[str(round(r.duration, 0))] = walls.get(str(round(r.duration, 0)), 0) + 1
-        # A completion that ran past the wall is not a wall death, but it is the
+        # A completion that ran past the wall is not a wall failure, but it is the
         # one request a looser count would fold in, so report it separately.
         slow_ok = sum(1 for r in tr
                       if r.outcome == "completed" and r.duration and r.duration >= 290)
@@ -1794,15 +1796,15 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         observed = ", ".join(
             f"{model} {d['deadline_s']:.1f}s (n={d['n']})"
             for model, d in sorted(per_model.items()) if d.get("deadline_s"))
-        line = (f"{dead} request(s) died on admission (`scheduler admission timeout`). "
-                f"Of the interactive requests that finished or died on admission, "
+        line = (f"{dead} request(s) were blocked at admission (`scheduler admission timeout`). "
+                f"Of the interactive requests that finished or were blocked at admission, "
                 f"{conv}% were admitted.")
         if observed:
             line += f" Observed deadlines: {observed}."
         unknown = [(mo, d) for mo, d in per_model.items() if d.get("status") == "unknown"]
         if unknown:
             detail = ", ".join(
-                f"{mo} ({d.get('seen_n', d['n'])} death(s), {d['n']} usable duration(s))"
+                f"{mo} ({d.get('seen_n', d['n'])} blocked at admission, {d['n']} usable duration(s))"
                 for mo, d in sorted(unknown))
             line += (f" No deadline is established for {detail} - fewer than "
                      f"{DEADLINE_MIN_SAMPLES} usable observations, so do not assume another "
@@ -1925,7 +1927,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     # setting. They are reported as separate labelled facts and never
     # combined: swamp's configured figure enters no arithmetic, no sum and
     # no stated limit here, and never reaches the headline. What the two
-    # together might mean is a risk to measure with the probe, not a
+    # together might mean is a risk this report does not compute, not a
     # number this report computes.
     sw = m.get("swamp")
     configured = None
@@ -1953,18 +1955,17 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
             f"{split} - a setting, not measured traffic. The measured peak concurrency this "
             f"window is {peak}, a separate observation reported above. Overlapping swamp "
             f"fan-out on top of interactive bursts is an unmeasured risk, not a computed "
-            f"total; measure the width this account actually admits with `probe "
-            f"--enable-probe` before choosing a target."
+            f"total; the width this account actually admits cannot be read from these logs."
         )
 
     if not pressure and not adj:
         return f"No concurrency pressure across {n} requests.", ["Nothing to adjust."], 0
 
     head = (
-        f"Concurrency pressure across {n} requests: {dead} admission death(s), "
+        f"Concurrency pressure across {n} requests: {dead} request(s) were blocked at admission, "
         f"{idle} silent stall(s), peak concurrency {m['peak_concurrency']}."
         if pressure
-        else f"{n} requests, no admission deaths, peak concurrency {m['peak_concurrency']}."
+        else f"{n} requests, none blocked at admission, peak concurrency {m['peak_concurrency']}."
     )
     adj.append(
         f"Adjust: keep interactive fan-out at or under {ADVISE_FANOUT_MAX}, and move any wider "
@@ -1978,8 +1979,8 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
 
     The rows keep the analysis order - traffic first, then the admission and
     saturation evidence, then the caveats - so the plain renderer says what
-    the old inline printer said, from data instead of prints. Admission
-    deaths and saturation inflation carry "bad" emphasis, unclassified
+    the old inline printer said, from data instead of prints. Blocked
+    admissions and saturation inflation carry "bad" emphasis, unclassified
     errors "warn", and a clean admission wall "good".
     """
     traffic: list[report.Row] = [
@@ -1996,12 +1997,12 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
     bm = m.get("by_minute") or []
     dead_minutes = [x for x in bm if x["admission_deaths"]]
     if dead_minutes:
-        traffic.append(report.Row("minute-level", f"{len(bm)} active minute(s); deaths in:"))
+        traffic.append(report.Row("minute-level", f"{len(bm)} active minute(s); blocked admissions in:"))
         for x in dead_minutes[:6]:
             traffic.append(report.Row(
                 x["minute"],
                 f"max {x['max_concurrent']} in flight, {x['started']} started, "
-                f"{x['admission_deaths']} died on admission", "bad"))
+                f"{x['admission_deaths']} blocked at admission", "bad"))
     elif bm:
         busy = max(bm, key=lambda x: (x["max_concurrent"], x["started"]))
         traffic.append(report.Row(
@@ -2023,7 +2024,7 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
         for model, d in sorted(pm.items()):
             bits.append(f"{model} {d['deadline_s']}s (n={d['n']})"
                         if d.get("deadline_s")
-                        else f"{model} unknown ({d.get('seen_n', d['n'])} death(s), "
+                        else f"{model} unknown ({d.get('seen_n', d['n'])} blocked at admission, "
                              f"{d['n']} usable)")
         pressure.append(report.Row("admission wall", ', '.join(bits)))
     storms = m.get("timeout_storms") or []
@@ -2053,7 +2054,7 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
         pressure.append(report.Row(
             "admission",
             f"{c['admitted_pct']}% of interactive served ({c['completed']} served, "
-            f"{c['admission_timeout']} dead)",
+            f"{c['admission_timeout']} blocked at admission)",
             "bad" if c["admission_timeout"] else "good"))
 
     notes: list[report.Row] = []
@@ -2388,7 +2389,7 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
         report.Row("tier header", tier_line),
         report.Row("outcome",
                    f"streamed {r['streamed']} · no first token {r['silent']} · "
-                   f"admission deaths {r['admission_deaths']} · errors {r['errors']} · cut {r['cut']}"),
+                   f"blocked at admission {r['admission_deaths']} · errors {r['errors']} · cut {r['cut']}"),
         report.Row("wait to headers", f"p50 {fmt(r['wait_headers'], 's')}"),
         report.Row("first token", f"p50 {fmt(r['ttfb'], 's')}"),
         report.Row("keep-alives", f"{r['keepalives']}"),
@@ -2399,7 +2400,7 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
                    f"and were cut. That is not a failure: the background tier can take ~600s to first "
                    f"token. Raise --max-seconds before judging it.")
     if r["admission_deaths"]:
-        adj.append(f"{r['admission_deaths']}/{n} died on admission (`scheduler admission timeout`). "
+        adj.append(f"{r['admission_deaths']}/{n} were blocked at admission (`scheduler admission timeout`). "
                    f"For this width of fan-out, use the -background variant of the same model.")
     if overflow_n:
         adj.append(f"{overflow_n} request(s) carried `overflowed-to-background`: the burst was "
@@ -2451,7 +2452,7 @@ def build_compare_report(rows: list) -> report.Report:
         runs.append(report.Row(
             r["model"],
             f"{klass} · streamed {r['streamed']} · no token {r['silent']} · "
-            f"adm.dead {r['admission_deaths']} · cut {r['cut']} · ttfb p50 {fmt(r['ttfb'], 's')}"))
+            f"adm.blocked {r['admission_deaths']} · cut {r['cut']} · ttfb p50 {fmt(r['ttfb'], 's')}"))
     adj = ["the interactive tier admits fewer parallel requests but answers in tens of seconds; "
            "the -background tier admits more and answers in minutes. Pick the tier by fan-out "
            "width, not by impatience."]

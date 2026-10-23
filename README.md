@@ -86,7 +86,7 @@ lines — the picture is the SVG.
 
 ### `analyze` — what your machine has been doing
 
-Reconstructs every model request from the local log stores (pi, claude-code) and classifies each outcome against measured gateway behaviour — admission timeouts, silent background demotions, upstream errors, rate limits, and more. Thresholds (admission deadlines, idle budgets) are measured per model via `probe`, not hardcoded — and the number of interactive requests the gateway admits at once is per account, not a constant: measure yours with `luna-doctor probe --enable-probe`. `analyze` reports what it observed for each model in the window.
+Reconstructs every model request from the local log stores (pi, claude-code) and classifies each outcome against measured gateway behaviour — admission timeouts, silent background demotions, upstream errors, rate limits, and more. Thresholds (admission deadlines, idle budgets) are measured per model via `probe`, not hardcoded — and the number of interactive requests the gateway admits at once is specific to the account and cannot be read from these logs. `analyze` reports what it observed for each model in the window.
 
 ### `fix` — what to change, with copy-paste you can audit
 
@@ -94,11 +94,11 @@ Prints one block per agent: the exact file, the snippet, and a command that back
 
 ### `chart` — one picture
 
-A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requests in flight over time, split by tier, with the gateway's rough admission level and the advised fan-out as dashed rules. Bottom panel: every request end-to-end on a log axis, with reference walls for admission and idle budgets — failures sit on the wall that killed them. A burst in the top panel at the same x as a cluster of failures below is the whole diagnosis.
+A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requests in flight over time, split by tier, with the gateway's rough admission level and the advised fan-out as dashed rules. Bottom panel: every request end-to-end on a log axis, with reference walls for admission and idle budgets — failures sit on the wall that stopped them. A burst in the top panel at the same x as a cluster of failures below is the whole diagnosis.
 
 ### `probe` / `compare` — what the gateway will actually admit
 
-Sends controlled bursts and captures the response headers that say which tier served the request and whether it was demoted. Use this to measure your admission deadlines and the background tier's behaviour on your models, then feed the result back into `analyze`.
+Sends controlled bursts and captures the response headers that say which tier served the request and whether it was demoted. It measures admission deadlines and the background tier's behaviour on your models directly; those measurements are what `analyze` uses as its thresholds.
 
 Both commands require `--enable-probe`. Without it they are a rehearsal: they
 print what they would open and exit `2`. When a probe does see a demotion it says

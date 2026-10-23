@@ -71,7 +71,7 @@ class ShareText(unittest.TestCase):
         self.assertIn("*requests:* 1661", text)
         self.assertIn("pi 1500", text)
         self.assertIn("*peak concurrency:* 17", text)
-        self.assertIn("*admission deaths:* 0", text)
+        self.assertIn("*blocked at admission:* 0", text)
         self.assertIn("*silent stalls:* 3", text)
         self.assertIn("*interactive latency:* p50 45.0s, p90 120.0s", text)
 
@@ -118,11 +118,11 @@ class ShareText(unittest.TestCase):
 
     def _busy_rep(self):
         return Report(
-            "Concurrency pressure across 6654 requests: 20 admission death(s), "
+            "Concurrency pressure across 6654 requests: 20 request(s) were blocked at admission, "
             "3 silent stall(s), peak concurrency 17.",
             [Section("traffic", [Row("peak concurrency", "17", "bad")])],
             [
-                "20 request(s) died on admission (`scheduler admission timeout`).",
+                "20 request(s) were blocked at admission (`scheduler admission timeout`).",
                 "3 request(s) stalled until the harness's own ~300s idle budget killed them.",
                 "21 window(s) had more than 8 requests in flight at once.",
                 "1577 request(s) already ran on the -background tier.",
@@ -148,8 +148,8 @@ class ShareText(unittest.TestCase):
         self.assertLessEqual(len(bullets), 3)
         # The three that decide something: the overflow cause, the stall
         # cause, the action - and the action closes the message body.
-        self.assertTrue(any("probe --enable-probe" in b for b in bullets),
-                        "the overflow bullet points at the probe")
+        self.assertTrue(any("interactive admission width" in b for b in bullets),
+                        "the overflow bullet explains the demotion")
         self.assertTrue(any("silent-overflow" in b for b in bullets),
                         "the stall bullet names the signature")
         self.assertEqual(bullets[-1],
