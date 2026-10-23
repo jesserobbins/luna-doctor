@@ -17,15 +17,31 @@ Run the tool before theorising:
 luna-doctor analyze --now      # if the user says "it is slow right now"
 luna-doctor analyze            # what the machine has been doing for 24h
 luna-doctor analyze --since 7d --json
+luna-doctor analyze --style plain   # undecorated text, for pasting to the user
 luna-doctor fix                # copy-paste config per agent, justified by the numbers
 luna-doctor fix --agent pi     # one agent at a time
 luna-doctor chart --since 24h  # SVG: fan-out over time + every request's latency
 luna-doctor discover           # when the analysis says "no data"
-luna-doctor compare --n 8 --model <model>   # tier facts, costs tokens
+luna-doctor probe --n 8 --model <model> --enable-probe   # live burst, 8 concurrent sessions
+luna-doctor compare --n 8 --model <model> --enable-probe # model vs its -background twin
 ```
 
 `analyze` exits `1` when it finds pressure, `0` when it does not, `2` when the
-logs hold nothing in the window.
+logs hold nothing in the window. `probe` and `compare` refuse to open a burst
+without `--enable-probe`: they print what they would open and exit `2`.
+
+## Rendering
+
+Every report — `discover`, `analyze`, `probe`, `compare` — is one model rendered
+two ways. Rows are `label: value` with no column alignment, which is why output
+survives a narrow terminal, a pipe, or a chat window that wraps at 40 characters.
+`--style plain` prints exactly those rows with no color and no emoji; `pretty`
+adds color, a rule per section and a moon.
+
+`--style auto` (the default) picks `pretty` on a terminal that is not `NO_COLOR`,
+and `plain` otherwise. `NO_COLOR` beats an explicit `--style pretty`;
+`CLICOLOR_FORCE` colors a pipe. `--json` is never styled. When you paste a report
+to the user, use `--style plain`.
 
 ## Reading the output
 
@@ -66,7 +82,8 @@ answer is that fan-out is not the problem.
 1. **Keep interactive fan-out at or under 8.** The gateway admits roughly this many
    interactive requests at once, per account; measure yours with
    `luna-doctor probe --enable-probe`. Anything past that width is demoted to
-   background, where the first token can take ten minutes.
+   background, where the answer can take ten minutes to start. Never state a cap as a
+   gateway fact: the number is per account and only a probe can tell you yours.
 2. **Move wide fan-out to the `-background` variant** of the same model. More
    concurrency, much slower SLA. That is the trade, and it is deliberate.
    `luna-doctor fix` emits the exact key for whichever agent the user runs.
@@ -79,7 +96,19 @@ answer is that fan-out is not the problem.
    gateway even sends headers.
 5. **Do not trust `x-lunaroute-queue-ms`.** It reads `0` on requests that waited
    ten minutes. Use `x-lunaroute-service-class` and
-   `x-lunaroute-warning: overflowed-to-background` instead.
+   `x-lunaroute-warning: overflowed-to-background` instead. A demotion has a
+   reason: `overflow` (the interactive width spilled it) or `no_entitlement` (a
+   `-background` request downgraded into the priority pool). Say which one the
+   probe reported; if nothing probed it, say the served tier is unknown.
+
+## Swamp
+
+Swamp appears only when it is in use — files under `.swamp/data` or
+`.swamp/workflow-runs` written inside the window. Installed but idle is not
+traffic, and the report says nothing about it. When swamp does appear, its
+fan-out is the configured setting (extract + verify, plus where the setting came
+from) — a number to reason with, not a measurement. Only the peak concurrency
+row is measured. Keep the two separate when you quote them.
 
 ## Rules for the agent using this skill
 
@@ -87,4 +116,5 @@ answer is that fan-out is not the problem.
   without finish_reason` is a pi client string and says nothing about the gateway.
 - Quote the numbers from the report rather than paraphrasing them.
 - If `analyze` shows no pressure and the user is still slow, say so, and offer
-  `probe`/`compare` as the next step — they cost tokens, so ask first.
+  `probe`/`compare` as the next step — they open concurrent sessions on the
+  account, so ask first.

@@ -17,8 +17,21 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- `--style` on `discover`, `analyze`, `probe`, `compare` and `chart`: `auto` (the default) draws the pretty layout only on a terminal that is not `NO_COLOR`, `pretty` asks for it down a pipe too, and `plain` is undecorated text. `NO_COLOR` beats an explicit `--style pretty`, `CLICOLOR_FORCE` colours a pipe, and `--json` is never styled — no `Style` is constructed on that path. `chart` takes the flag for consistency; its console output is two plain lines and the picture is the SVG.
+- `--enable-probe` on `probe` and `compare`. Without it neither command opens a burst: each states how many concurrent sessions it would open, on which model, for how long, and exits `2`.
+
+### Changed
+
+- `discover`, `analyze`, `probe` and `compare` render from one report model: `report.py` builds the headline, `label: value` sections, adjustments and footnote, and `render_plain` / `render_pretty` draw it. Rows are no longer column-aligned, so a long value cannot break the layout and output survives a narrow terminal, a pipe, or a chat window that rewraps.
+- Swamp appears only when it is in use — files under `.swamp/data` or `.swamp/workflow-runs` written inside the window. A populated but idle store is installed, not running, and `analyze` no longer reports it. When swamp is in use, its fan-out is stated as the configured extract + verify setting and where that setting came from, never as measured concurrency.
+- Copy no longer states an interactive cap as a gateway fact. `analyze`, `probe`, `chart` and `fix` say the width is per account and point at `probe --enable-probe` to measure it.
+
 ### Fixed
 
+- A demotion now carries its reason. `probe` splits its demoted count into `overflow` (the interactive width spilled the request into background) and `no_entitlement` (a `-background` request had no background entitlement and was downgraded into the priority pool, consuming interactive headroom). `fix` says plainly when background traffic is being served on priority concurrency, and hedges when no probe has seen the served tier.
+- `Request.saturated` no longer consults `stream_stalled`, an outcome nothing emits.
 - Installed copies can run `fix` and `chart` again. The CLI was packaged as a single script, so the two command files it loads from its own directory were left behind in the checkout and both commands answered `support missing` (exit 2). The CLI is now a proper package (`luna_doctor/`) with a console-script entry point, and `bin/luna-doctor` is a launcher that resolves its own symlink for the no-packaging install path. Tests now cover the pipx, package and symlink layouts instead of only the checkout.
 
 ## [0.1.1-alpha.1] - 2026-10-22

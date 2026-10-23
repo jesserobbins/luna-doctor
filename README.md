@@ -33,11 +33,14 @@ luna-doctor discover          # what log stores exist, how big, how fresh
 luna-doctor analyze           # last 24h: what happened and what to adjust
 luna-doctor analyze --now     # last 15 minutes (alias for --since 15m)
 luna-doctor analyze --since 7d --json   # machine-readable, for cron/CI
+luna-doctor analyze --style plain       # undecorated text, for a paste or a pipe
 luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # …or one agent at a time (pi | claude-code | codex | swamp)
 luna-doctor chart --since 24h # SVG: fan-out over time + every request's latency
 luna-doctor chart --since 24h --open  # …and open it in your browser
 ```
+
+<!-- TODO(share): document --share once it lands -->
 
 Exit codes: `0` no pressure, `1` pressure found, `2` no data — usable from a shell prompt, a skill, or cron.
 
@@ -45,11 +48,32 @@ To measure the gateway itself (this is a live burst — it burns concurrent
 sessions on your account, and needs `lunaroute login`):
 
 ```bash
-luna-doctor probe --n 8 --model <model>     # live burst measurement at width 8
-luna-doctor compare --n 8 --model <model>   # model vs its -background twin
+luna-doctor probe --n 8 --model <model> --enable-probe    # live burst at width 8
+luna-doctor compare --n 8 --model <model> --enable-probe  # model vs its -background twin
 ```
 
+Without `--enable-probe` neither command opens anything: each prints how many
+concurrent sessions it would open, on which model, for how long, and exits `2`.
+
 ## How it works
+
+### One report, two renderers
+
+`discover`, `analyze`, `probe` and `compare` all build the same `Report` — a
+headline, sections of `label: value` rows, adjustments and a footnote — and then
+hand it to one of two renderers. `plain` is undecorated text: no ANSI, no emoji,
+and no column padding, so a value longer than its column cannot break the layout.
+That is why output survives a narrow terminal, a pipe, or a chat app that wraps
+at 40 characters. `pretty` draws the same rows at a terminal, with color, a rule
+under each section and a moon.
+
+`--style` is on `discover`, `analyze`, `probe`, `compare` and `chart`. `auto` — the
+default — picks `pretty` when stdout is a terminal and `NO_COLOR` is unset, and
+`plain` otherwise. `--style pretty` asks for decoration even down a pipe;
+`NO_COLOR` still wins over it. `CLICOLOR_FORCE` colors a pipe that would otherwise
+stay plain. `--json` is never styled: no `Style` is constructed on that path at
+all. `chart` takes the flag for consistency, but its console output is two plain
+lines — the picture is the SVG.
 
 ### `analyze` — what your machine has been doing
 
@@ -67,6 +91,13 @@ A standalone SVG (no fonts, scripts, or CDN — opens anywhere). Top panel: requ
 
 Sends controlled bursts and captures the response headers that say which tier served the request and whether it was demoted. Use this to measure your admission deadlines and the background tier's behaviour on your models, then feed the result back into `analyze`.
 
+Both commands require `--enable-probe`. Without it they are a rehearsal: they
+print what they would open and exit `2`. When a probe does see a demotion it says
+which kind it was — `overflow` when the interactive width spilled a request into
+the background tier, or `no_entitlement` when a `-background` request had no
+background entitlement and was downgraded into the priority pool instead. `fix`
+emits the same distinction, and hedges when no probe has looked.
+
 ## What it reads
 
 Read-only and offline for `discover` / `analyze` / `fix` / `chart`:
@@ -76,7 +107,14 @@ Read-only and offline for `discover` / `analyze` / `fix` / `chart`:
 | pi | `~/.pi/agent/sessions/**/*.jsonl` |
 | claude-code | `~/.claude/projects/**/*.jsonl` |
 | codex | detected and reported, not analysed (zstd rollouts, usually not LunaRoute traffic) |
-| swamp | `~/.swamp` / sibling `swamp-tracker` repo, when present |
+| swamp | `~/.swamp` / sibling `swamp-tracker` repo — reported only while its activity falls inside the window |
+
+Swamp is counted only when it is in use: files under `.swamp/data` or
+`.swamp/workflow-runs` modified inside the window. A populated but idle swamp
+store is installed, not running, and `analyze` says nothing about it — installed
+is not traffic. When swamp does appear, its fan-out is described as configured
+(its extract and verify settings, and where they came from), never as measured
+concurrency.
 
 `probe` and `compare` are the only commands that touch the network, and they use the routing key already stored by `lunaroute login`.
 
@@ -92,10 +130,18 @@ Read-only and offline for `discover` / `analyze` / `fix` / `chart`:
 |---|---|
 | `luna_doctor/cli.py` | the CLI, the log readers and the analyser |
 | `luna_doctor/_fix_block.py` | the `fix` command, kept apart so its snippets can be read and verified on their own |
-| `luna_doctor/_chart_block.py` | the `chart` command (SVG) |
+| `luna_doctor/_chart_block.py` | the `chart` command |
+| `luna_doctor/report.py` | the report model and its `plain` renderer |
+| `luna_doctor/render_pretty.py` | the decorated renderer over the same report |
+| `luna_doctor/style.py` | the single decoration gate: color, emoji, motion |
+| `luna_doctor/scene.py` | the chart's shape list, and the SVG renderer over it |
+| `luna_doctor/png.py` | the raster renderer over the same scene |
+| `luna_doctor/font.py` | the hand-drawn 5x7 bitmap font and its ASCII folding |
 | `bin/luna-doctor` | launcher for the no-packaging path; resolves its own symlink and imports the package |
 
-The three package files ship together. `cli` loads the other two off disk from its own directory, so a partial install is the one thing that breaks `fix` and `chart`.
+These files ship together as the package. `cli` loads `_fix_block` and
+`_chart_block` off disk from its own directory, so a partial install is the one
+thing that breaks `fix` and `chart`.
 
 ## How this project is built
 
