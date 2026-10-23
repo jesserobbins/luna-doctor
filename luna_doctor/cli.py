@@ -493,69 +493,49 @@ def _merge_copies(a: dict, b: dict) -> dict:
 
 
 # ---- swamp discovery ------------------------------------------------------
-# Task-1 contract: SWAMP_ROOT env override > sibling > workspace list > scan.
+# Task-1 contract, revised: filesystem only. `swamp workspace list` cost a
+# second per run and reported nothing the filesystem could not, so swamp is
+# resolved by walking directories and never by spawning swamp itself.
 # discover() exports stores.swamp.repoDir for downstream tasks (analyze/fix/probe).
 
 def _swamp_repo_dir() -> str | None:
-    """Resolve one swamp repo dir deterministically, or None when absent.
+    """Resolve one swamp repo dir from the filesystem alone, or None.
 
     Precedence (highest first):
-      1. $SWAMP_ROOT \u2014 explicit test/operator override (must be a dir).
-      2. wrapper sibling \u2014 luna-doctor wrapper may sit beside swamp-tracker/swamp.
-      3. `swamp workspace list` \u2014 swamp\u2019s own registry of known workspaces.
-      4. upward scan for .swamp.yaml.
+      1. $SWAMP_ROOT \u2014 explicit operator override; authoritative, and a
+         dir without the marker still means "no swamp here".
+      2. upward scan for .swamp.yaml, from the cwd and from this checkout.
+      3. ~/.swamp \u2014 swamp's default workspace location.
+      4. a swamp-tracker/swamp sibling of the luna-doctor wrapper.
+    Every candidate must carry the .swamp.yaml marker: ~/.swamp in
+    particular also exists on machines where it holds only swamp's cache.
     """
     env_root = os.environ.get("SWAMP_ROOT", "").strip()
     if env_root:
         cand = os.path.expanduser(env_root)
-        if os.path.isdir(cand):
+        if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, ".swamp.yaml")):
             return os.path.abspath(cand)
         return None
     this_dir = os.path.dirname(os.path.abspath(__file__))
-    cur = os.path.dirname(this_dir)  # repo root (parent of bin/)
-    # wrapper sibling lives one level above the wrapper (luna-doctor wrapper -> GitHub/)
-    wrapper = os.path.dirname(cur)
-    candidates_bases = [wrapper, os.path.dirname(wrapper), cur]
-    for base in candidates_bases:
-        for name in ("swamp-tracker", "swamp"):
-            cand = os.path.join(base, name)
-            try:
-                if os.path.isdir(cand):
-                    return os.path.abspath(cand)
-            except OSError:
-                continue
-    for ws in _swamp_workspace_list():
-        if os.path.isdir(ws):
-            return os.path.abspath(ws)
+    cur = os.path.dirname(this_dir)  # repo root (parent of luna_doctor/)
     for start in (os.getcwd(), cur):
         found = _scan_for_swamp_yaml(start)
         if found:
             return found
-    return None
-
-
-def _swamp_workspace_list() -> list[str]:
-    """Run `swamp workspace list` and return candidate dirs, or [] on any error."""
-    try:
-        import subprocess
-        proc = subprocess.run(
-            ["swamp", "workspace", "list"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if proc.returncode != 0:
-            return []
-        out = proc.stdout.strip()
-        if not out or "No workspaces" in out:
-            return []
-        candidates: list[str] = []
-        for line in out.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
+    home_swamp = os.path.expanduser("~/.swamp")
+    if os.path.isfile(os.path.join(home_swamp, ".swamp.yaml")):
+        return os.path.abspath(home_swamp)
+    # wrapper sibling lives one level above the wrapper (luna-doctor wrapper -> GitHub/)
+    wrapper = os.path.dirname(cur)
+    for base in (wrapper, os.path.dirname(wrapper), cur):
+        for name in ("swamp-tracker", "swamp"):
+            cand = os.path.join(base, name)
+            try:
+                if os.path.isfile(os.path.join(cand, ".swamp.yaml")):
+                    return os.path.abspath(cand)
+            except OSError:
                 continue
-            candidates.append(line.split()[0])
-        return candidates
-    except Exception:
-        return []
+    return None
 
 
 def _scan_for_swamp_yaml(start: str) -> str | None:
@@ -573,6 +553,58 @@ def _scan_for_swamp_yaml(start: str) -> str | None:
             break
         cur = parent
     return None
+
+
+def _count_swamp_activity(root: str, filename_globs: tuple, since: float | None) -> int:
+    """Count files under `root` whose mtime falls at or after `since` (epoch).
+
+    mtime, not content: the question is whether swamp is being *used*, and one
+    stat per file is the cheapest honest answer. `since` None counts all
+    activity regardless of age.
+    """
+    if not os.path.isdir(root):
+        return 0
+    n = 0
+    for pat in filename_globs:
+        for path in glob.glob(os.path.join(root, "**", pat), recursive=True):
+            try:
+                if since is not None and os.stat(path).st_mtime < since:
+                    continue
+            except OSError:
+                continue
+            n += 1
+    return n
+
+
+def swamp_state(repo_dir: str | None = None, since: float | None = None) -> dict:
+    """Is swamp installed, and is it actually running inside the window?
+
+    Installed is not in use: `in_use` requires files under `.swamp/data` or
+    `.swamp/workflow-runs` modified at or after `since` (epoch seconds; None
+    counts all activity). A populated but stale store is installed, not in
+    use, and an idle install must cost luna-doctor nothing beyond the marker
+    check. Resolution is filesystem-only; swamp itself is never spawned.
+    """
+    repo = repo_dir if repo_dir is not None else _swamp_repo_dir()
+    if not repo or not os.path.isdir(repo) or not os.path.isfile(os.path.join(repo, ".swamp.yaml")):
+        return {"installed": False, "in_use": False, "repo": None,
+                "behaviors": 0, "workflow_runs": 0, "evidence": "no marker"}
+    behaviors = _count_swamp_activity(os.path.join(repo, ".swamp", "data"),
+                                      ("metadata.yaml",), since)
+    workflow_runs = _count_swamp_activity(os.path.join(repo, ".swamp", "workflow-runs"),
+                                           ("*.yaml", "*.yml"), since)
+    in_use = bool(behaviors or workflow_runs)
+    if in_use:
+        parts = []
+        if behaviors:
+            parts.append(f"{behaviors} behavior record(s)")
+        if workflow_runs:
+            parts.append(f"{workflow_runs} workflow run(s)")
+        evidence = ", ".join(parts) + " in window"
+    else:
+        evidence = "installed, no activity"
+    return {"installed": True, "in_use": in_use, "repo": os.path.abspath(repo),
+            "behaviors": behaviors, "workflow_runs": workflow_runs, "evidence": evidence}
 
 
 def _swamp_store_info(repo_dir: str | None) -> dict:
@@ -751,7 +783,8 @@ def iter_swamp(repoDir: str | None, since: float | None = None, until: float | N
                     status = "running"
                 else:
                     status = "succeeded"
-            yield {"source": "behavior", "status": status, "ts": ts, "path": path}
+            yield {"source": "behavior", "status": status, "ts": ts, "path": path,
+                  "name": _yaml_field_value(text, "name")}
     wr_root = os.path.join(sw, "workflow-runs")
     if os.path.isdir(wr_root):
         for pat in (os.path.join(wr_root, "**", "*.yaml"), os.path.join(wr_root, "**", "*.yml")):
@@ -781,7 +814,8 @@ def iter_swamp(repoDir: str | None, since: float | None = None, until: float | N
                         status = "running"
                     else:
                         status = "succeeded"
-                yield {"source": "workflow", "status": status, "ts": ts, "path": path}
+                yield {"source": "workflow", "status": status, "ts": ts, "path": path,
+                      "name": None}
 
 def _collect_swamp_metrics(repoDir: str | None, since: float | None, until: float | None) -> dict:
     """Build metrics.swamp for the window. Additive, never throws."""
@@ -818,10 +852,13 @@ def _collect_swamp_metrics(repoDir: str | None, since: float | None, until: floa
     knobs = resolve_swamp_knobs(repo)
     bh_counts = {"succeeded": 0, "running": 0, "failed": 0, "total": 0}
     wr_counts = {"succeeded": 0, "running": 0, "failed": 0, "total": 0}
+    names: set = set()
     for rec in iter_swamp(repo, since, until):
         tgt = bh_counts if rec["source"] == "behavior" else wr_counts
         tgt[rec["status"]] = tgt.get(rec["status"], 0) + 1
         tgt["total"] += 1
+        if rec.get("name"):
+            names.add(rec["name"])
     bh_total = bh_counts["total"]
     bh_err = round(bh_counts["failed"] / bh_total, 3) if bh_total else None
     wr_total = wr_counts["total"]
@@ -838,6 +875,7 @@ def _collect_swamp_metrics(repoDir: str | None, since: float | None, until: floa
         "envPresence": disc.get("envPresence"),
         "behaviorHistory": {**bh_counts, "errorRate": bh_err},
         "workflowRuns": {**wr_counts, "errorRate": wr_err},
+        "behaviors": sorted(names),
         "knobs": knobs,
         "configuredConcurrency": cfg,
     }
@@ -871,7 +909,13 @@ def discover(verbose: bool = False) -> dict:
         }
     found["lunaroute_config"] = {"path": os.path.expanduser(LR_CONFIG),
                                  "present": os.path.isfile(os.path.expanduser(LR_CONFIG))}
-    found["swamp"] = _swamp_store_info(_swamp_repo_dir())
+    # Installed is not in use: the report shows swamp only with activity in
+    # the window, while --json keeps the stores.swamp stanza for compatibility.
+    sw_state = swamp_state(since=time.time() - 24 * 3600)
+    sw = _swamp_store_info(sw_state["repo"])
+    sw["inUse"] = sw_state["in_use"]
+    sw["evidence"] = sw_state["evidence"]
+    found["swamp"] = sw
     return found
 
 
@@ -1875,43 +1919,49 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
             f"served, not slow."
         )
 
-    # ---- swamp combined-pressure warning (additive, never fabricates per-request concurrency) ----
+    # ---- swamp fan-out is configuration, never measured traffic ----
+    # The peak concurrency above is an observation; swamp's fan-out is a
+    # setting. They are reported as separate labelled facts, and the only
+    # place both numbers appear in one sentence is an explicitly assumed
+    # "if ... would" clause - never as a measured sum, and never in the
+    # headline.
     sw = m.get("swamp")
+    configured = None
+    split = ""
     if sw and sw.get("present"):
         try:
             knobs = sw.get("knobs") or {}
-            extract = (knobs.get("extractConcurrency") or {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT)
-            llm = (knobs.get("llmConcurrency") or {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT)
-            configured = sw.get("configuredConcurrency")
-            if configured is None:
-                try:
-                    configured = int(extract) + int(llm)
-                except Exception:
-                    configured = SWAMP_EXTRACT_CONCURRENCY_DEFAULT + SWAMP_LLM_CONCURRENCY_DEFAULT
-            peak = m.get("peak_concurrency") or 0
-            combined = peak + int(configured)
-            exceeds_advise = combined > ADVISE_FANOUT_MAX
-            exceeds_burst = combined > INTERACTIVE_BURST_CAP
-            if exceeds_advise or exceeds_burst:
-                cap = INTERACTIVE_BURST_CAP if exceeds_burst else ADVISE_FANOUT_MAX
-                adj.append(
-                    f"Combined load: pi peak {peak} + swamp {configured} (extract {extract}+llm {llm}) = {combined} > cap {cap} \u2014 combined pressure; keep pi + swamp \u2264 {cap} or move work to -background."
-                )
-                head_suffix = f" Combined pi peak {peak} + swamp {configured} = {combined} > cap {cap} \u2014 combined pressure."
-                # head is defined below; stash suffix for after head creation
-                # we handle head suffix after head is built via a flag
-                m["_swamp_head_suffix"] = head_suffix  # temporary stash
+            extract = int((knobs.get("extractConcurrency") or {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT))
+            llm = int((knobs.get("llmConcurrency") or {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
+            configured = int(sw.get("configuredConcurrency") or extract + llm)
+            split = f" (extract {extract} + verify {llm})"
         except Exception:
-            pass
+            configured = None
+    if configured is None:
+        # _swamp_configured_fanout carries the setting when the full in-use
+        # scan is not attached to these metrics; pop it so --json never sees
+        # the scratch key.
+        configured = m.pop("_swamp_configured_fanout", None)
+    else:
+        m.pop("_swamp_configured_fanout", None)
+    if configured:
+        peak = m.get("peak_concurrency") or 0
+        adj.append(
+            f"swamp is configured to fan out to {configured} concurrent requests per behavior"
+            f"{split} - a setting, not measured traffic. The measured peak concurrency this "
+            f"window is {peak}, a separate observation reported above."
+        )
+        assumed = peak + int(configured)
+        if assumed > ADVISE_FANOUT_MAX or assumed > INTERACTIVE_BURST_CAP:
+            cap = INTERACTIVE_BURST_CAP if assumed > INTERACTIVE_BURST_CAP else ADVISE_FANOUT_MAX
+            adj.append(
+                f"if swamp fans out to its configured {configured} while pi peaks at {peak}, the "
+                f"account would see {assumed} concurrent requests - an assumption, not a "
+                f"measurement; keep the two together at or under {cap}, or move swamp work to "
+                f"the -background tier."
+            )
 
     if not pressure and not adj:
-        # swamp warning counts as pressure-like advice even if pi alone had none: promote to pressure
-        sw_suffix = m.pop("_swamp_head_suffix", None) if isinstance(m, dict) else None
-        if sw and sw.get("present") and sw_suffix:
-            # swamp combined pressure alone should still surface as pressure
-            head = f"No concurrency pressure across {n} requests."
-            head += sw_suffix
-            return head, adj, 1
         return f"No concurrency pressure across {n} requests.", ["Nothing to adjust."], 0
 
     head = (
@@ -1920,10 +1970,6 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         if pressure
         else f"{n} requests, no admission deaths, peak concurrency {m['peak_concurrency']}."
     )
-    # append swamp suffix if present
-    _suffix = m.pop("_swamp_head_suffix", None) if isinstance(m, dict) else None
-    if _suffix:
-        head += _suffix
     adj.append(
         f"Adjust: keep interactive fan-out at or under {ADVISE_FANOUT_MAX}, and move any wider "
         f"fan-out to the -background variant of the same model."
@@ -2022,6 +2068,32 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
     notes.append(report.Row(
         "note", "tiers here are inferred from model names; the served tier is not in these logs; "
                 "only a probe can see it."))
+    sw = m.get("swamp")
+    if sw and sw.get("present"):
+        # Only an in-use swamp reaches here (installed is not in use), and its
+        # configured fan-out is labelled as a setting so it can never be read
+        # as measured traffic next to the peak concurrency row above.
+        bh = (sw.get("behaviorHistory") or {}).get("total") or 0
+        wr = (sw.get("workflowRuns") or {}).get("total") or 0
+        names = list(sw.get("behaviors") or [])
+        who = ""
+        if names:
+            shown = ", ".join(names[:4])
+            if len(names) > 4:
+                shown += f" and {len(names) - 4} more"
+            who = f" ({shown})"
+        knobs = sw.get("knobs") or {}
+        try:
+            ex = int((knobs.get("extractConcurrency") or {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT))
+            ll = int((knobs.get("llmConcurrency") or {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
+            src = (knobs.get("extractConcurrency") or {}).get("source") or "default"
+            setting = (f"; configured fan-out {ex + ll} per behavior (extract {ex} + verify {ll}, "
+                       f"from {src}) - a setting, not measured traffic")
+        except Exception:
+            setting = ""
+        notes.append(report.Row(
+            "swamp", f"in use this window: {bh} behavior record(s){who}, {wr} workflow run(s)"
+                     + setting))
 
     sections = [report.Section(title, rows)
                 for title, rows in (("traffic", traffic), ("pressure", pressure),
@@ -2247,40 +2319,31 @@ def run_probe(n: int, model: str, max_tokens: int, timeout: float,
 
 
 def _probe_swamp_headroom(probe_n: int) -> str | None:
-    """One-sentence headroom note for probe, or None when swamp absent/unreadable.
+    """One-sentence headroom note for probe, or None when swamp is not in use.
 
-    Pure arithmetic: N = extract+llmConcurrency via resolve_swamp_knobs(),
-    M = probe_n + N, verdict vs INTERACTIVE_BURST_CAP.
+    The probe measured probe_n; swamp's extract+llmConcurrency via
+    resolve_swamp_knobs() is a setting. They are reported as separate facts,
+    and the only sum sits inside an explicitly assumed "if ... would" clause.
     No network, no second probe.
     """
     try:
-        repo_dir = _swamp_repo_dir()
-    except Exception:
-        return None
-    if repo_dir is None:
-        return None
-    try:
-        info = _swamp_store_info(repo_dir)
-        if not info.get("present"):
+        state = swamp_state(since=time.time() - 24 * 3600)
+        if not state["in_use"]:
             return None
-    except Exception:
-        return None
-    try:
-        knobs = resolve_swamp_knobs(repo_dir)
-    except Exception:
-        return None
-    try:
+        knobs = resolve_swamp_knobs(state["repo"])
         ex = int(knobs.get("extractConcurrency", {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT))
-        llm = int(knobs.get("llmConcurrency", {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
+        ll = int(knobs.get("llmConcurrency", {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
     except Exception:
         return None
-    N = ex + llm
-    M = probe_n + N
-    verdict = "exceeds" if M > INTERACTIVE_BURST_CAP else "is within"
+    configured = ex + ll
+    assumed = probe_n + configured
+    verdict_word = "within" if assumed <= INTERACTIVE_BURST_CAP else "past"
     return (
-        f"a background probe at n={probe_n} passed; adding swamp's configured "
-        f"{N} (={ex}+{llm}) would put the combined width at {M}, which {verdict} "
-        f"the conservative combined budget. {CAP_COPY[0].upper()}{CAP_COPY[1:]}."
+        f"swamp is configured to fan out to {configured} per behavior (extract {ex} + verify {ll}) "
+        f"- a setting, not measured traffic; this probe measured {probe_n} concurrent sessions. "
+        f"If swamp ran at its configured width during such a probe, the account would see "
+        f"{assumed} concurrent requests, {verdict_word} the conservative combined budget - an "
+        f"assumption, not a measurement. {CAP_COPY[0].upper()}{CAP_COPY[1:]}."
     )
 
 
@@ -2490,21 +2553,21 @@ def build_discover_report(d: dict) -> report.Report:
             bits.append(f"newest {s['newest']}")
         rows.append(report.Row(s["name"], " · ".join(bits)))
     sw = d.get("swamp")
-    if sw is not None:
-        if sw.get("present"):
-            fp = sw.get("bundleFingerprint") or "\u2014"
-            files = sw.get("files") or {}
-            bits = ["present",
-                    f"{files.get('behaviorHistory', 0)} behavior",
-                    f"{files.get('workflowRuns', 0)} workflow",
-                    f"bundle {fp}"]
-            if sw.get("envPresence"):
-                bits.append(".env.swamp")
-            if sw.get("repoDir"):
-                bits.append(sw["repoDir"])
-            rows.append(report.Row("swamp", " · ".join(bits)))
-        else:
-            rows.append(report.Row("swamp", "absent"))
+    if sw is not None and sw.get("present") and sw.get("inUse"):
+        # Only a swamp with activity in the window earns a row; an idle
+        # install is visible in `discover --json` and nowhere else.
+        fp = sw.get("bundleFingerprint") or "\u2014"
+        files = sw.get("files") or {}
+        bits = ["in use",
+                f"{files.get('behaviorHistory', 0)} behavior",
+                f"{files.get('workflowRuns', 0)} workflow",
+                f"bundle {fp}"]
+        if sw.get("envPresence"):
+            bits.append(".env.swamp")
+        if sw.get("repoDir"):
+            bits.append(sw["repoDir"])
+        bits.append(f"({sw.get('evidence', 'activity in window')})")
+        rows.append(report.Row("swamp", " · ".join(bits)))
     lr = d.get("lunaroute_config")
     if lr is not None:
         state = "present" if lr.get("present") else "absent"
@@ -2679,15 +2742,13 @@ def cmd_analyze(args) -> int:
     now = time.time()
     reqs = collect(hours, harnesses, pi_roots, claude_roots, now=now)
     m = analyse(reqs, hours)
-    # swamp enrichment (additive, never fails; mirrors discover repoDir)
+    # swamp enrichment (additive, never fails; installed is not in use, so
+    # only a swamp with activity in the window contributes anything)
     try:
-        sw_info = _swamp_store_info(_swamp_repo_dir())
-        if sw_info.get("present"):
-            repoDir = sw_info.get("repoDir")
-            since_ts = now - hours * 3600
-            until_ts = now
-            sw_metrics = _collect_swamp_metrics(repoDir, since_ts, until_ts)
-            m["swamp"] = sw_metrics
+        sw_state = swamp_state(since=now - hours * 3600)
+        if sw_state["in_use"]:
+            m["swamp"] = _collect_swamp_metrics(sw_state["repo"], now - hours * 3600, now)
+            m["_swamp_configured_fanout"] = m["swamp"].get("configuredConcurrency")
     except Exception:
         pass
     head, adj, code = verdict(m)

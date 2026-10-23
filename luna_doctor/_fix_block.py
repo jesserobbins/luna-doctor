@@ -49,38 +49,15 @@ def _read_text(path: str) -> str:
         return ""
 
 
-def _swamp_repo_dir() -> str | None:
-    """Resolve the swamp repo dir for fix, mirroring task-1 discover logic."""
-    env_root = os.environ.get("SWAMP_ROOT")
-    if env_root is not None and env_root != "":
-        expanded = os.path.expanduser(env_root)
-        if os.path.isdir(expanded):
-            return expanded
-        return None
-    wrapper = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    sibling = os.path.join(os.path.dirname(wrapper), "swamp-tracker")
-    if os.path.isdir(sibling) and os.path.isfile(os.path.join(sibling, ".swamp.yaml")):
-        return sibling
-    cwd = os.path.abspath(".")
-    cur = cwd
-    for _ in range(6):
-        if os.path.isfile(os.path.join(cur, ".swamp.yaml")):
-            return cur
-        parent = os.path.dirname(cur)
-        if parent == cur:
-            break
-        cur = parent
-    global_swamp = os.path.expanduser("~/.swamp")
-    if os.path.isdir(global_swamp):
-        return global_swamp
-    return None
+def _swamp_present(window_hours: float = 24.0) -> tuple[bool, str | None]:
+    """The swamp advice gate: in use, not merely installed.
 
-
-def _swamp_present() -> tuple[bool, str | None]:
-    repo = _swamp_repo_dir()
-    if repo is None:
-        return False, None
-    return True, repo
+    swamp_state() (defined in cli.py, whose namespace this block executes in)
+    counts files changed inside the window, so an idle install gets no advice
+    block at all and swamp is never spawned to find out.
+    """
+    state = swamp_state(since=time.time() - window_hours * 3600)
+    return bool(state["in_use"]), state["repo"]
 
 
 def resolve_swamp_knobs(repo_dir: str | None = None) -> dict:
@@ -189,10 +166,10 @@ def _swamp_env_apply(repo_dir: str | None, key: str, value: str) -> str:
 
 
 def recommendations_swamp(m: dict, agents: list[str]) -> list:
-    """Swamp block — only when agents includes swamp and swamp is present."""
+    """Swamp block — only when agents includes swamp and swamp is in use."""
     if "swamp" not in agents:
         return []
-    present, repo_dir = _swamp_present()
+    present, repo_dir = _swamp_present(float(m.get("window_hours") or 24.0))
     if not present:
         return []
     knobs = resolve_swamp_knobs(repo_dir)
