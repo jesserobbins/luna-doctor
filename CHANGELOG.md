@@ -17,6 +17,15 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- One data-collection layer, `luna_doctor/sources.py`. Every fact a command can quote now comes from one of three states of the world — **measured** (the local log stores: pi, claude-code, and now codex rollouts), **declared** (the harness config files: pi settings, pi subagent config, pi model stores, claude-code settings, codex `config.toml`, swamp knobs), and **catalog** (`GET /v1/models` on the gateway, cached on disk for 24h) — plus **configured** for documented constants and **unknown** for everything else, and every value carries its provenance: the file and key it came from, the endpoint, or the citation behind an "absent → default N". `analyze` and `fix` consume it as one combined snapshot (`metrics.snapshot` in the `--json` envelope): each harness's declared model keys join the live catalog per model, so a declared size can be compared with the real one, token totals are summed per harness under the field names each harness logs (never merged: codex's `input_tokens` includes its cached tokens while pi's `input` excludes `cacheRead`), and a model the logs used but the catalog does not list is flagged as a finding.
+- `--online` / `--offline` on `analyze` and `fix`. The default is offline: a cached catalog serves (a stale one too, marked stale), and the network is never touched. `--online` allows one authenticated GET of the model catalog — refreshing the 24h disk cache at `~/.luna-doctor/catalog.json` — and probes the not-yet-deployed `GET /v1/limits`. Any failure degrades to unknown, never to an error: what could not be fetched is reported as such.
+
+### Changed
+
+- `schema` in the `--json` envelope is bumped 3 → 4. The change is additive — the new `metrics.snapshot` document (measured + declared + catalog, joined per model, with a provenance legend) — and no existing key moved.
+
 ## [0.1.1-alpha.3] - 2026-10-23
 
 ### Added

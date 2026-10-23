@@ -89,7 +89,7 @@ class JsonEnvelope(unittest.TestCase):
         code, out, err = run(*args)
         self.assertIn(code, (0, 1, 2), f"unexpected exit {code}: {err}")
         doc = json.loads(out)          # must be pure JSON on stdout
-        self.assertEqual(doc["schema"], 3)
+        self.assertEqual(doc["schema"], 4)
         self.assertRegex(doc["version"], SEMVER)
         self.assertIn("command", doc)
         return code, doc
@@ -188,7 +188,7 @@ class Chart(unittest.TestCase):
         self.assertEqual(code, 0)
         doc = json.loads(stdout)
         self.assertEqual(doc["command"], "chart")
-        self.assertEqual(doc["schema"], 3)
+        self.assertEqual(doc["schema"], 4)
         self.assertEqual(doc["path"], out)
         self.assertIn("contract", doc)
 
@@ -666,7 +666,7 @@ class ExtractionStore(unittest.TestCase):
             self.assertTrue(os.path.isfile(first["path"]))
             with open(first["path"]) as fh:
                 doc = json.load(fh)
-            self.assertEqual(doc["schema"], 3)
+            self.assertEqual(doc["schema"], 4)
             with open(first["ledger"]) as fh:
                 lines = [json.loads(x) for x in fh if x.strip()]
                 events = self.m.ledger_rows(m, "stores:default")
@@ -683,7 +683,7 @@ class SchemaTwo(unittest.TestCase):
         code, out, err = run("analyze", "--since", "1h", "--json")
         self.assertIn(code, (0, 1, 2), err)
         doc = json.loads(out)
-        self.assertEqual(doc["schema"], 3)
+        self.assertEqual(doc["schema"], 4)
         self.assertNotIn("admission_deadline_s", doc["contract"],
                          "per-model deadlines replace the borrowed constant")
         for key in ("pre_header_wait_s", "client_idle_timeout_s", "interactive_burst_cap"):
@@ -1991,7 +1991,7 @@ class CopyToClipboard(unittest.TestCase):
         self.assertEqual(copied, proc.stdout)
         doc = json.loads(copied)               # the whole document, nothing more
         self.assertEqual(doc["command"], "analyze")
-        self.assertEqual(doc["schema"], 3)
+        self.assertEqual(doc["schema"], 4)
 
 
 class DemotionReason(unittest.TestCase):

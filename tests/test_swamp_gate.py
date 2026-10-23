@@ -125,7 +125,7 @@ class SwampGate(unittest.TestCase):
                         yield from keys(v)
 
             scratch = [k for k in keys(doc) if k.startswith("_")]
-            self.assertEqual(scratch, [], "no internal key may ride the schema-3 envelope")
+            self.assertEqual(scratch, [], "no internal key may ride the schema-4 envelope")
 
 
 if __name__ == "__main__":
