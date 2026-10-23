@@ -1,12 +1,16 @@
 """Swamp is conditional: installed is not in use.
 
-Five gates, one per state an install can be in: no marker, installed but
-idle, active inside the window, idle in `discover`, and the arithmetic rule
-that a measured peak and a configured fan-out are different kinds of number
-and never render as one sum.
+Six gates: five for the states an install can be in - no marker, installed
+but idle, active inside the window, idle in `discover` - plus the arithmetic
+rule that a measured peak and a configured fan-out are different kinds of
+number and never render as one sum, and the scratch key a zero-request
+window must not ship to `--json`.
 """
 
+import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +20,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from luna_doctor import cli
+
+CLI = os.path.join(ROOT, "bin", "luna-doctor")
 
 
 def _load_cli():
@@ -79,10 +85,47 @@ class SwampGate(unittest.TestCase):
         metrics = m.analyse(reqs, window_hours=24)
         metrics["_swamp_configured_fanout"] = 20
         head, adj, _ = m.verdict(metrics)
-        self.assertNotIn("= 26", head)
         self.assertIn("6", head)
         self.assertTrue(any("configured" in line.lower() for line in [head] + adj),
                         "swamp fan-out must be described as configuration, not measured traffic")
+        # This test once checked only the headline, so a sum re-added to the
+        # adjustments passed. No line may carry the bare sum of the measured
+        # peak (6) and the configured fan-out (20), in any voice.
+        for line in [head] + adj:
+            self.assertIsNone(re.search(r"\b26\b", line),
+                              f"measured + configured must not be summed: {line}")
+
+    def test_json_envelope_on_an_empty_window_ships_no_scratch_keys(self):
+        """A zero-request window returns from verdict() before the scratch
+        key is consumed; `analyze --json` must still not ship it."""
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as empty:
+            # swamp in use inside the window, but no harness requests at all
+            open(os.path.join(d, ".swamp.yaml"), "w").close()
+            runs = os.path.join(d, ".swamp", "workflow-runs", "r1")
+            os.makedirs(runs)
+            open(os.path.join(runs, "run.yaml"), "w").write("ok: true\n")
+            env = dict(os.environ)
+            env["SWAMP_ROOT"] = d
+            proc = subprocess.run(
+                [sys.executable, CLI, "analyze", "--json", "--since", "24h",
+                 "--pi-root", empty, "--claude-root", empty, "--no-store"],
+                capture_output=True, text=True, timeout=180, cwd=ROOT, env=env)
+            self.assertEqual(proc.returncode, 2, "an empty window is no data, not pressure")
+            doc = json.loads(proc.stdout)
+            self.assertTrue((doc["metrics"].get("swamp") or {}).get("present"),
+                            "the leak path needs swamp in use to be exercised")
+
+            def keys(node):
+                if isinstance(node, dict):
+                    for k, v in node.items():
+                        yield k
+                        yield from keys(v)
+                elif isinstance(node, list):
+                    for v in node:
+                        yield from keys(v)
+
+            scratch = [k for k in keys(doc) if k.startswith("_")]
+            self.assertEqual(scratch, [], "no internal key may ride the schema-3 envelope")
 
 
 if __name__ == "__main__":

@@ -49,7 +49,7 @@ from luna_doctor import report
 from luna_doctor.render_pretty import render_pretty, reveal, style_for
 
 VERSION = "0.1.1-alpha.1"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
-SCHEMA_VERSION = 3         # 3: additive swamp contribution (metrics.swamp) + combined-pressure warning
+SCHEMA_VERSION = 3         # 3: additive swamp contribution (metrics.swamp)
 
 # ---- measured constants -----------------------------------------------------
 CONTRACT = {
@@ -1922,10 +1922,11 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
 
     # ---- swamp fan-out is configuration, never measured traffic ----
     # The peak concurrency above is an observation; swamp's fan-out is a
-    # setting. They are reported as separate labelled facts, and the only
-    # place both numbers appear in one sentence is an explicitly assumed
-    # "if ... would" clause - never as a measured sum, and never in the
-    # headline.
+    # setting. They are reported as separate labelled facts and never
+    # combined: swamp's configured figure enters no arithmetic, no sum and
+    # no stated limit here, and never reaches the headline. What the two
+    # together might mean is a risk to measure with the probe, not a
+    # number this report computes.
     sw = m.get("swamp")
     configured = None
     split = ""
@@ -1950,17 +1951,11 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         adj.append(
             f"swamp is configured to fan out to {configured} concurrent requests per behavior"
             f"{split} - a setting, not measured traffic. The measured peak concurrency this "
-            f"window is {peak}, a separate observation reported above."
+            f"window is {peak}, a separate observation reported above. Overlapping swamp "
+            f"fan-out on top of interactive bursts is an unmeasured risk, not a computed "
+            f"total; measure the width this account actually admits with `probe "
+            f"--enable-probe` before choosing a target."
         )
-        assumed = peak + int(configured)
-        if assumed > ADVISE_FANOUT_MAX or assumed > INTERACTIVE_BURST_CAP:
-            cap = INTERACTIVE_BURST_CAP if assumed > INTERACTIVE_BURST_CAP else ADVISE_FANOUT_MAX
-            adj.append(
-                f"if swamp fans out to its configured {configured} while pi peaks at {peak}, the "
-                f"account would see {assumed} concurrent requests - an assumption, not a "
-                f"measurement; keep the two together at or under {cap}, or move swamp work to "
-                f"the -background tier."
-            )
 
     if not pressure and not adj:
         return f"No concurrency pressure across {n} requests.", ["Nothing to adjust."], 0
@@ -2156,6 +2151,10 @@ def _share(m: dict, head: str, adj: list, args) -> None:
 def render(m: dict, head: str, adj: list[str], as_json: bool,
            stored: dict | None = None, args=None) -> None:
     if as_json:
+        # A zero-request window returns from verdict() before the swamp
+        # scratch key is consumed, and the envelope must never ship it:
+        # nothing prefixed with "_" is contract data.
+        m.pop("_swamp_configured_fanout", None)
         doc = envelope("analyze", {
             "headline": head,
             "adjustments": adj,
