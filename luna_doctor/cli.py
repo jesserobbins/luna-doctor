@@ -49,6 +49,7 @@ from datetime import datetime, timedelta, timezone
 
 from luna_doctor import plan
 from luna_doctor import report
+from luna_doctor import sizing
 from luna_doctor import sources
 from luna_doctor.render_pretty import render_pretty, reveal, style_for
 from luna_doctor.sources import (CLAUDE_STORE, CODEX_STORE, GATEWAY_HOST,
@@ -3524,6 +3525,20 @@ def cmd_analyze(args) -> int:
         note = snap.catalog_note if snap is not None else m["snapshot"].get("reason", "")
         print(f"luna-doctor: catalog unavailable ({note}); "
               f"model limits are reported unknown", file=sys.stderr)
+    # Sizing rules (additive: metrics.sizing is the misconfiguration family's
+    # ledger - declared/effective/catalog sizes per routed model, with the
+    # V/U discipline: only V-backed comparisons raise findings, U-backed
+    # lines are informational, an unreadable config or a stale/missing
+    # catalog is unchecked, never clean). Config findings are checked-now,
+    # not as-of-window; they never touch the verdict or the exit code. A
+    # sizing block that cannot be computed is itself unchecked, never an
+    # error.
+    try:
+        m["sizing"] = sizing.evaluate(snap)
+    except Exception as e:
+        m["sizing"] = {"provenance": sources.PROV_UNKNOWN,
+                       "reason": (f"sizing evaluation failed: "
+                                  f"{type(e).__name__}: {e}")[:200]}
     head, adj, code = verdict(m)
     stored = None
     if m["requests"] and not getattr(args, "no_store", False):
