@@ -289,10 +289,72 @@ def _run_of(path: str, root: str, qualify: bool = False, harness: str = "") -> s
     return f"{prefix}{label}/{head}"
 
 
+# ---- vendor filter -------------------------------------------------------
+# The tool explains LunaRoute concurrency, so the request set it analyses must
+# be traffic the gateway actually served. pi says so per record (message.
+# provider); claude-code does not, so its route is read from the model name.
+# The filters live in the iterators - every consumer (analyze, chart, fix,
+# share card) then sees a LunaRoute-only set - and the exclusions travel on
+# the returned list, because dropping records without saying so is a silent
+# lie about the machine's traffic.
+
+class Requests(list):
+    """A request list plus the exclusions the iterators made building it.
+
+    `analyse` reads `.excluded` to report what was dropped and why. A plain
+    list - one assembled by hand, or by code that filtered nothing - carries
+    no exclusions and `analyse` reports none, which is the truth about it.
+    """
+
+    def __init__(self, iterable=(), excluded=None):
+        super().__init__(iterable)
+        self.excluded = {} if excluded is None else excluded
+
+
+# LunaRoute's alias naming for models it fronts: claude-opus-lr11,
+# claude-haiku-lr34. Verified against the real claude-code store, where every
+# -lr model's records carry the gateway's own msg_<uuid> response ids, never
+# Anthropic's native msg_011C... ids.
+LR_ALIAS_RE = re.compile(r"-lr\d+$")
+
+
+def claude_route(model: str, catalog) -> str:
+    """Which route served one claude-code request: "lunaroute", "anthropic"
+    (direct), or "" when routing cannot be established from the logs.
+
+    claude-code records no provider, so the route is read from the model
+    name, strongest evidence first:
+      - a model in the LunaRoute catalog was served by the gateway
+        (`catalog` is its id set; None = no catalog was available);
+      - a `-lr<digits>` alias is LunaRoute's own naming, so it is gateway
+        traffic even when today's catalog no longer lists it
+        (claude-opus-lr11 was served when that window was live);
+      - any other `claude-...` name is one Anthropic itself serves: direct
+        traffic that never touched the gateway (in the real store those
+        records carry Anthropic-native msg_011C... ids and non-empty
+        inference_geo, while the gateway's carry msg_<uuid> and empty);
+      - anything else (a `<synthetic>` local record, a model from some other
+        router) is unclassifiable from the logs alone.
+    A `-background` suffix is LunaRoute's own tier naming, stripped before
+    the catalog match: the background variant of a catalog model is the same
+    gateway serving a different tier.
+    """
+    name = model or ""
+    base = name[:-len("-background")] if name.endswith("-background") else name
+    if base in (catalog or ()):
+        return "lunaroute"
+    if LR_ALIAS_RE.search(base):
+        return "lunaroute"
+    if base.startswith("claude-"):
+        return "anthropic"
+    return ""
+
+
 def iter_pi(roots: list[str], since: float, until: float | None = None,
-            prune_mtime: bool = True) -> list[Request]:
+            prune_mtime: bool = True) -> Requests:
     out: list[Request] = []
     seen: set[str] = set()
+    pi_excluded: dict[str, int] = {}      # provider -> requests dropped
     top = until if until is not None else time.time()
     for root in sorted(roots):     # argv order must not decide which copy survives
         pattern = os.path.join(glob.escape(root), "**", "*.jsonl")
@@ -328,6 +390,19 @@ def iter_pi(roots: list[str], since: float, until: float | None = None,
                 if key in seen:
                     continue
                 seen.add(key)
+                if provider != "lunaroute":
+                    # pi names the provider that answered, and LunaRoute
+                    # concurrency is all this tool explains: ollama, gengen,
+                    # a direct Anthropic key or a test gateway never touched
+                    # the gateway, and counting them here would inflate its
+                    # concurrency, latency and per-model stats. No record in
+                    # the real store lacks the field - it predates every
+                    # record there - so an empty provider is not attributable
+                    # to the gateway either: excluded and counted, never
+                    # guessed in.
+                    name = provider or "(no provider)"
+                    pi_excluded[name] = pi_excluded.get(name, 0) + 1
+                    continue
                 content = msg.get("content") or []
                 think = text = 0
                 for block in content if isinstance(content, list) else []:
@@ -358,11 +433,14 @@ def iter_pi(roots: list[str], since: float, until: float | None = None,
                 req.tier, req.demoted, req.reason = tier_of(model)
                 req.outcome = classify(asdict(req))
                 out.append(req)
-    return out
+    return Requests(out, excluded={
+        "pi_non_lunaroute": sum(pi_excluded.values()),
+        "pi_by_provider": dict(sorted(pi_excluded.items())),
+    })
 
 
 def iter_claude(roots: list[str], since: float, until: float | None = None,
-                prune_mtime: bool = True) -> list[Request]:
+                prune_mtime: bool = True, catalog=None) -> Requests:
     """claude-code: one response spans several assistant records sharing
     message.id, and mirrored copies of it may differ.
 
@@ -370,12 +448,19 @@ def iter_claude(roots: list[str], since: float, until: float | None = None,
     and a local copy of one response count once, keeping the earliest plausible
     start, the latest end and whatever terminal metadata either copy carried. The
     surviving session/run label comes from the first copy in sorted path order.
+
+    Only LunaRoute-routed responses are returned: `catalog` is the LunaRoute
+    catalog's model ids (None when none was available), a response whose route
+    cannot be established is excluded and counted (see claude_route), and the
+    counts travel on the returned list's `.excluded`.
     """
     out: list[Request] = []
     # Response identity is global, not per file. Copies of one response can differ:
     # an incomplete copy can sort before its complete twin, and first-wins would
     # then discard the terminal outcome, the usage and the real duration.
     best: dict[str, dict] = {}
+    anthropic_direct: dict[str, int] = {}   # model -> requests dropped (direct)
+    unclassified: dict[str, int] = {}        # model -> requests dropped (unknown)
     # Copies of one response can straddle the window edge: the fragment with the
     # real start can end before `since` while the terminal record lands inside it.
     # Keeping the whole stale group would hold a mirror in memory, so a pre-window
@@ -454,6 +539,16 @@ def iter_claude(roots: list[str], since: float, until: float | None = None,
     for mid, g in sorted(best.items()):
         if g["end"] is None or g["end"] < since or g["end"] > top:
             continue
+        # claude-code logs no provider, so the route is read from the model
+        # name (claude_route). Anthropic-direct sessions and anything
+        # unclassifiable are excluded here and counted, so the request set
+        # that reaches every consumer is gateway traffic only.
+        route = claude_route(g["model"], catalog)
+        if route != "lunaroute":
+            name = g["model"] or "(no model)"
+            bucket = anthropic_direct if route == "anthropic" else unclassified
+            bucket[name] = bucket.get(name, 0) + 1
+            continue
         # Applied here, not per file: the fragment can live in a file (or a root)
         # that is read after the terminal copy, and the start is still the same.
         if mid in pre_starts:
@@ -479,7 +574,12 @@ def iter_claude(roots: list[str], since: float, until: float | None = None,
         req.tier, req.demoted, req.reason = tier_of(req.model)
         req.outcome = classify(asdict(req))
         out.append(req)
-    return out
+    return Requests(out, excluded={
+        "claude_non_lunaroute": sum(anthropic_direct.values()),
+        "claude_by_model": dict(sorted(anthropic_direct.items())),
+        "claude_unclassified": sum(unclassified.values()),
+        "claude_unclassified_by_model": dict(sorted(unclassified.items())),
+    })
 
 
 def _merge_copies(a: dict, b: dict) -> dict:
@@ -1636,6 +1736,10 @@ def persist_run(m: dict, window_hours: float, store: str | None = None,
 
 def analyse(reqs: list[Request], window_hours: float) -> dict:
     n = len(reqs)
+    # What the vendor filter excluded travels on a Requests list from the
+    # iterators; a plain list carries none and the block stays absent, which
+    # is the truth about that list. Additive, so schema stays 4.
+    excluded = getattr(reqs, "excluded", None)
     by_outcome: dict[str, int] = {}
     by_tier: dict[str, int] = {}
     by_harness: dict[str, int] = {}
@@ -1691,7 +1795,7 @@ def analyse(reqs: list[Request], window_hours: float) -> dict:
         conv[tier] = {"completed": served, "admission_timeout": dead,
                       "admitted_pct": round(100.0 * served / tot, 1) if tot else None}
 
-    return {
+    metrics = {
         "window_hours": window_hours,
         "requests": n,
         "by_outcome": by_outcome,
@@ -1727,6 +1831,9 @@ def analyse(reqs: list[Request], window_hours: float) -> dict:
         "totals": {"completed": by_outcome.get("completed", 0),
                    "admission_deaths": len(adm)},
     }
+    if excluded is not None:
+        metrics["excluded"] = excluded
+    return metrics
 
 
 # ---- verdict ----------------------------------------------------------------
@@ -1931,6 +2038,37 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     return head, adj, (1 if pressure else 0)
 
 
+def _excluded_rows(m: dict) -> list:
+    """The vendor-filter row: what was dropped from the window, and why.
+
+    The iterators already excluded these requests; the report says so beside
+    the request count it explains, because dropping traffic without saying
+    so would understate what the machine actually ran.
+    """
+    e = m.get("excluded") or {}
+    lines: list[str] = []
+    n_pi = e.get("pi_non_lunaroute") or 0
+    if n_pi:
+        provs = ", ".join(f"{k} {v}" for k, v in
+                          sorted((e.get("pi_by_provider") or {}).items(),
+                                 key=lambda kv: (-kv[1], kv[0])))
+        lines.append(f"{n_pi} pi request(s) on other providers ({provs}) excluded - "
+                     f"they never touched the gateway.")
+    n_direct = e.get("claude_non_lunaroute") or 0
+    if n_direct:
+        models = ", ".join(sorted(e.get("claude_by_model") or {}))
+        lines.append(f"{n_direct} claude-code request(s) went to Anthropic direct "
+                     f"({models}) - excluded, they never touched the gateway.")
+    n_unc = e.get("claude_unclassified") or 0
+    if n_unc:
+        models = ", ".join(sorted(e.get("claude_unclassified_by_model") or {}))
+        lines.append(f"{n_unc} claude-code request(s) on models with unknown routing "
+                     f"({models}) - excluded as unclassified, never guessed in.")
+    if not lines:
+        return []
+    return [report.Row("excluded", "\n".join(lines))]
+
+
 def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
     """Turn analyse() metrics into the Report every renderer prints.
 
@@ -1947,6 +2085,7 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
         report.Row("tiers", ', '.join(f"{k} {v}" for k, v in sorted(m["by_tier"].items()))),
         report.Row("outcomes", ', '.join(f"{k} {v}" for k, v in sorted(m["by_outcome"].items()))),
     ]
+    traffic.extend(_excluded_rows(m))
     peaks = ', '.join(f"{k} {v}" for k, v in sorted(m["peak_by_harness"].items()))
     traffic.append(report.Row(
         "peak concurrency",
@@ -2521,22 +2660,48 @@ def _check_roots(roots: list[str] | None, flag: str) -> list[str]:
     return out
 
 
+def _catalog_model_ids() -> set | None:
+    """The LunaRoute catalog's model ids, from the disk cache only.
+
+    Never the network: a default run stays offline, and no cached catalog
+    simply means the claude-code classifier cannot recognize catalog models,
+    which are then excluded and counted as unclassified rather than guessed
+    in. One `analyze --online` populates the 24h cache that offline runs
+    serve (stale included).
+    """
+    try:
+        cat = sources.fetch_catalog(allow_network=False)
+        return set(cat.models) if cat is not None else None
+    except Exception:
+        return None
+
+
 def collect(since_hours: float, harnesses: list[str],
             pi_roots: list[str] | None = None,
             claude_roots: list[str] | None = None,
-            now: float | None = None) -> list[Request]:
+            now: float | None = None) -> Requests:
     """Gather requests. Explicit roots replace the default store, never add to it:
-    mixing a mirror with the local store would contaminate every per-store number."""
+    mixing a mirror with the local store would contaminate every per-store number.
+
+    The returned set is LunaRoute-only: the iterators exclude - and count -
+    traffic that never touched the gateway, and the counts travel on the
+    list's `.excluded` so `analyse` can report them.
+    """
     until = now if now is not None else time.time()
     since = until - since_hours * 3600
-    reqs: list[Request] = []
+    reqs = Requests()
     if "pi" in harnesses:
         roots = [os.path.expanduser(PI_STORE)] if pi_roots is None else pi_roots
-        reqs += iter_pi(roots, since, until, prune_mtime=pi_roots is None)
+        pi = iter_pi(roots, since, until, prune_mtime=pi_roots is None)
+        reqs += pi
+        reqs.excluded.update(pi.excluded)
     if "claude-code" in harnesses:
         roots = ([os.path.expanduser(CLAUDE_STORE)] if claude_roots is None
                  else claude_roots)
-        reqs += iter_claude(roots, since, until, prune_mtime=claude_roots is None)
+        cc = iter_claude(roots, since, until, prune_mtime=claude_roots is None,
+                         catalog=_catalog_model_ids())
+        reqs += cc
+        reqs.excluded.update(cc.excluded)
     return reqs
 
 
