@@ -38,6 +38,10 @@ KNOWN_AGENTS = ("pi", "claude-code", "codex", "swamp")
 # .env.swamp for live values; knob resolution itself is sources.swamp_knobs.
 PI_SETTINGS = sources.PI_SETTINGS
 PI_SUBAGENT_CFG = sources.PI_SUBAGENT_CFG
+# Where pi's model definitions (and so its declared sizing keys) live. The
+# store is read by the collection layer; the fix advice names it so the
+# agent knows which file to declare the pair in.
+PI_MODEL_STORE = sources.PI_MODEL_STORES[0]
 CLAUDE_SETTINGS = sources.CLAUDE_SETTINGS
 CODEX_CONFIG = sources.CODEX_CONFIG
 SWAMP_CITATION_DEFAULT = sources.SWAMP_CITATION_DEFAULT
@@ -203,6 +207,194 @@ def _why(*bits: str) -> str:
     return " ".join(b for b in bits if b)
 
 
+# ---- sizing (the 2026-10-23 family) ------------------------------------------
+# sizing.evaluate() (luna_doctor/sizing.py) is the audit: pure rows, the
+# verdict table, the V/U discipline. This block is the advice: findings turn
+# into the same instruction-only changes every other rule here emits - key,
+# file, value found, value judged against, one-line why, restart-scoped - and
+# U-backed rows turn into from == to lines that record what was not checked
+# and why, never advice. A U line that presents itself as a finding is the
+# failure mode the marking exists to prevent.
+
+def _sizing_finding_change(row) -> dict:
+    v = row.get("values") or {}
+    model = row.get("model") or ""
+    rule = row["rule"]
+    detail = row["detail"]
+    corr = row.get("corroboration") or ""
+    if rule == sizing.RULE_UNSET_UNDERUSES:
+        default = v.get("default")
+        catalog = v.get("catalog")
+        is_window = row["key"] == "contextWindow"
+        noun = "context window" if is_window else "max output tokens"
+        why_extra = (" pi's compaction path reads the same default "
+                     "(branch-summarization.js:190), so compaction also fires "
+                     "at the default's boundary instead of the model's real one."
+                     if is_window else
+                     " The harness runs the model at the shipped default, not "
+                     "at the model.")
+        return {
+            "key": f"models[{model}].{row['key']}",
+            "file": PI_MODEL_STORE,
+            "from": f"unset (default {default:,})",
+            "to": f"your declared value (the model's real {noun}: {catalog:,})",
+            "why": _why(detail, why_extra),
+            "instruction": (f"Ask your agent: in {PI_MODEL_STORE} declare {row['key']} for "
+                            f"lunaroute/{model} (the providers.lunaroute.models entry). It is "
+                            f"unset, so pi runs the model at the shipped default {default:,} "
+                            f"while the catalog serves {catalog:,} {noun} - the model's real "
+                            f"limit, not a requirement: set the value you actually want, then "
+                            f"restart the harness so the new value is read."),
+            "impact": ("the model runs at the size you chose instead of the shipped "
+                       "default; compaction and output budgets follow the real limits."),
+        }
+    if rule == sizing.RULE_EXCEEDS_WINDOW:
+        declared = v.get("declared")
+        catalog = v.get("catalog")
+        frm = f"{declared:,} (declared)" if declared is not None \
+            else f"unset (default {v.get('default'):,})"
+        return {
+            "key": f"models[{model}].contextWindow",
+            "file": PI_MODEL_STORE,
+            "from": frm,
+            "to": f"at or below {catalog:,} (the model's real window)",
+            "why": _why(detail, corr),
+            "instruction": (f"Ask your agent: in {PI_MODEL_STORE} set contextWindow for "
+                            f"lunaroute/{model} to at most {catalog:,} (was {frm}). The catalog "
+                            f"serves a {catalog:,}-token window for this model; a larger value "
+                            f"promises sessions the model will refuse with "
+                            f"context_length_exceeded, and compaction will not fire in time "
+                            f"to save them. Restart the harness after the change."),
+            "impact": ("compaction fires at the model's real boundary; sessions stop "
+                       "being promised a window the model refuses."),
+        }
+    if rule == sizing.RULE_OUTPUT_EXCEEDS_MAX:
+        declared = v.get("declared")
+        catalog = v.get("catalog")
+        frm = f"{declared:,} (declared)" if declared is not None \
+            else f"unset (default {v.get('default'):,})"
+        return {
+            "key": f"models[{model}].maxTokens",
+            "file": PI_MODEL_STORE,
+            "from": frm,
+            "to": f"at or below {catalog:,} (the model's max output)",
+            "why": _why(detail, corr),
+            "instruction": (f"Ask your agent: in {PI_MODEL_STORE} set maxTokens for "
+                            f"lunaroute/{model} to at most {catalog:,} (was {frm}). The model "
+                            f"produces at most {catalog:,} output tokens; a larger budget is "
+                            f"either rejected or silently clamped. Restart the harness after "
+                            f"the change."),
+            "impact": "stops requesting an output budget the model will not produce.",
+        }
+    if rule == sizing.RULE_INPUT_PLUS_OUTPUT:
+        window = v.get("window")
+        output = v.get("output")
+        return {
+            "key": f"models[{model}].contextWindow + models[{model}].maxTokens",
+            "file": PI_MODEL_STORE,
+            "from": f"window {window:,}, output {output:,}",
+            "to": "output below the window",
+            "why": _why(detail),
+            "instruction": (f"Ask your agent: in {PI_MODEL_STORE} bring maxTokens for "
+                            f"lunaroute/{model} below its contextWindow ({output:,} >= "
+                            f"{window:,} today) - input and output budgets share the window, "
+                            f"so an output reservation the size of the window leaves zero "
+                            f"input. Restart the harness after the change."),
+            "impact": ("the request is buildable again: the output reservation leaves "
+                       "room for input inside the window."),
+        }
+    if rule == sizing.RULE_CODEX_WINDOW:
+        declared = v.get("declared")
+        catalog = v.get("catalog")
+        return {
+            "key": "model_context_window",
+            "file": CODEX_CONFIG,
+            "from": f"{declared:,} (declared)",
+            "to": f"at or below {catalog:,} (the model's real window)",
+            "why": _why(detail, "The key is V by observation; this finding judges only "
+                               "the declared value - the shipped default is unverified and "
+                               "is not advice."),
+            "instruction": (f"Ask your agent: in {CODEX_CONFIG} set model_context_window to "
+                            f"at most {catalog:,} (was {declared:,}). Existing keys in that "
+                            f"file must be preserved. Restart codex after the change."),
+            "impact": "codex stops promising a window the model refuses.",
+        }
+    return {
+        "key": row.get("key") or rule,
+        "file": row.get("file") or "",
+        "from": "finding",
+        "to": "finding",
+        "why": detail,
+        "instruction": f"Ask your agent to review this sizing finding: {detail}",
+        "impact": "sizing finding.",
+    }
+
+
+def _sizing_informational_change(row) -> dict:
+    """A U-backed row as a from == to line: recorded, never advice.
+
+    The httpIdleTimeoutMs: 0 precedent - the verdict is not silent, and the
+    exit code stays untouched because from == to."""
+    v = row.get("values") or {}
+    declared = v.get("declared")
+    state = "unset" if declared is None else f"declared {declared:,}"
+    return {
+        "key": row["key"],
+        "file": row["file"],
+        "from": state,
+        "to": state,
+        "why": _why(row["detail"],
+                    "Informational (U): never a finding, never the sole basis for "
+                    "advice - only verification of the shipped default can promote "
+                    "this line to a rule."),
+        "instruction": (f"No change prescribed from an unverified default - recorded so "
+                        f"the sizing verdict is not silent: {row['detail']}"),
+        "impact": "recorded, not actionable; the line says what was not checked and why.",
+    }
+
+
+def _sizing_changes(sizing_eval, agents) -> dict:
+    """Sizing rows -> the per-agent change lists fix renders.
+
+    Findings (V-backed) arrive as changes with from != to - actionable, the
+    same exit-code contract as every other finding. Informational rows arrive
+    as from == to. Unchecked rows are the audit ledger's business (analyze's
+    metrics.sizing), except one: when the pi models are routed but the whole
+    catalog could not be established, fix says so - a silent sizing section
+    would read as "checked and clean" and it is neither."""
+    out = {"pi": [], "claude-code": [], "codex": []}
+    if not sizing_eval:
+        return out
+    rows = sizing_eval.get("rows") or []
+    for row in rows:
+        harness = row.get("harness")
+        if harness not in out or harness not in agents:
+            continue
+        if row.get("status") == "finding":
+            out[harness].append(_sizing_finding_change(row))
+        elif row.get("status") == "informational":
+            out[harness].append(_sizing_informational_change(row))
+    cat = sizing_eval.get("catalog") or {}
+    if (cat.get("provenance") != sources.PROV_CATALOG
+            and any(r.get("harness") == "pi" for r in rows)
+            and "pi" in agents):
+        out["pi"].append({
+            "key": "model sizing (catalog join)",
+            "file": "the LunaRoute model catalog (GET /v1/models)",
+            "from": "unchecked",
+            "to": "unchecked",
+            "why": _why(f"sizing is unchecked, never clean: {cat.get('reason') or 'the catalog could not be established'}.",
+                        "The declared sizing keys can only be judged against the live catalog."),
+            "instruction": ("No change is prescribed from an unchecked state. To make the "
+                            "sizing checks runnable, fetch the catalog once with --online "
+                            "(one authenticated GET, cached on disk for 24h); the checks then "
+                            "run offline from the cache."),
+            "impact": ("the sizing rules say nothing rather than guessing; with the "
+                       "catalog cached, the same run judges them."),
+        })
+    return out
+
+
 def _impact(peak: int) -> str:
     if peak <= ADVISED_CONCURRENCY:
         return (f"no effect at your current peak of {peak} concurrent requests - this is headroom so "
@@ -263,7 +455,8 @@ def _lunaroute_preface_text() -> str:
     return "\n\n".join([LUNAROUTE_PREFACE, LUNAROUTE_ROUTING_PREFACE, LUNAROUTE_COMMAND_PREFACE])
 
 
-def recommendations(m, reqs, agents, configs=None, catalog_ids=None) -> list:
+def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
+                    sizing_eval=None) -> list:
     """Per-agent instructions from the evidence.
 
     `configs` is the snapshot's Configs (sources.read_configs() when not
@@ -271,6 +464,10 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None) -> list:
     the from/to strings distinguishing a declared value from "unset (default
     N)" exactly as the old direct file reads did. `catalog_ids` are the
     snapshot catalog's model ids; empty means the catalog is unknown.
+    `sizing_eval` is sizing.evaluate(snapshot) - the sizing family's rows:
+    findings join the owning agent's changes after the concurrency advice,
+    U-backed rows arrive as from == to lines, and None means sizing says
+    nothing here (analyze's metrics.sizing carries the full ledger).
     """
     out = []
     if configs is None:
@@ -486,6 +683,19 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None) -> list:
                          " ~/.codex/lunaroute.config.toml and wins for the keys it sets. Keep tier changes"
                          " in the profile file, limits in config.toml."),
             })
+
+    # ---------------- sizing (the 2026-10-23 family) ----------------
+    # Findings join the owning agent's group after the concurrency advice -
+    # the report has always led with concurrency, and a sizing finding is a
+    # second family, not a new headline. U-backed lines ride as from == to.
+    for agent, changes in _sizing_changes(sizing_eval, agents).items():
+        if not changes:
+            continue
+        group = next((g for g in out if g.get("agent") == agent), None)
+        if group is None:
+            out.append({"agent": agent, "changes": list(changes)})
+        else:
+            group["changes"].extend(changes)
     return out
 
 
@@ -587,7 +797,10 @@ def cmd_fix(args) -> int:
     # provenance, and the catalog (cached by default; fetched only with
     # --online). A collection failure degrades to unset values and an empty
     # catalog - the advice still renders from the measured logs, and a
-    # network failure is never an error.
+    # network failure is never an error. The same snapshot feeds the sizing
+    # rules (sizing.evaluate): a snapshot that could not be built leaves them
+    # explicitly unchecked, never silently clean.
+    snap = None
     try:
         snap = sources.build_snapshot(reqs, since=now - hours * 3600, until=now,
                                       allow_network=bool(getattr(args, "online", False)))
@@ -601,7 +814,9 @@ def cmd_fix(args) -> int:
         print(f"luna-doctor: snapshot collection failed ({type(e).__name__}: {e}); "
               f"config values read as unset", file=sys.stderr)
         configs, catalog_ids = None, []
-    recs = recommendations(m, reqs, agents, configs=configs, catalog_ids=catalog_ids)
+    sizing_eval = sizing.evaluate(snap)
+    recs = recommendations(m, reqs, agents, configs=configs, catalog_ids=catalog_ids,
+                           sizing_eval=sizing_eval)
     render_fix(recs, m, args.json)
     actionable = any(ch["from"] != ch["to"] for g in recs for ch in g["changes"])
     return 1 if actionable else 0
