@@ -1,7 +1,7 @@
 """Shared swamp fixtures for luna-doctor tests (task-1).
 
 Creates a minimal fake swamp repo on disk without touching $HOME or real
-~/.swamp. Downstream tasks reuse these helpers for analyze/fix/probe tests.
+~/.swamp. Downstream tasks reuse these helpers for analyze/fix/load-test tests.
 
 Layout created by make_swamp_repo:
   <repo>/.swamp.yaml              — marker so scan can find it

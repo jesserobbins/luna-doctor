@@ -250,5 +250,27 @@ class AsciiFold(unittest.TestCase):
         self.assertEqual(ascii_fold("\U0001f680"), "?")    # emoji: no entry either
 
 
+class ChartSceneRaster(unittest.TestCase):
+    """The chart's own scene rasterises through png_from like any scene.
+
+    `luna-doctor chart` and the bare default run write that raster as the
+    inline image, so it carries the same guarantees the pure renderer tests
+    pin: signature, dimensions from the scene, one IDAT, and real ink - an
+    empty window still draws its axes and its honest footer."""
+
+    def test_an_empty_chart_scene_rasterises_to_a_valid_png(self):
+        from luna_doctor import cli
+        m = cli.analyse([], 1.0)
+        scene = cli.build_chart_scene([], m, 1.0)
+        data = png_from(scene)
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        w, h = struct.unpack(">II", data[16:24])
+        self.assertEqual((w, h), (int(scene.width), int(scene.height)))
+        self.assertEqual(data.count(b"IDAT"), 1)
+        rows = _pixels(data, w, h)
+        self.assertGreater(_dark_count(rows), 0,
+                           "the empty-window footer must leave ink in the raster")
+
+
 if __name__ == "__main__":
     unittest.main()

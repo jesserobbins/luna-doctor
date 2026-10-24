@@ -4,8 +4,8 @@ Stdlib only, no fixtures to maintain. Run from the repo root:
 
     python3 -m unittest discover -s tests -v
 
-The suite never calls `probe`/`compare`, which burn concurrent sessions on the
-gateway, and every CLI run
+The suite never opens live sessions on the gateway (the load-test commands
+stay behind their --load-test-enable gate), and every CLI run
 points `LUNA_DOCTOR_STORE` at a throwaway directory: nothing here writes to your
 real store or to a log store.
 """
@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ import time
 import datetime
 import unittest
 import xml.etree.ElementTree as ET
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "bin", "luna-doctor")
@@ -31,10 +33,28 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")  # semver, prereleas
 # ~/.luna-doctor/store is the user's repeat history, not a test artifact.
 _TEST_STORE = tempfile.mkdtemp(prefix="luna-doctor-tests-")
 
+# Same contract for the capacity cache: no run in this suite reads the real
+# ~/.luna-doctor/capacity.json; a test that wants a payload passes one and
+# gets a throwaway cache file. The fetch layer itself is tested in-process
+# (mocked) in test_sources - no CLI run here may touch the network.
+_TEST_CAPACITY = os.path.join(_TEST_STORE, "absent-capacity.json")
 
-def run(*args, timeout=180, store=None):
+
+def _capacity_cache_doc(payload, fetched_at):
+    return {"fetched_at": fetched_at, "fetched_at_iso": "",
+            "url": "https://api.lunaroute.com/v1/capacity", "response": payload}
+
+
+def run(*args, timeout=180, store=None, capacity=None):
     env = dict(os.environ)
     env["LUNA_DOCTOR_STORE"] = store or _TEST_STORE
+    if capacity is None:
+        env["LUNA_DOCTOR_CAPACITY"] = _TEST_CAPACITY
+    else:
+        d = tempfile.mkdtemp(prefix="luna-doctor-capacity-")
+        env["LUNA_DOCTOR_CAPACITY"] = os.path.join(d, "capacity.json")
+        with open(env["LUNA_DOCTOR_CAPACITY"], "w") as fh:
+            json.dump(_capacity_cache_doc(capacity, time.time()), fh)
     proc = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True,
                           timeout=timeout, cwd=ROOT, env=env)
     return proc.returncode, proc.stdout, proc.stderr
@@ -125,8 +145,8 @@ class ExitCodes(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("unknown agent", err)
 
-    def test_probe_rejects_zero_width(self):
-        code, _, err = run("probe", "--n", "0")
+    def test_load_test_rejects_zero_width(self):
+        code, _, err = run("load-test", "--n", "0")
         self.assertEqual(code, 2)
         self.assertIn("--n must be at least 1", err)
 
@@ -135,23 +155,47 @@ class ExitCodes(unittest.TestCase):
         self.assertEqual(code, 2)
 
 
-class ProbeGate(unittest.TestCase):
-    def test_probe_without_the_flag_refuses_and_names_the_width(self):
-        code, out, err = run("probe", "--n", "8")
+class LoadTestGate(unittest.TestCase):
+    """The burst commands are a load test against the live gateway, so they
+    stay behind an explicit opt-in. Without the flag they refuse, say
+    exactly what they would open and what it costs, and exit 2."""
+
+    def test_load_test_without_the_flag_refuses_and_names_the_width(self):
+        code, out, err = run("load-test", "--n", "8")
         self.assertEqual(code, 2)
-        self.assertIn("--enable-probe", err)
+        self.assertIn("--load-test-enable", err)
         self.assertIn("8 concurrent sessions", err)
         self.assertEqual(out, "")
 
     def test_compare_without_the_flag_refuses(self):
         code, _, err = run("compare", "--n", "4")
         self.assertEqual(code, 2)
-        self.assertIn("--enable-probe", err)
+        self.assertIn("--load-test-enable", err)
+
+    def test_the_refusal_is_honest_about_what_it_opens(self):
+        code, _, err = run("load-test", "--n", "8")
+        self.assertEqual(code, 2)
+        # the message must say what the run really is, not soften it
+        self.assertIn("load test against the live gateway", err)
+        self.assertIn("spending included inference", err)
+        self.assertIn("opt-in only", err)
+        self.assertIn("glm-5.3", err)
 
     def test_message_says_concurrency_not_credits(self):
-        code, _, err = run("probe", "--n", "8")
-        for forbidden in ("credit", "token", "cost", "spend"):
+        code, _, err = run("load-test", "--n", "8")
+        # billing/quota framing stays out; "spending included inference" is
+        # the owner's own honesty line and is asserted above
+        for forbidden in ("credit", "token", "cost"):
             self.assertNotIn(forbidden, err.lower())
+
+    def test_help_lists_it_plainly_but_the_docs_do_not_advertise_it(self):
+        # `--help` is the one place the command stays visible (argparse
+        # cannot hide a subcommand cleanly); the README and the skill are
+        # the surfaces that went quiet
+        code, out, err = run("--help")
+        self.assertEqual(code, 0)
+        self.assertIn("load-test", out)
+        self.assertNotIn("probe", out, "the retired name is gone everywhere")
 
 
 class Chart(unittest.TestCase):
@@ -254,6 +298,191 @@ def _chart_store(tmp, n):
     os.makedirs(proj, exist_ok=True)
     with open(os.path.join(proj, "2026-08-13T06-41-17-867Z_abc.jsonl"), "w") as fh:
         fh.write("\n".join(lines) + "\n")
+
+
+def _recent_store(home, n=6):
+    """A pi store of n clean completed requests, all inside the last hour,
+    for the bare default run's 1h window. Unlike _chart_store's 23h spread,
+    every request lands strictly inside the window on any day the test
+    runs, so the default run's report is deterministic: no pressure, and
+    the analysis verdict is 0."""
+    now = time.time()
+    lines = []
+    for i in range(n):
+        start = now - 3000 + i * 120          # 50 minutes back, 2-minute steps
+        end = start + 60
+        ts = datetime.datetime.fromtimestamp(end, datetime.timezone.utc)
+        stamp = ts.strftime("%Y-%m-%dT%H:%M:%S") + ".%03dZ" % (ts.microsecond // 1000)
+        rec = {
+            "type": "message",
+            "id": "id-%06d" % i,
+            "timestamp": stamp,
+            "message": {
+                "role": "assistant",
+                "model": "glm-5.3",
+                "provider": "lunaroute",
+                "timestamp": int(start * 1000),
+                "usage": {"input": 10, "output": 100},
+                "stopReason": "stop",
+                "errorMessage": None,
+                "content": [{"type": "text", "text": "x"}],
+                "responseId": "r-%06d" % i,
+            },
+        }
+        lines.append(json.dumps(rec))
+    proj = os.path.join(home, ".pi", "agent", "sessions", "proj", "--bare--")
+    os.makedirs(proj, exist_ok=True)
+    with open(os.path.join(proj, "2026-08-13T06-41-17-867Z_abc.jsonl"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def _bare_run(home, work, capacity=None, timeout=180):
+    """Run bare `luna-doctor` the way a first-time user does: no arguments,
+    a $HOME that holds only the fixture store (so the default roots read
+    the fixture, never this machine's real logs), and a working directory
+    the chart files must land in."""
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["LUNA_DOCTOR_STORE"] = os.path.join(home, "store")
+    if capacity is None:
+        env["LUNA_DOCTOR_CAPACITY"] = _TEST_CAPACITY
+    else:
+        d = tempfile.mkdtemp(prefix="luna-doctor-capacity-")
+        env["LUNA_DOCTOR_CAPACITY"] = os.path.join(d, "capacity.json")
+        with open(env["LUNA_DOCTOR_CAPACITY"], "w") as fh:
+            json.dump(_capacity_cache_doc(capacity, time.time()), fh)
+    proc = subprocess.run([sys.executable, CLI], capture_output=True, text=True,
+                          timeout=timeout, cwd=work, env=env)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+class ChartPng(unittest.TestCase):
+    """The chart writes a PNG beside the SVG by default: the same scene
+    rasterised by the package's own renderer, taking the same stem as
+    --out, suppressed by --no-image, and named in the console summary
+    and the --json envelope."""
+
+    def test_the_png_is_written_beside_the_svg_and_named_in_the_summary(self):
+        with tempfile.TemporaryDirectory() as d:
+            _chart_store(d, 30)
+            out = os.path.join(d, "chart.svg")
+            code, stdout, err = run("chart", "--since", "24h", "--out", out,
+                                   "--pi-root", d, "--harness", "pi")
+            self.assertEqual(code, 0, err)
+            png = os.path.join(d, "chart.png")
+            self.assertTrue(os.path.exists(png),
+                            "the inline image must land beside the SVG")
+            self.assertIn(os.path.abspath(out), stdout)
+            self.assertIn(os.path.abspath(png), stdout,
+                          "the summary names both paths")
+            self.assertIn("the inline image", stdout)
+            with open(png, "rb") as fh:
+                data = fh.read()
+            self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertGreater(len(data), 0)
+            w, h = struct.unpack(">II", data[16:24])
+            # the raster honours the requested canvas; the footer may extend
+            # it downward, so the width is the contract and 640 is the floor
+            self.assertEqual(w, 1120)
+            self.assertGreaterEqual(h, 640)
+
+    def test_no_image_suppresses_the_png(self):
+        with tempfile.TemporaryDirectory() as d:
+            _chart_store(d, 30)
+            out = os.path.join(d, "chart.svg")
+            code, stdout, err = run("chart", "--since", "24h", "--out", out,
+                                    "--no-image", "--pi-root", d, "--harness", "pi")
+            self.assertEqual(code, 0, err)
+            self.assertTrue(os.path.exists(out))
+            self.assertFalse(os.path.exists(os.path.join(d, "chart.png")))
+            self.assertNotIn("inline image", stdout)
+
+    def test_the_json_envelope_names_the_png(self):
+        with tempfile.TemporaryDirectory() as d:
+            _chart_store(d, 30)
+            out = os.path.join(d, "chart.svg")
+            code, stdout, err = run("chart", "--since", "24h", "--out", out, "--json",
+                                   "--pi-root", d, "--harness", "pi")
+            self.assertEqual(code, 0, err)
+            doc = json.loads(stdout)
+            self.assertEqual(doc["png_path"], os.path.join(d, "chart.png"))
+            self.assertGreater(doc["png_bytes"], 0)
+            self.assertTrue(os.path.exists(doc["png_path"]))
+
+
+class DefaultRun(unittest.TestCase):
+    """Bare `luna-doctor`: the friendly default run. The account line from
+    the capacity cache leads, the welcome mat explains, the one-hour
+    analysis prints with the chart (SVG and PNG) beside it, and the exit
+    code is the analysis verdict."""
+
+    def test_the_cached_account_line_leads_and_the_run_is_complete(self):
+        home = tempfile.mkdtemp(prefix="luna-doctor-home-")
+        work = tempfile.mkdtemp(prefix="luna-doctor-run-")
+        _recent_store(home)
+        code, out, err = _bare_run(home, work, capacity=_capacity_payload())
+        self.assertEqual(code, 0, err)
+        # the account line is the first thing printed
+        first = out.splitlines()[0]
+        self.assertEqual(
+            first,
+            "LunaRoute account: apex plan \u00b7 12 priority concurrent "
+            "requests \u00b7 12 background \u00b7 overflow enabled")
+        # the welcome mat: what LunaRoute is, what this run did, the commands.
+        # The welcome wraps at ~78 columns, so the wording is asserted on
+        # whitespace-normalised text - the sentence, not the line breaks.
+        flat = " ".join(out.split())
+        self.assertIn("gateway in front of your models", flat)
+        self.assertIn("nothing was sent anywhere", flat)
+        for word in ("analyze", "chart", "fix", "capacity"):
+            self.assertIn(word, out)
+        self.assertNotIn("load-test", out,
+                          "the welcome mat does not advertise the load test")
+        # the analysis summary: the one-hour report's own stable rows
+        self.assertIn("window: last 1h", out)
+        self.assertIn("requests: 6", out)
+        # the chart beside it: both files land in the working directory,
+        # and the summary names both paths
+        svgs = [f for f in os.listdir(work) if f.endswith(".svg")]
+        pngs = [f for f in os.listdir(work) if f.endswith(".png")]
+        self.assertEqual(len(svgs), 1, "the chart SVG must be written once")
+        self.assertEqual(len(pngs), 1, "the inline image must be written once")
+        with open(os.path.join(work, pngs[0]), "rb") as fh:
+            data = fh.read()
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertGreater(len(data), 0)
+        self.assertIn("the inline image", out)
+        # the chart drew the account's rule, not a declaration
+        self.assertIn("priority concurrency 12 (account, plan apex): rule drawn", out)
+
+    def test_a_cold_cache_degrades_the_account_line_and_never_blocks(self):
+        home = tempfile.mkdtemp(prefix="luna-doctor-home-")
+        work = tempfile.mkdtemp(prefix="luna-doctor-run-")
+        _recent_store(home)
+        code, out, err = _bare_run(home, work)      # no capacity cache at all
+        self.assertEqual(code, 0, err)
+        first = out.splitlines()[0]
+        self.assertEqual(first, "account: unknown (fetch with: luna-doctor capacity)")
+        # the run went on: analysis and both chart files are still there
+        self.assertIn("window: last 1h", out)
+        self.assertTrue(any(f.endswith(".svg") for f in os.listdir(work)))
+        self.assertTrue(any(f.endswith(".png") for f in os.listdir(work)))
+
+    def test_the_exit_code_is_the_analysis_verdict(self):
+        home = tempfile.mkdtemp(prefix="luna-doctor-home-")
+        work = tempfile.mkdtemp(prefix="luna-doctor-run-")
+        _recent_store(home)
+        # the same fixture through `analyze --since 1h`: the bare run must
+        # answer with analyze's own verdict, not one of its own making
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["LUNA_DOCTOR_STORE"] = os.path.join(home, "store")
+        env["LUNA_DOCTOR_CAPACITY"] = _TEST_CAPACITY
+        proc = subprocess.run([sys.executable, CLI, "analyze", "--since", "1h"],
+                              capture_output=True, text=True, timeout=180,
+                              cwd=work, env=env)
+        bare_code, _, _ = _bare_run(home, work)
+        self.assertEqual(bare_code, proc.returncode)
 
 
 class ChartSweep(unittest.TestCase):
@@ -505,6 +734,456 @@ class ChartSingleStack(unittest.TestCase):
         self.assertIn("no timed requests in this window", svg)
         self.assertIn("nothing was measured", svg)
         self.assertIn("no agent had a timed request in this window", svg)
+
+
+# ---- the capacity payload fixtures -------------------------------------------
+# The canned live payload was captured once (2026-10-23, the one live GET the
+# build was allowed) and lives in tests/fixtures/. Its admission days are
+# frozen, so tests whose window must overlap them build a same-shaped payload
+# with days placed relative to real now.
+
+def _capacity_payload():
+    """The captured live payload verbatim: plan apex, 12/12 concurrency,
+    overflow enabled, Oct 20 denied_after_wait 16, null avg_queue_wait_ms on
+    the days nobody waited."""
+    with open(os.path.join(ROOT, "tests", "fixtures",
+                          "capacity-2026-10-23.json")) as fh:
+        return json.load(fh)
+
+
+def _shifted_capacity_payload(now=None):
+    """The live payload's shape with admission days placed on the last seven
+    complete UTC days relative to real now, so a --since window run on any
+    future date still overlaps them. One day carries denied_after_wait 16
+    with a real avg_queue_wait_ms; the rest are null-wait days."""
+    now = now if now is not None else time.time()
+    today = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date()
+
+    def entry(days_back, daw=0, avg=None):
+        return {"accepted": 4570, "avg_queue_wait_ms": avg,
+                "day": (today - datetime.timedelta(days=days_back)).isoformat(),
+                "deferred": 12, "denied": 0, "denied_after_wait": daw}
+
+    last7 = [entry(7 - i) for i in range(7)]      # 7 days back .. yesterday
+    last7[3]["denied_after_wait"] = 16            # four days back corroborates
+    last7[3]["avg_queue_wait_ms"] = 144544.82
+    as_of = last7[-1]["day"]
+    return {
+        "success": True,
+        "generated_at": "2026-10-24T00:05:14.458609995Z",
+        "data": {
+            "now": {"available": 12, "in_use": 0, "ledger": "up", "limit": 12,
+                    "sampled_at": "2026-10-24T00:05:14.510815919Z",
+                    "saturated": False},
+            "config": {"background_lanes": 12, "overflow_routing": "enabled",
+                       "plan": "apex", "priority_lanes": 12},
+            "history": {"as_of": as_of,
+                        "last_7d": {"avg_lanes": 0.465, "days_active": 5,
+                                    "days_covered": 6, "lane_hours": 55.896,
+                                    "p95_lanes": 14, "peak_lanes": 18,
+                                    "queued_pct": 0.08},
+                        "last_30d": None,
+                        "rollup_computed_at": "2026-10-23T15:19:01.958669Z",
+                        "tail": {"calculated_at": "2026-10-24T00:05:14.528567203Z",
+                                 "through": "2026-10-24T00:05:14.458609Z"}},
+            "admission": {"as_of": as_of, "last_7d": last7, "last_30d": last7},
+        },
+    }
+
+
+def _svg_text(svg):
+    """Every text run in an SVG joined with spaces. The chart's footer wraps
+    to the canvas width, so a sentence can be split across rows; joined, the
+    wording is assertable without depending on where the wrap falls."""
+    return " ".join(re.findall(r"<text[^>]*>([^<]*)</text>", svg))
+
+
+class ChartAccountRule(unittest.TestCase):
+    """The chart's priority rule resolves from the account when it can:
+    the capacity API is the first authority, so a cached payload draws the
+    rule labelled account and a conflicting --plan declaration is ignored
+    with a note; a payload that reports no number falls back to --plan;
+    neither source established means no rule with the reason said."""
+
+    def _chart(self, tmp, *extra, **kw):
+        _chart_store(tmp, 60)
+        out = os.path.join(tmp, "chart.svg")
+        code, stdout, err = run("chart", "--since", "24h", "--out", out,
+                                "--pi-root", tmp, "--harness", "pi", *extra, **kw)
+        self.assertEqual(code, 0, err)
+        with open(out) as fh:
+            return stdout, fh.read()
+
+    def test_a_cached_account_payload_draws_the_rule_labelled_account(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout, svg = self._chart(tmp, capacity=_capacity_payload())
+            self.assertIn("priority concurrency 12 (account, plan apex)", svg)
+            self.assertIn("fetched from api.lunaroute.com, served from disk cache", svg)
+            self.assertIn("priority concurrency 12 (account, plan apex): rule drawn",
+                          stdout)
+            self.assertNotIn("--plan", stdout,
+                             "the rule is the account's, not a declaration")
+
+    def test_the_chart_json_carries_the_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _chart_store(tmp, 60)
+            out = os.path.join(tmp, "chart.svg")
+            code, stdout, err = run("chart", "--since", "24h", "--out", out, "--json",
+                                   "--pi-root", tmp, "--harness", "pi",
+                                   capacity=_capacity_payload())
+            self.assertEqual(code, 0, err)
+            doc = json.loads(stdout)
+            self.assertEqual(doc["schema"], 4)
+            self.assertEqual(doc["plan"]["source"], "account")
+            self.assertEqual(doc["plan"]["priority"], 12)
+            self.assertEqual(doc["plan"]["account_plan"], "apex")
+            self.assertTrue(doc["plan"]["account_present"])
+            self.assertEqual(doc["plan"]["account_priority"], 12)
+
+    def test_the_account_wins_over_a_declaration_and_notes_it(self):
+        """Capacity API first: a --plan that disagrees with the account's
+        number is ignored, and both the picture and the console say so."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout, svg = self._chart(tmp, "--plan", "25", capacity=_capacity_payload())
+            self.assertIn("priority concurrency 12 (account, plan apex)", svg)
+            joined = _svg_text(svg)
+            self.assertIn("your --plan 25 declaration was ignored", joined)
+            self.assertIn("the account reports priority concurrency 12", joined)
+            self.assertIn("priority concurrency 12 (account, plan apex): rule drawn",
+                          stdout)
+            self.assertIn("the --plan 25 declaration was ignored", stdout)
+
+    def test_the_account_wins_in_the_json_envelope_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _chart_store(tmp, 60)
+            out = os.path.join(tmp, "chart.svg")
+            code, stdout, err = run("chart", "--since", "24h", "--out", out, "--json",
+                                   "--pi-root", tmp, "--harness", "pi",
+                                   "--plan", "25", capacity=_capacity_payload())
+            self.assertEqual(code, 0, err)
+            doc = json.loads(stdout)
+            self.assertEqual(doc["plan"]["source"], "account")
+            self.assertEqual(doc["plan"]["priority"], 12)
+            self.assertEqual(doc["plan"]["declared"], "25")
+            self.assertTrue(doc["plan"]["declared_ignored"],
+                            "the set-aside declaration must be visible in the envelope")
+            self.assertEqual(doc["plan"]["account_priority"], 12)
+
+    def test_a_payload_without_a_number_falls_back_to_the_declaration(self):
+        payload = _capacity_payload()
+        payload["data"]["config"] = None       # the documented degraded shape
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout, svg = self._chart(tmp, "--plan", "25", capacity=payload)
+            self.assertIn("priority concurrency (--plan 25)", svg)
+            self.assertIn("so the declaration stands", _svg_text(svg))
+            self.assertIn("declared via --plan 25", stdout)
+
+    def test_a_stale_payload_draws_the_rule_and_says_so(self):
+        """Never draw a rule from a stale payload without saying so."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _chart_store(tmp, 60)
+            out = os.path.join(tmp, "chart.svg")
+            stale_path = os.path.join(tempfile.mkdtemp(prefix="luna-doctor-capacity-"),
+                                      "capacity.json")
+            with open(stale_path, "w") as fh:
+                json.dump(_capacity_cache_doc(_capacity_payload(),
+                                              time.time() - 3600), fh)
+            env = dict(os.environ)
+            env["LUNA_DOCTOR_STORE"] = _TEST_STORE
+            env["LUNA_DOCTOR_CAPACITY"] = stale_path
+            proc = subprocess.run([sys.executable, CLI, "chart", "--since", "24h",
+                                  "--out", out, "--pi-root", tmp, "--harness", "pi"],
+                                 capture_output=True, text=True, timeout=180,
+                                 cwd=ROOT, env=env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            with open(out) as fh:
+                svg = fh.read()
+            self.assertIn("priority concurrency 12 (account, plan apex) \u00b7 stale cache", svg)
+            self.assertIn("the cache is stale, so the rule may be out of date",
+                          _svg_text(svg))
+            self.assertIn("stale cache", proc.stdout)
+
+    def test_a_payload_without_a_number_draws_no_rule(self):
+        payload = _capacity_payload()
+        payload["data"]["config"] = None       # the documented degraded shape
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout, svg = self._chart(tmp, capacity=payload)
+            self.assertNotIn("priority concurrency (", svg)
+            self.assertIn("no priority concurrency rule drawn", svg)
+            self.assertIn("cached but reports no priority concurrency", svg)
+            self.assertIn("the cached capacity payload reports none", stdout)
+
+    def test_no_payload_no_plan_still_says_why_and_points_at_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout, svg = self._chart(tmp)
+            self.assertNotIn("priority concurrency (", svg)
+            self.assertIn("no priority concurrency rule drawn", svg)
+            self.assertIn("specific to the account", svg)
+            self.assertIn("luna-doctor capacity", svg)
+
+
+class AnalyzeCapacity(unittest.TestCase):
+    """metrics.capacity is additive (schema stays 4): the account's plan and
+    concurrency, the server's admission counts for the window's complete
+    UTC days placed next to the local outcome counts - corroborating, never
+    merging - and the server counts' exclusions stated wherever they sit
+    beside local ones, because the local logs see BYOK and embedding traffic
+    the server never counts."""
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _cache_env(self, payload):
+        d = tempfile.mkdtemp(prefix="luna-doctor-capacity-")
+        path = os.path.join(d, "capacity.json")
+        with open(path, "w") as fh:
+            json.dump(_capacity_cache_doc(payload, time.time()), fh)
+        return {"LUNA_DOCTOR_CAPACITY": path}
+
+    def _block(self, payload, since, until, outcomes):
+        with mock.patch.dict(os.environ, self._cache_env(payload)):
+            return self.m._capacity_metrics(since, until, {"by_outcome": outcomes})
+
+    def test_a_window_overlapping_the_admission_days_joins_verbatim(self):
+        base = datetime.datetime(2026, 10, 18, 12, 0,
+                                 tzinfo=datetime.timezone.utc).timestamp()
+        block = self._block(_capacity_payload(), base, base + 3 * 86400,
+                            {"completed": 5, "admission_timeout": 1})
+        self.assertEqual(block["provenance"], "account")
+        self.assertEqual(block["plan"], "apex")
+        self.assertEqual(block["priority_lanes"], 12)
+        self.assertEqual(block["background_lanes"], 12)
+        self.assertEqual(block["overflow_routing"], "enabled")
+        self.assertEqual(block["admission_as_of"], "2026-10-23")
+        self.assertEqual([d["day"] for d in block["window_days"]],
+                         ["2026-10-18", "2026-10-19", "2026-10-20", "2026-10-21"])
+        oct20 = block["window_days"][2]
+        self.assertEqual(oct20["denied_after_wait"], 16)
+        self.assertEqual(oct20["avg_queue_wait_ms"], 144544.82)
+        self.assertIsNone(block["window_days"][3]["avg_queue_wait_ms"])
+        self.assertEqual(block["local_outcomes"],
+                         {"completed": 5, "admission_timeout": 1})
+        self.assertIn("BYOK", block["counts_exclude"])
+        self.assertIn("embeddings", block["counts_exclude"])
+
+    def test_a_window_outside_the_api_days_carries_no_day_counts(self):
+        base = datetime.datetime(2024, 5, 1, 12, 0,
+                                 tzinfo=datetime.timezone.utc).timestamp()
+        block = self._block(_capacity_payload(), base, base + 3600, {})
+        self.assertEqual(block["provenance"], "account")
+        self.assertNotIn("window_days", block)
+        self.assertNotIn("counts_exclude", block,
+                         "no server counts sit beside local ones without overlap")
+
+    def test_no_cache_is_unknown_with_its_reason(self):
+        with mock.patch.dict(os.environ, {"LUNA_DOCTOR_CAPACITY": "/no/such/capacity.json"}):
+            block = self.m._capacity_metrics(time.time() - 3600, time.time(), {})
+        self.assertEqual(block["provenance"], "unknown")
+        self.assertIn("no cached capacity", block["reason"])
+
+    def _metrics_with_capacity(self, window_days):
+        base = time.time() - 600
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 30, outcome="completed")]
+        m = self.m.analyse(reqs, 7 * 24)
+        m["capacity"] = {"provenance": "account", "source": "GET capacity", "stale": False,
+                          "note": "served from cache", "plan": "apex",
+                          "priority_lanes": 12, "background_lanes": 12,
+                          "overflow_routing": "enabled",
+                          "window_days": window_days,
+                          "local_outcomes": dict(m["by_outcome"]),
+                          "counts_exclude": self.m.CAPACITY_COUNTS_EXCLUDE}
+        return m
+
+    def test_denied_after_wait_corroborates_the_park_deadline_class(self):
+        days = [{"accepted": 4570, "avg_queue_wait_ms": 144544.82, "day": "2026-10-20",
+                 "deferred": 12, "denied": 0, "denied_after_wait": 16}]
+        head, adj, code = self.m.verdict(self._metrics_with_capacity(days))
+        text = "\n".join(adj)
+        self.assertIn("local peak 1 concurrent request(s) (a lower bound", text)
+        self.assertIn("account limit 12 priority", text)
+        self.assertIn("confirms 16 request(s) were parked and then refused "
+                      "after waiting (denied_after_wait) on 2026-10-20 UTC", text)
+        self.assertIn("Cross-check, not a merge", text)
+        self.assertIn("BYOK", text)
+
+    def test_clean_days_state_the_exclusions_without_corroborating(self):
+        days = [{"accepted": 4570, "avg_queue_wait_ms": None, "day": "2026-10-21",
+                 "deferred": 0, "denied": 0, "denied_after_wait": 0}]
+        head, adj, code = self.m.verdict(self._metrics_with_capacity(days))
+        text = "\n".join(adj)
+        self.assertNotIn("denied_after_wait) on", text,
+                         "nothing corroborates when the server counted none")
+        self.assertIn("account limit 12 priority", text)
+        self.assertIn("server counts cover only traffic contending for the shared pool", text)
+
+    def test_capacity_unknown_adds_no_adjustments(self):
+        base = time.time() - 600
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 30, outcome="completed")]
+        m = self.m.analyse(reqs, 1.0)
+        m["capacity"] = {"provenance": "unknown", "reason": "no cached capacity"}
+        head, adj, code = self.m.verdict(m)
+        text = "\n".join(adj)
+        self.assertNotIn("account limit", text)
+        self.assertNotIn("BYOK", text)
+
+    def test_a_byok_and_embedding_window_renders_the_exclusion_line(self):
+        """The local logs see BYOK and embedding requests the server's counts
+        exclude; the report must say so wherever the two sit beside each
+        other - and the server's denied_after_wait must corroborate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            now = time.time()
+            lines = []
+            traffic = [("glm-5.3", "lunaroute"), ("glm-5.3", "lunaroute"),
+                       ("glm-5.3-background", "lunaroute"),
+                       ("gpt-5.3", "openai"),                 # BYOK: own key
+                       ("text-embedding-3-large", "openai")]  # embeddings
+            for i, (model, provider) in enumerate(traffic):
+                end = now - i * 120
+                start = end - 30
+                ts = datetime.datetime.fromtimestamp(end, datetime.timezone.utc)
+                stamp = (ts.strftime("%Y-%m-%dT%H:%M:%S")
+                         + ".%03dZ" % (ts.microsecond // 1000))
+                lines.append(json.dumps({
+                    "type": "message", "id": "id-%d" % i, "timestamp": stamp,
+                    "message": {"role": "assistant", "model": model,
+                                "provider": provider,
+                                "timestamp": int(start * 1000),
+                                "usage": {"input": 10, "output": 100},
+                                "stopReason": "stop", "errorMessage": None,
+                                "content": [{"type": "text", "text": "x"}],
+                                "responseId": "r-%d" % i}}))
+            proj = os.path.join(tmp, "proj", "--cap--")
+            os.makedirs(proj, exist_ok=True)
+            with open(os.path.join(proj, "2026-10-23T06-41-17-867Z_abc.jsonl"), "w") as fh:
+                fh.write("\n".join(lines) + "\n")
+            code, out, err = run("analyze", "--since", "7d", "--pi-root", tmp,
+                                 "--harness", "pi", "--no-store",
+                                 capacity=_shifted_capacity_payload())
+            self.assertIn(code, (0, 1), err)
+            self.assertIn("server counts cover only traffic contending for the "
+                          "shared pool", out)
+            self.assertIn("BYOK", out)
+            self.assertIn("denied_after_wait", out)
+            self.assertIn("account limit 12 priority", out)
+            self.assertIn("5 requests", out)   # the local window sees all five
+
+
+class CapacityCommand(unittest.TestCase):
+    """`capacity` renders the API's own story from the canned live payload:
+    now/config/history/admission, unknown-never-zero for every degraded
+    shape, the envelope on --json, and unknown (never an error) with nothing
+    established."""
+
+    def test_renders_the_canned_live_payload(self):
+        code, out, err = run("capacity", capacity=_capacity_payload())
+        self.assertEqual(code, 0, err)
+        self.assertIn("account capacity: plan apex \u00b7 priority concurrency 12", out)
+        self.assertIn("in use 0 of 12 priority concurrent requests", out)
+        self.assertIn("ledger: up", out)
+        self.assertIn("plan: apex", out)
+        self.assertIn("priority concurrency: 12", out)
+        self.assertIn("background: 12 concurrent requests", out)
+        self.assertIn("eligible managed text-generation requests only", out)
+        self.assertIn("5 day(s) with traffic", out)
+        self.assertIn("6 day(s) with data", out)
+        self.assertIn("minute-level occupancy through", out)
+        self.assertIn("2026-10-20: accepted 4570 \u00b7 deferred 12 \u00b7 denied 0 "
+                      "\u00b7 denied after wait 16 \u00b7 avg queue wait 144.5s", out)
+        self.assertIn("no waiting that day", out)
+        self.assertIn("one entry per complete UTC day, through 2026-10-23 (as_of)", out)
+        self.assertIn("server counts cover only traffic contending for the shared pool", out)
+        self.assertIn("served from cache", out)
+
+    def test_json_envelope(self):
+        code, out, err = run("capacity", "--json", capacity=_capacity_payload())
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        self.assertEqual(doc["schema"], 4)
+        self.assertEqual(doc["command"], "capacity")
+        self.assertIn("contract", doc)
+        cap = doc["capacity"]
+        self.assertEqual(cap["provenance"], "account")
+        self.assertEqual(cap["served_from"], "cache")
+        self.assertFalse(cap["stale"])
+        self.assertEqual(cap["config"]["priority_lanes"], 12)
+        self.assertEqual(cap["now"]["ledger"], "up")
+        self.assertEqual(cap["admission"]["as_of"], "2026-10-23")
+        self.assertEqual(len(cap["admission"]["last_7d"]), 7)
+        self.assertEqual(len(cap["admission"]["last_30d"]), 30)
+        self.assertEqual(cap["history"]["last_7d"]["peak_lanes"], 18)
+        # the null contract survives the envelope: a null wait day stays null
+        waits = [d["avg_queue_wait_ms"] for d in cap["admission"]["last_7d"]]
+        self.assertIn(None, waits)
+
+    def test_nothing_established_is_unknown_not_an_error(self):
+        code, out, err = run("capacity")
+        self.assertEqual(code, 2, "no data, the tool's convention - not an error")
+        self.assertIn("account capacity: unknown", out)
+        self.assertIn("no cached capacity", out)
+        self.assertIn("pass --online to fetch it now", out)
+        self.assertNotIn("Traceback", err)
+
+    def test_a_stale_cache_serves_and_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "capacity.json")
+            with open(path, "w") as fh:
+                json.dump(_capacity_cache_doc(_capacity_payload(),
+                                              time.time() - 3600), fh)
+            env = dict(os.environ)
+            env["LUNA_DOCTOR_STORE"] = _TEST_STORE
+            env["LUNA_DOCTOR_CAPACITY"] = path
+            proc = subprocess.run([sys.executable, CLI, "capacity"],
+                                  capture_output=True, text=True, timeout=180,
+                                  cwd=ROOT, env=env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("served stale", proc.stdout)
+            self.assertIn("past its 5-minute TTL", proc.stdout)
+
+    def test_degraded_nulls_render_unknown_never_zero(self):
+        payload = {
+            "success": True, "generated_at": "2026-10-24T00:05:14.458609995Z",
+            "data": {
+                "now": {"limit": None, "in_use": None, "available": None,
+                        "saturated": None, "ledger": "unknown", "sampled_at": None},
+                "config": None,
+                "history": {"as_of": "2026-10-22", "last_7d": None,
+                            "last_30d": None, "rollup_computed_at": None,
+                            "tail": None},
+                "admission": {"as_of": "2026-10-23",
+                              "last_7d": [{"accepted": 10,
+                                           "avg_queue_wait_ms": None,
+                                           "day": "2026-10-22", "deferred": 0,
+                                           "denied": 0, "denied_after_wait": 0}],
+                              "last_30d": None},
+            },
+        }
+        code, out, err = run("capacity", capacity=payload)
+        self.assertEqual(code, 0, err)
+        self.assertIn("plan: unknown (not reported)", out)
+        self.assertIn("priority concurrency: unknown (not reported)", out)
+        self.assertIn("background: unknown (not reported)", out)
+        self.assertIn("overflow routing: unknown (not reported)", out)
+        self.assertIn("occupancy unknown (not reported)", out)
+        self.assertIn("saturated: unknown (not reported)", out)
+        self.assertIn("ledger: unknown", out)
+        self.assertIn("not reported (null) - days_covered already excludes it", out)
+        self.assertIn("not reported by the account (unknown)", out)
+        self.assertIn("avg queue wait no waiting that day", out)
+        self.assertNotIn("priority concurrency: 0", out)
+        self.assertNotIn("in use 0 of", out)
+
+    def test_zero_background_concurrency_is_a_real_value(self):
+        payload = _shifted_capacity_payload()
+        payload["data"]["config"] = {"plan": "pro", "priority_lanes": 2,
+                                     "background_lanes": 0,
+                                     "overflow_routing": "disabled"}
+        code, out, err = run("capacity", capacity=payload)
+        self.assertEqual(code, 0, err)
+        self.assertIn("0 concurrent requests (the account is entitled to no overflow)", out)
+        self.assertIn("overflow routing: disabled", out)
+        self.assertNotIn("background: unknown", out)
 
 
 class InstallShape(unittest.TestCase):
@@ -2365,11 +3044,11 @@ class DemotionReason(unittest.TestCase):
         self.assertIn("priority concurrency", note)
         self.assertIn("no background entitlement", note)
 
-    def test_demotion_note_hedges_when_no_probe_has_spoken(self):
+    def test_demotion_note_hedges_when_no_load_test_has_spoken(self):
         m = _load_cli()
         note = m.demotion_note("", "glm-5.3-background")
         self.assertIn("may be running on priority concurrency", note)
-        self.assertIn("only a probe can see", note.lower())
+        self.assertIn("only a load test can see", note.lower())
 
 
 class SaturatedVocabulary(unittest.TestCase):

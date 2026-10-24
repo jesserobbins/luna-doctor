@@ -3,8 +3,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class NoCapAsFact(unittest.TestCase):
-    # The gateway's interactive cap is per account and only a probe can see
-    # it, so no scanned file may state 10 as that cap - as a fact, a cap
+    # The gateway's interactive cap is per account and only a load test can
+    # see it, so no scanned file may state 10 as that cap - as a fact, a cap
     # clause, or a limit the reader is told to stay under.
     FORBIDDEN = re.compile(
         r"(cap is 10|burst cap is 10|cap of 10|hard cap"

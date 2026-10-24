@@ -21,19 +21,16 @@ luna-doctor analyze --style plain   # undecorated text, for pasting to the user
 luna-doctor analyze --copy          # same text, also on the clipboard, plain
 luna-doctor fix                # copy-paste config per agent, justified by the numbers
 luna-doctor fix --agent pi     # one agent at a time
-luna-doctor chart --since 24h  # SVG: concurrent requests over time + every request's latency
+luna-doctor chart --since 24h  # SVG + PNG: requests over time + every request's latency
 luna-doctor discover           # when the analysis says "no data"
-luna-doctor probe --n 8 --model <model> --enable-probe   # live burst, 8 concurrent sessions
-luna-doctor compare --n 8 --model <model> --enable-probe # model vs its -background twin
 ```
 
 `analyze` exits `1` when it finds pressure, `0` when it does not, `2` when the
-logs hold nothing in the window. `probe` and `compare` refuse to open a burst
-without `--enable-probe`: they print what they would open and exit `2`.
+logs hold nothing in the window.
 
 ## Rendering
 
-Every report — `discover`, `analyze`, `probe`, `compare` — is one model rendered
+Every report — `discover`, `analyze`, `capacity` — is one model rendered
 two ways. Rows are `label: value` with no column alignment, which is why output
 survives a narrow terminal, a pipe, or a chat window that wraps at 40 characters.
 `--style plain` prints exactly those rows with no color and no emoji; `pretty`
@@ -44,7 +41,7 @@ and `plain` otherwise. `NO_COLOR` beats an explicit `--style pretty`;
 `CLICOLOR_FORCE` colors a pipe. `--json` is never styled. When you paste a report
 to the user, use `--style plain`.
 
-`--copy` (on `discover`, `analyze`, `probe`, `compare` and `fix`) also puts the
+`--copy` (on `discover`, `analyze`, `capacity` and `fix`) also puts the
 printed text on the clipboard, as plain text even under `--style pretty`; the
 same text still prints to stdout, so nothing is lost when the machine has no
 clipboard tool. `--json` is copied exactly.
@@ -89,7 +86,8 @@ answer is that concurrency is not the problem.
    interactive requests at once; the admitted width is specific to the account
    and cannot be read from these logs. Anything past that width is demoted to
    background, where the answer can take ten minutes to start. Never state a cap as a
-   gateway fact: the number is per account and only a probe can tell you yours.
+   gateway fact: the number is per account — `luna-doctor capacity` reports the
+   account's real one.
 2. **Move anything wider to the `-background` variant** of the same model. More
    concurrency, much slower SLA. That is the trade, and it is deliberate.
    `luna-doctor fix` emits the exact key for whichever agent the user runs.
@@ -105,7 +103,7 @@ answer is that concurrency is not the problem.
    `x-lunaroute-warning: overflowed-to-background` instead. A demotion has a
    reason: `overflow` (the interactive width spilled it) or `no_entitlement` (a
    `-background` request downgraded into the priority pool). Say which one the
-   probe reported; if nothing probed it, say the served tier is unknown.
+   report names; if the served tier is unknown, say so.
 
 ## Swamp
 
@@ -122,5 +120,3 @@ concurrency row is measured. Keep the two separate when you quote them.
   without finish_reason` is a pi client string and says nothing about the gateway.
 - Quote the numbers from the report rather than paraphrasing them.
 - If `analyze` shows no pressure and the user is still slow, say so.
-  `probe`/`compare` can measure the wait directly, but they open concurrent
-  sessions on the account — never run them unless the user asks.

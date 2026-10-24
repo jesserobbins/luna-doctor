@@ -8,7 +8,7 @@ FORBIDDEN below, as the strings the scan hunts for.
 The scan is over rendered surfaces, not source text, because what a user
 sees is the contract: the plain and pretty renderers, the WhatsApp share
 message and its card, the fix block and its --json envelope, the chart SVG,
-the probe and compare reports, and the README and skill a reader is pointed
+the load-test and compare reports, and the README and skill a reader is pointed
 at. The in-process surfaces are driven with synthetic data that forces every
 advice branch to render; the fix and chart surfaces run the real commands the
 way a user would.
@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,11 +30,16 @@ CLI = os.path.join(ROOT, "bin", "luna-doctor")
 FORBIDDEN = ("fan-out", "fanout", "fan out", "lane")
 
 _STORE = tempfile.mkdtemp(prefix="luna-doctor-terms-")
+# No terminology run may read a real capacity cache: the rendered capacity
+# surfaces are driven from the canned fixture, everything else from none.
+_CAPACITY = os.path.join(_STORE, "absent-capacity.json")
 
 
-def run(*args, timeout=180):
+def run(*args, timeout=180, env_extra=None):
     env = dict(os.environ)
     env["LUNA_DOCTOR_STORE"] = _STORE
+    env["LUNA_DOCTOR_CAPACITY"] = _CAPACITY
+    env.update(env_extra or {})
     proc = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True,
                           timeout=timeout, cwd=ROOT, env=env)
     return proc.returncode, proc.stdout, proc.stderr
@@ -61,6 +67,19 @@ class NoRetiredVocabulary(unittest.TestCase):
         m["starved_peer_evidence"] = 1
         m["latency_s"]["interactive"]["p50"] = 75.0
         m["swamp"] = {"present": True, "configuredConcurrency": 20, "knobs": {}}
+        # the account-capacity corroboration branches: the paired local-vs-
+        # server line, the denied_after_wait corroboration, and the server
+        # counts' exclusions - every capacity line verdict() can render
+        m["capacity"] = {
+            "provenance": "account", "source": "GET /v1/capacity (cache)",
+            "stale": False, "note": "served from cache", "plan": "apex",
+            "priority_lanes": 12, "background_lanes": 12,
+            "overflow_routing": "enabled",
+            "window_days": [{"accepted": 4570, "avg_queue_wait_ms": 144544.82,
+                             "day": "2026-10-20", "deferred": 12, "denied": 0,
+                             "denied_after_wait": 16}],
+            "local_outcomes": dict(m["by_outcome"]),
+            "counts_exclude": "server counts cover only shared-pool traffic"}
         return m
 
     def _rendered(self):
@@ -125,6 +144,10 @@ class NoRetiredVocabulary(unittest.TestCase):
         self.assertIn("swamp is configured for 20 concurrent requests",
                       text["advice"])
         self.assertIn("configured concurrency", text["plain report"])
+        self.assertIn("denied_after_wait", text["advice"],
+                      "the capacity corroboration branch must fire")
+        self.assertIn("server counts cover only traffic contending for the shared pool",
+                      text["advice"], "the exclusions branch must fire")
 
     # ---- command surfaces, run the way a user runs them ----
 
@@ -145,15 +168,47 @@ class NoRetiredVocabulary(unittest.TestCase):
                 svg = fh.read()
         # The redesign draws no advisory rule: the old "advised" number was
         # headroom under a cap that turned out to be one plan's default, so
-        # advice that depends on the plan is re-derived elsewhere, not drawn.
-        # Without --plan the footer says why no rule is drawn, in the
-        # capacity vocabulary (the declared-rule paths live in ChartPlan).
+        # advice that depends on the plan is re-derived elsewhere, not drawn. Without --plan the footer says why no rule is drawn, in the
+        # capacity vocabulary (the declared-rule and account-rule paths live
+        # in ChartPlan and ChartAccountRule).
         self.assertNotIn("advised concurrency", svg,
                          "a plan-dependent advisory rule must not be drawn")
         self.assertIn("specific to the account", svg,
                       "the no-plan footer must say why no rule is drawn")
         self._assert_clean("chart svg", svg)
         self._assert_clean("chart console", stdout)
+
+    def test_capacity_report_and_json_are_clean(self):
+        """The new capacity command renders the API's own story; its copy
+        speaks the product vocabulary (concurrent requests, priority
+        concurrency), never the API's internal field names.
+
+        The plain report is product copy and is scanned. The --json envelope
+        is deliberately NOT scanned for the retired terms: it carries the
+        capacity API's own field names verbatim (priority_lanes,
+        lane_hours, ...) because the null contract and the design mandate
+        field-for-field fidelity - those names are data, not copy, exactly
+        the distinction the vocabulary policy draws (the tool's own JSON
+        naming stays governed everywhere else)."""
+        with open(os.path.join(ROOT, "tests", "fixtures",
+                               "capacity-2026-10-23.json"), encoding="utf-8") as fh:
+            payload = json.load(fh)
+        d = tempfile.mkdtemp(prefix="luna-doctor-terms-")
+        cache = os.path.join(d, "capacity.json")
+        with open(cache, "w") as fh:
+            json.dump({"fetched_at": time.time(), "fetched_at_iso": "",
+                       "url": "https://api.lunaroute.com/v1/capacity",
+                       "response": payload}, fh)
+        code, out, err = run("capacity", "--json",
+                             env_extra={"LUNA_DOCTOR_CAPACITY": cache})
+        self.assertEqual(code, 0, err)
+        json.loads(out)                    # still a well-formed envelope
+        code, out, err = run("capacity", env_extra={"LUNA_DOCTOR_CAPACITY": cache})
+        self.assertEqual(code, 0, err)
+        # the branches fired: the admission table and its null waits
+        self.assertIn("no waiting that day", out)
+        self.assertIn("plan apex", out)
+        self._assert_clean("capacity report", out)
 
     def test_readme_and_skill_are_clean(self):
         for rel in ("README.md", os.path.join("skills", "luna-doctor", "SKILL.md")):

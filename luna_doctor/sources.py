@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """One data-collection layer for luna-doctor.
 
-Every fact a command can quote comes from one of three states of the world:
+Every fact a command can quote comes from one of these states of the world:
 
   measured    what the machine actually did - the local log stores
   declared    what the machine is configured to do - harness config files
   catalog     what the gateway actually offers - GET /v1/models, cached on disk
+  account     what the account actually has - GET /v1/capacity on
+              api.lunaroute.com (plan, priority concurrency, occupancy,
+              admission), cached on disk
 
 plus `configured` for documented constants and `unknown` for everything else.
 Nothing here guesses: a value that cannot be established is `unknown` with a
@@ -37,13 +40,15 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 # ---- provenance states ------------------------------------------------------
-# One vocabulary for where every fact in a snapshot came from. The five words
+# One vocabulary for where every fact in a snapshot came from. The six words
 # are the whole contract: a consumer renders anything unknown as unknown and
 # never substitutes a default of its own.
 
 PROV_MEASURED = "measured"        # reconstructed from the local log stores
 PROV_DECLARED = "declared"       # read from a harness or repo config file
 PROV_CATALOG = "catalog"         # GET /v1/models on the LunaRoute gateway
+PROV_ACCOUNT = "account"         # GET /v1/capacity on the LunaRoute account
+                                 # host, served from the disk cache
 PROV_CONFIGURED = "configured"   # a documented constant
 PROV_UNKNOWN = "unknown"         # not established; carried with a reason
 
@@ -51,6 +56,7 @@ PROVENANCE_LEGEND = {
     "measured": "reconstructed from the local log stores",
     "declared": "read from a harness or repo config file",
     "catalog": "GET /v1/models on the gateway, served from disk cache",
+    "account": "fetched from api.lunaroute.com, served from disk cache",
     "configured": "a documented constant, not a guess",
     "unknown": "not established; reported with a reason, never defaulted",
 }
@@ -62,6 +68,7 @@ PI_STORE = "~/.pi/agent/sessions"
 CLAUDE_STORE = "~/.claude/projects"
 CODEX_STORE = "~/.codex/sessions"
 GATEWAY_HOST = "gw.lunaroute.com"
+ACCOUNT_HOST = "api.lunaroute.com"   # the account surface, not the inference gateway
 
 PI_SETTINGS = "~/.pi/agent/settings.json"
 PI_SUBAGENT_CFG = "~/.pi/agent/extensions/subagent/config.json"
@@ -78,6 +85,15 @@ SWAMP_ENV_GLOBAL_SOURCES = "~/.swamp-sources.yaml"
 
 MODELS_URL = "https://" + GATEWAY_HOST + "/v1/models"
 LIMITS_URL = "https://" + GATEWAY_HOST + "/v1/limits"
+# The account's effective capacity: plan, priority/background concurrency,
+# live priority-pool occupancy, 7d/30d occupancy rollups and per-complete-
+# UTC-day admission outcomes. /v1/cli/capacity is the same handler (a legacy
+# alias); this is the canonical path. Verified live 2026-10-23: the account
+# host answers with the lr_ routing key under the documented
+# LUNAROUTE-API-KEY header (Bearer also works; the doc form is canonical),
+# rate limit 60/min, observed latency 4-17s - so it is never fetched
+# per-render, it is cached like the catalog.
+CAPACITY_URL = "https://" + ACCOUNT_HOST + "/v1/capacity"
 
 # The catalog cache sits beside the store (~/.luna-doctor/store) so a report
 # can name real model limits without ever blocking on the network. The TTL is
@@ -86,6 +102,17 @@ LIMITS_URL = "https://" + GATEWAY_HOST + "/v1/limits"
 CATALOG_CACHE = "~/.luna-doctor/catalog.json"
 CATALOG_TTL_S = 24 * 3600
 HTTP_TIMEOUT_S = 10.0
+
+# The capacity cache sits beside the catalog cache. The 5-minute TTL matches
+# the server's own history cadence (history is rolled up ~5-minutely server
+# side; `now` and `admission` are computed per call, and `now.sampled_at`
+# surfaces how fresh the occupancy sample really is). The endpoint answers in
+# 4-17s in practice, so its timeout is deliberately longer than the shared
+# HTTP_TIMEOUT_S - and a timeout still degrades to None (a stale cache serves,
+# marked stale; no cache means unknown), never a blocked report.
+CAPACITY_CACHE = "~/.luna-doctor/capacity.json"
+CAPACITY_TTL_S = 5 * 60
+CAPACITY_TIMEOUT_S = 30.0
 
 # Swamp knob defaults are documented constants from the extension source.
 SWAMP_CITATION_DEFAULT = "extensions/models/obsidian_ideas.ts"
@@ -108,6 +135,15 @@ def catalog_cache_path() -> str:
     if override:
         return override
     return os.path.expanduser(CATALOG_CACHE)
+
+
+def capacity_cache_path() -> str:
+    """Where the cached capacity payload lives. LUNA_DOCTOR_CAPACITY
+    overrides, same contract as the catalog cache."""
+    override = os.environ.get("LUNA_DOCTOR_CAPACITY", "").strip()
+    if override:
+        return override
+    return os.path.expanduser(CAPACITY_CACHE)
 
 
 # ---- Fact -------------------------------------------------------------------
@@ -280,12 +316,18 @@ def catalog_key(auth_path: str | None = None) -> str | None:
 _urlopen = urllib.request.urlopen
 
 
-def _http_get_json(url: str, key: str, timeout: float = HTTP_TIMEOUT_S):
+def _http_get_json(url: str, key: str, timeout: float = HTTP_TIMEOUT_S,
+                    auth: tuple = None):
     """One authenticated GET. Returns (data, None) on success, (None, reason)
-    on any failure - HTTP status, transport error or malformed JSON."""
+    on any failure - HTTP status, transport error or malformed JSON.
+
+    `auth` overrides the default ("Authorization", "Bearer <key>") header
+    pair: the capacity endpoint's documented form is LUNAROUTE-API-KEY, so
+    that call site passes ("LUNAROUTE-API-KEY", key)."""
     from luna_doctor import cli       # VERSION lives in cli (cycle, call time)
+    name, value = auth if auth is not None else ("Authorization", "Bearer " + key)
     req = urllib.request.Request(url, headers={
-        "Authorization": "Bearer " + key,
+        name: value,
         "User-Agent": "luna-doctor/" + cli.VERSION,
     })
     try:
@@ -354,13 +396,13 @@ def _read_catalog_cache(path: str, now: float, ttl: float) -> tuple:
                    stale=age > ttl, age_s=age, ttl_s=ttl), ""
 
 
-def _write_catalog_cache(path: str, response, now: float) -> None:
+def _write_catalog_cache(path: str, response, now: float, url: str = MODELS_URL) -> None:
     """Best effort: a cache write failure never fails the fetch that produced
     the data. The endpoint's response is stored verbatim beside the fetch
     timestamp; atomic (tempfile + replace), so a reader never sees a partial
-    file."""
+    file. The capacity cache uses the same writer with its own URL."""
     doc = {"fetched_at": now, "fetched_at_iso": _iso(now),
-           "url": MODELS_URL, "response": response}
+           "url": url, "response": response}
     tmp = None
     try:
         parent = os.path.dirname(path) or "."
@@ -459,6 +501,262 @@ def _limits_with_note(allow_network: bool, *, key: str | None = None,
         return None, f"fetch failed ({err})"
     return Limits(raw=data if isinstance(data, dict) else {"payload": data},
                   fetched_at=now), "fetched"
+
+
+# ---- capacity (the account host) --------------------------------------------
+# GET /v1/capacity on api.lunaroute.com: the account's effective capacity
+# (plan, priority and background concurrency, overflow routing), live
+# priority-pool occupancy, 7d/30d occupancy rollups and per-complete-UTC-day
+# admission outcomes. THE NULL CONTRACT IS LOAD-BEARING: a degraded block
+# arrives HTTP 200 with `null` - `config: null`, `now` fields null with
+# `ledger: "unknown"`, `history.tail: null`, `avg_queue_wait_ms: null` on
+# days nobody waited. `priority_lanes: null` means unknown, NOT zero;
+# `background_lanes: 0` is a real value (entitled to no overflow). Every
+# field below is preserved verbatim and None-preserving - nothing here
+# defaults a null to 0, and only a rolled-history failure is a hard 500.
+
+
+@dataclass
+class CapacityNow:
+    """The live priority-pool occupancy. Covers the priority pool only:
+    overflow traffic does not appear in `in_use` (it does appear in the
+    admission counts). `raw` keeps the block exactly as the API sent it."""
+
+    limit: object = None
+    in_use: object = None
+    available: object = None
+    saturated: object = None
+    ledger: object = None
+    sampled_at: object = None
+    raw: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return dict(self.raw)
+
+
+@dataclass
+class CapacityConfig:
+    """The account's effective capacity settings, fields verbatim.
+    `background_lanes: 0` is real (no overflow entitled); any `None` is
+    unknown and must never be rendered as a number."""
+
+    plan: object = None
+    priority_lanes: object = None
+    background_lanes: object = None
+    overflow_routing: object = None
+    raw: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return dict(self.raw)
+
+
+@dataclass
+class CapacityHistory:
+    """The occupancy rollups. `days_active` (days with traffic) and
+    `days_covered` (days with data) are different facts and are never
+    combined into a rate; when `tail` is null, `days_covered` already
+    excludes it, so a smaller `days_covered` never means "fewer days had
+    traffic". `raw` keeps the block verbatim."""
+
+    as_of: object = None
+    last_7d: object = None
+    last_30d: object = None
+    tail: object = None
+    rollup_computed_at: object = None
+    raw: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return dict(self.raw)
+
+
+@dataclass
+class CapacityAdmission:
+    """Per-complete-UTC-day admission outcomes. One entry per complete day:
+    the in-progress day is never included (as_of names the last day
+    covered), so a bursty afternoon must not read as a collapse. The day
+    lists stay exactly as the API sent them."""
+
+    as_of: object = None
+    last_7d: object = None
+    last_30d: object = None
+    raw: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return dict(self.raw)
+
+
+@dataclass
+class Capacity:
+    """One fetched capacity payload. Sub-blocks are the API's own fields,
+    None-preserving; a block the API sent as `null` is None here, and an
+    out-of-contract block is kept verbatim rather than guessed. `raw` keeps
+    the whole `data` block so no unnamed field is lost."""
+
+    now: object = None
+    config: object = None
+    history: object = None
+    admission: object = None
+    fetched_at: float | None = None
+    served_from: str = "cache"       # "network" | "cache"
+    stale: bool = False
+    age_s: float = 0.0
+    ttl_s: float = CAPACITY_TTL_S
+    note: str = ""
+    raw: dict = field(default_factory=dict)
+
+    def describe(self) -> str:
+        return (f"GET {CAPACITY_URL} ({self.served_from}; "
+                f"fetched {_age_str(self.age_s)} ago)")
+
+    def to_dict(self) -> dict:
+        def block(b):
+            if b is None:
+                return None
+            if hasattr(b, "to_dict"):
+                return b.to_dict()
+            return b       # out-of-contract block: verbatim, never a guess
+
+        # every data-block key this model does not name rides along verbatim
+        out = {k: v for k, v in (self.raw or {}).items()
+               if k not in ("now", "config", "history", "admission")}
+        out.update({
+            "provenance": PROV_ACCOUNT,
+            "served_from": self.served_from,
+            "fetched_at": _iso(self.fetched_at) if self.fetched_at else None,
+            "age_s": int(self.age_s),
+            "ttl_s": int(self.ttl_s),
+            "stale": self.stale,
+            "note": self.note,
+            "now": block(self.now),
+            "config": block(self.config),
+            "history": block(self.history),
+            "admission": block(self.admission),
+        })
+        return out
+
+
+def _capacity_block(data: dict, name: str, cls):
+    """One sub-block as a dataclass when the API sent an object, None when it
+    sent null, or the verbatim value when it sent something out of contract.
+    Named fields default to None - a missing key is unknown, never zero."""
+    val = data.get(name)
+    if not isinstance(val, dict):
+        return val
+    kwargs = {f: val.get(f) for f in getattr(cls, "__dataclass_fields__", {})
+              if f != "raw"}
+    return cls(raw=dict(val), **kwargs)
+
+
+def _parse_capacity_payload(response) -> tuple:
+    """(Capacity kwargs, "") on a usable payload, (None, reason) otherwise.
+    The envelope is {success, generated_at, data}; only the `data` block is
+    modelled, and every block inside it may legitimately be null."""
+    if not isinstance(response, dict):
+        return None, "unexpected payload shape"
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return None, "payload held no data block"
+    return {
+        "now": _capacity_block(data, "now", CapacityNow),
+        "config": _capacity_block(data, "config", CapacityConfig),
+        "history": _capacity_block(data, "history", CapacityHistory),
+        "admission": _capacity_block(data, "admission", CapacityAdmission),
+        "raw": dict(data),
+    }, ""
+
+
+def _read_capacity_cache(path: str, now: float, ttl: float) -> tuple:
+    if not os.path.exists(path):
+        # The cache being absent is not an error: it means there is nothing
+        # to serve without the network, and the caller renders unknown.
+        return None, "no cached capacity"
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except Exception as e:
+        return None, f"cache present but unreadable ({type(e).__name__})"
+    fetched = doc.get("fetched_at") if isinstance(doc, dict) else None
+    response = doc.get("response") if isinstance(doc, dict) else None
+    fields, err = _parse_capacity_payload(response)
+    if err or not isinstance(fetched, (int, float)):
+        return None, "cache unreadable (no usable payload or timestamp)"
+    age = max(0.0, now - float(fetched))
+    return Capacity(fetched_at=float(fetched), served_from="cache",
+                    stale=age > ttl, age_s=age, ttl_s=ttl, **fields), ""
+
+
+def capacity_admission_days(cap) -> list:
+    """The admission block as an ascending [(day, entry), ...] list.
+
+    The API sends two windows (last_7d, last_30d) of the same day shape;
+    this returns the union, one entry per day, so a consumer asking "what
+    does the server say about these days" never double-counts. Entries are
+    verbatim - nothing is summed or defaulted here."""
+    adm = getattr(cap, "admission", None) if cap is not None else None
+    out: dict = {}
+    for window in ("last_30d", "last_7d"):
+        entries = getattr(adm, window, None) if adm is not None else None
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if isinstance(e, dict) and isinstance(e.get("day"), str):
+                out[e["day"]] = e
+    return sorted(out.items())
+
+
+def fetch_capacity(allow_network: bool, *, cache_path: str | None = None,
+                   now: float | None = None, ttl: float | None = None,
+                   key: str | None = None, timeout: float | None = None):
+    """The account's capacity payload, or None when it cannot be established.
+
+    Mirrors fetch_catalog's cache-first shape: a cached payload serves
+    without network (a stale one serves too, marked stale); the network is
+    attempted only when allow_network and the cache is stale or missing. No
+    key, 401, the endpoint's 4-17s latency or a timeout all degrade to None
+    or to the stale cache - capacity being absent is never an error, and
+    consumers must render None as unknown, never as a default."""
+    capacity, _ = _capacity_with_note(allow_network, cache_path=cache_path,
+                                      now=now, ttl=ttl, key=key, timeout=timeout)
+    return capacity
+
+
+def _capacity_with_note(allow_network: bool, *, cache_path: str | None = None,
+                        now: float | None = None, ttl: float | None = None,
+                        key: str | None = None,
+                        timeout: float | None = None) -> tuple:
+    now = time.time() if now is None else now
+    ttl = CAPACITY_TTL_S if ttl is None else ttl
+    path = cache_path or capacity_cache_path()
+    cached, cache_err = _read_capacity_cache(path, now, ttl)
+    if cached is not None and not cached.stale:
+        cached.note = f"served from cache; fetched {_age_str(cached.age_s)} ago"
+        return cached, cached.note
+    if not allow_network:
+        if cached is not None:
+            cached.note = (f"cache expired (fetched {_age_str(cached.age_s)} ago); "
+                           "offline, so served stale")
+            return cached, cached.note
+        return None, cache_err or "no cached capacity; network not allowed (offline)"
+    k = catalog_key() if key is None else key
+    if not k:
+        if cached is not None:
+            cached.note = "no routing key; served stale cache"
+            return cached, cached.note
+        return None, ("no routing key (LUNAROUTE_API_KEY, or "
+                       "~/.pi/agent/auth.json lunaroute.key/.access)")
+    data, err = _http_get_json(CAPACITY_URL, k, timeout or CAPACITY_TIMEOUT_S,
+                               auth=("LUNAROUTE-API-KEY", k))
+    fields, parse_err = (None, err) if data is None else _parse_capacity_payload(data)
+    if parse_err:
+        if cached is not None:
+            cached.note = f"fetch failed ({parse_err}); served stale cache"
+            return cached, cached.note
+        return None, f"fetch failed ({parse_err})"
+    _write_catalog_cache(path, data, now, url=CAPACITY_URL)
+    capacity = Capacity(fetched_at=now, served_from="network", stale=False,
+                        age_s=0.0, ttl_s=ttl, note=f"fetched from {CAPACITY_URL}",
+                        **fields)
+    return capacity, capacity.note
 
 
 # ---- configs (declared state) -----------------------------------------------

@@ -6,8 +6,8 @@ Two halves:
 
   analyze   reads the local agent logs (pi, claude-code) and reconstructs what
             the machine asked for, what it got, and at what tier.
-  probe     measures the gateway directly, capturing the response headers that
-            say which tier served a request and whether it was demoted.
+  capacity  reports the account's own plan, priority concurrency, occupancy
+            and admission from the gateway's capacity API, cached on disk.
 
 The constants below are measured, not assumed. See research notes: the gateway
 waits ~25.2s before sending SSE headers, kills unadmitted requests at a
@@ -45,7 +45,7 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from luna_doctor import plan
 from luna_doctor import render_share
@@ -61,7 +61,10 @@ SCHEMA_VERSION = 4         # 4: capacity fields renamed to the LunaRoute
                            #     vocabulary (contract.advised_concurrency,
                            #     findings.priority_concurrency: null until
                            #     the plan pass) and the additive combined
-                           #     snapshot (metrics.snapshot)
+                           #     snapshot (metrics.snapshot). The later,
+                           #     additive metrics.capacity block and the
+                           #     capacity command stay on 4: additive, no
+                           #     break.
 
 # ---- measured constants -----------------------------------------------------
 CONTRACT = {
@@ -522,7 +525,7 @@ def _merge_copies(a: dict, b: dict) -> dict:
 # Task-1 contract, revised: filesystem only. `swamp workspace list` cost a
 # second per run and reported nothing the filesystem could not, so swamp is
 # resolved by walking directories and never by spawning swamp itself.
-# discover() exports stores.swamp.repoDir for downstream tasks (analyze/fix/probe).
+# discover() exports stores.swamp.repoDir for downstream tasks (analyze/fix/load-test).
 
 def _swamp_repo_dir() -> str | None:
     """Resolve one swamp repo dir from the filesystem alone, or None.
@@ -1915,6 +1918,50 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
             f"total; the width this account actually admits cannot be read from these logs."
         )
 
+    # ---- the account's capacity: corroboration, never the headline ----
+    # The server's numbers sit beside the local ones as a cross-check, and
+    # which one leads "are you over capacity" is deliberately not decided
+    # here: the headline stays the local story, the server story is
+    # corroboration, and the two are never merged. Everything renders only
+    # when a capacity payload was served; without one the block is unknown
+    # and says nothing.
+    capm = m.get("capacity") or {}
+    if capm.get("provenance") == sources.PROV_ACCOUNT:
+        lanes = capm.get("priority_lanes")
+        if isinstance(lanes, int) and not isinstance(lanes, bool):
+            peak = m.get("peak_concurrency") or 0
+            plan_name = capm.get("plan")
+            adj.append(
+                f"local peak {peak} concurrent request(s) (a lower bound - other machines "
+                f"are invisible to these logs) \u00b7 account limit {lanes} priority "
+                f"concurrent request(s) (plan {plan_name or 'not reported'}, fetched from "
+                f"the account's capacity and served from its disk cache)"
+            )
+        days = capm.get("window_days") or []
+        if days:
+            daw_days = []
+            daw_total = 0
+            for d in days:
+                v = d.get("denied_after_wait")
+                if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                    daw_days.append(str(d.get("day")))
+                    daw_total += v
+            if daw_days:
+                # per-day counts live in metrics.capacity.window_days; the
+                # line carries the total and names the days
+                adj.append(
+                    f"the account's admission log confirms {daw_total} request(s) were "
+                    f"parked and then refused after waiting (denied_after_wait) on "
+                    f"{', '.join(daw_days)} UTC - the server-side corroboration of the "
+                    f"park-deadline rejection class these logs classify from error "
+                    f"strings. Cross-check, not a merge: local and server counts come "
+                    f"from different vantage points and may differ."
+                )
+            # the exclusions are stated wherever server counts sit beside
+            # local ones; local counts see BYOK and embedding traffic the
+            # server never counts, so a difference is expected, not an error
+            adj.append(CAPACITY_COUNTS_EXCLUDE)
+
     if not pressure and not adj:
         return f"No concurrency pressure across {n} requests.", ["Nothing to adjust."], 0
 
@@ -2021,7 +2068,7 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
                     "concurrency as a lower bound."))
     notes.append(report.Row(
         "note", "tiers here are inferred from model names; the served tier is not in these logs; "
-                "only a probe can see it."))
+                "only a load test can see it."))
     sw = m.get("swamp")
     if sw and sw.get("present"):
         # Only an in-use swamp reaches here (installed is not in use), and its
@@ -2348,12 +2395,13 @@ def run_probe(n: int, model: str, max_tokens: int, timeout: float,
 
 
 def _probe_swamp_headroom(probe_n: int) -> str | None:
-    """One-sentence headroom note for probe, or None when swamp is not in use.
+    """One-sentence headroom note for a load test, or None when swamp is
+    not in use.
 
-    The probe measured probe_n; swamp's extract+llmConcurrency via
+    The load test measured probe_n; swamp's extract+llmConcurrency via
     sources.swamp_knobs() is a setting. They are reported as separate facts,
     and the only sum sits inside an explicitly assumed "if ... would" clause.
-    No network, no second probe.
+    No network, no second load test.
     """
     try:
         state = swamp_state(since=time.time() - 24 * 3600)
@@ -2369,15 +2417,15 @@ def _probe_swamp_headroom(probe_n: int) -> str | None:
     verdict_word = "within" if assumed <= INTERACTIVE_BURST_CAP else "past"
     return (
         f"swamp is configured for {configured} concurrent requests per behavior (extract {ex} + verify {ll}) "
-        f"- a setting, not measured traffic; this probe measured {probe_n} concurrent sessions. "
-        f"If swamp ran at its configured width during such a probe, the account would see "
+        f"- a setting, not measured traffic; this load test measured {probe_n} concurrent sessions. "
+        f"If swamp ran at its configured width during such a load test, the account would see "
         f"{assumed} concurrent requests, {verdict_word} the conservative combined budget - an "
         f"assumption, not a measurement. {CAP_COPY[0].upper()}{CAP_COPY[1:]}."
     )
 
 
 def build_probe_report(r: dict, n: int, model: str) -> report.Report:
-    """One probe run as rows, with the run's own advice as adjustments.
+    """One load-test run as rows, with the run's own advice as adjustments.
 
     The rows keep the old inline printer's order and labels; the bullets
     that printer printed conditionally become `adjustments` so every
@@ -2420,7 +2468,7 @@ def build_probe_report(r: dict, n: int, model: str) -> report.Report:
                    + demotion_note("no_entitlement", model))
     if r["streamed"] == r["n"] and not r["cut"]:
         adj.append("all requests streamed; no pressure at this width.")
-    return report.Report(headline=f"probe: {n} x {model}",
+    return report.Report(headline=f"load-test: {n} x {model}",
                          sections=[report.Section("burst", burst)], adjustments=adj)
 
 
@@ -2429,7 +2477,7 @@ def cmd_probe(args) -> int:
     # (--json or a pipe), and to stdout only on a terminal, where motion may
     # redraw it.
     stream = sys.stderr if args.json or not sys.stdout.isatty() else sys.stdout
-    reveal(f"probing {args.n} x {args.model} (max_tokens {args.max_tokens}, budget {args.max_seconds:.0f}s)",
+    reveal(f"load-testing {args.n} x {args.model} (max_tokens {args.max_tokens}, budget {args.max_seconds:.0f}s)",
            getattr(args, "_style", None), stream)
     r = run_probe(args.n, args.model, args.max_tokens, args.timeout, args.max_seconds)
     headroom = _probe_swamp_headroom(args.n)
@@ -2438,7 +2486,7 @@ def cmd_probe(args) -> int:
         if headroom:
             payload["summary"] = headroom
             payload["swamp_headroom"] = headroom
-        print(json.dumps(envelope("probe", payload, contract=CONTRACT), indent=2))
+        print(json.dumps(envelope("load-test", payload, contract=CONTRACT), indent=2))
         return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
     rep = build_probe_report(r, args.n, args.model)
     if headroom:
@@ -2607,6 +2655,252 @@ def build_discover_report(d: dict) -> report.Report:
                          footnote=footnote)
 
 
+# ---- the capacity command ----------------------------------------------------
+# The one command that may fetch the account capacity live (with --online):
+# it renders the API's own story - live priority-pool occupancy, plan and
+# concurrency, the 7d/30d occupancy rollups, and the per-complete-UTC-day
+# admission table. The null contract governs every line: an absent value
+# renders as unknown with its reason, never as a zero; a null
+# avg_queue_wait_ms is "no waiting that day"; background_lanes 0 is a real
+# value (no overflow entitled); priority_lanes null is unknown, not zero.
+
+def _cap_field(block, name):
+    """One sub-block field, None-safe for absent blocks and out-of-contract
+    ones alike."""
+    return getattr(block, name, None) if block is not None else None
+
+
+def _cap_unknown(value) -> str:
+    """A capacity value or the unknown line - never a defaulted zero."""
+    if value is None:
+        return "unknown (not reported)"
+    return str(value)
+
+
+def _cap_flag(value) -> str:
+    """A saturated-style flag: booleans read yes/no, null reads unknown."""
+    if value is None:
+        return "unknown (not reported)"
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return str(value)
+
+
+def _cap_wait(ms) -> str:
+    """avg_queue_wait_ms in seconds. Null is common on days nobody waited
+    and means exactly that - "no waiting that day", never 0."""
+    if ms is None:
+        return "no waiting that day"
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+        return str(ms)
+    return "%.1fs" % (ms / 1000.0)
+
+
+def _cap_background(value) -> str:
+    """background_lanes in the product vocabulary. 0 is a real value - the
+    account is entitled to no overflow - and null is unknown, never zero."""
+    if value is None:
+        return "unknown (not reported)"
+    if value == 0:
+        return "0 concurrent requests (the account is entitled to no overflow)"
+    return "%s concurrent requests" % value
+
+
+def _cap_overflow(value) -> str:
+    """overflow_routing with its scope stated, never a bare switch.
+
+    `enabled` is not a general switch: automatic spill applies to eligible
+    managed text-generation requests only - a request explicitly marked
+    background (for example background image generation) reaches overflow
+    capacity by its own marking, not through this setting."""
+    if value is None:
+        return "unknown (not reported)"
+    if value == "enabled":
+        return ("enabled - automatic spill applies to eligible managed "
+                "text-generation requests only; requests explicitly marked "
+                "background reach overflow capacity by their own marking, "
+                "not through this switch")
+    return str(value)
+
+
+def _capacity_rollup_value(r: dict) -> str:
+    """One occupancy rollup in the product vocabulary.
+
+    The API's internal field names for concurrent requests are field names,
+    not product language, so the rendered copy speaks concurrent requests.
+    days_active (days with traffic) and days_covered (days with data) are
+    different facts, labelled separately, and never combined into a rate;
+    every absent value is unknown, not zero."""
+    def n(v):
+        return "unknown (not reported)" if v is None else str(v)
+    return " \u00b7 ".join([
+        "peak %s concurrent requests" % n(r.get("peak_lanes")),
+        "average %s" % n(r.get("avg_lanes")),
+        "p95 %s" % n(r.get("p95_lanes")),
+        "occupancy %s concurrent-request-hours" % n(r.get("lane_hours")),
+        "queued %s%% of the time" % n(r.get("queued_pct")),
+        "%s day(s) with traffic" % n(r.get("days_active")),
+        "%s day(s) with data" % n(r.get("days_covered")),
+    ])
+
+
+def _capacity_admission_row(entry: dict) -> report.Row:
+    """One complete-UTC-day admission entry as a row: every count is the
+    API's own, a null count is unknown, and a null avg_queue_wait_ms is
+    "no waiting that day" - never a zero anywhere."""
+    bits = []
+    for name in ("accepted", "deferred", "denied", "denied_after_wait"):
+        v = entry.get(name)
+        bits.append("%s %s" % (name.replace("_", " "),
+                               "unknown (not reported)" if v is None else str(v)))
+    bits.append("avg queue wait %s" % _cap_wait(entry.get("avg_queue_wait_ms")))
+    return report.Row(str(entry.get("day") or "(no day)"), " \u00b7 ".join(bits))
+
+
+def build_capacity_report(cap, note: str = "") -> report.Report:
+    """The capacity API's own story as a Report.
+
+    `now` is the priority pool only (overflow traffic does not appear in
+    in_use; it does appear in admission), the admission table covers
+    complete UTC days only, and the counts' exclusions are stated where the
+    counts are - a naive reader would otherwise take them for the whole
+    account's traffic. When `cap` is None everything is unknown with its
+    reason; fetching is `--online`, and a fetch failure is never an error.
+    """
+    if cap is None:
+        return report.Report(
+            headline="account capacity: unknown",
+            sections=[],
+            adjustments=[],
+            footnote=(f"{note or 'not established'}\n"
+                      "pass --online to fetch it now (api.lunaroute.com, one "
+                      "authenticated GET, cached 5 minutes); what cannot be "
+                      "fetched is reported unknown, never an error"))
+
+    n, cfg, h, adm = cap.now, cap.config, cap.history, cap.admission
+    now_rows = [report.Row(
+        "covers", "the priority pool only - overflow traffic does not appear "
+        "in in_use (it does appear in the admission counts below)")]
+    if n is None:
+        now_rows.append(report.Row("now", "not reported by the account (unknown)"))
+    else:
+        in_use, limit, avail = (_cap_field(n, "in_use"), _cap_field(n, "limit"),
+                                _cap_field(n, "available"))
+        if in_use is None and limit is None:
+            occ = "occupancy unknown (not reported)"
+        elif in_use is None:
+            occ = f"in use unknown (not reported) \u00b7 limit {limit}"
+        elif limit is None:
+            occ = f"in use {in_use} \u00b7 limit unknown (not reported)"
+        else:
+            occ = f"in use {in_use} of {limit} priority concurrent requests"
+        if avail is not None:
+            occ += f" \u00b7 {avail} available"
+        now_rows.append(report.Row("occupancy", occ))
+        now_rows.append(report.Row("saturated", _cap_flag(_cap_field(n, "saturated"))))
+        now_rows.append(report.Row("ledger", _cap_unknown(_cap_field(n, "ledger"))))
+        now_rows.append(report.Row("sampled at", _cap_unknown(_cap_field(n, "sampled_at"))))
+
+    config_rows = [
+        report.Row("plan", _cap_unknown(_cap_field(cfg, "plan"))),
+        report.Row("priority concurrency", _cap_unknown(_cap_field(cfg, "priority_lanes"))),
+        report.Row("background", _cap_background(_cap_field(cfg, "background_lanes"))),
+        report.Row("overflow routing", _cap_overflow(_cap_field(cfg, "overflow_routing"))),
+    ]
+
+    hist_rows = []
+    for label, key in (("last 7 days", "last_7d"), ("last 30 days", "last_30d")):
+        r = _cap_field(h, key)
+        if isinstance(r, dict):
+            val = _capacity_rollup_value(r)
+            as_of = _cap_field(h, "as_of")
+            if as_of is not None:
+                val += f"\nrollup as of {as_of}"
+            hist_rows.append(report.Row(label, val))
+        else:
+            hist_rows.append(report.Row(label, "not reported by the account (unknown)"))
+    tail = _cap_field(h, "tail")
+    if isinstance(tail, dict):
+        hist_rows.append(report.Row(
+            "tail", "minute-level occupancy through %s"
+                    % _cap_unknown(tail.get("through"))))
+    else:
+        hist_rows.append(report.Row(
+            "tail", "not reported (null) - days_covered already excludes it, "
+            "so a smaller count never means fewer days had traffic"))
+    rc = _cap_field(h, "rollup_computed_at")
+    if rc is not None:
+        hist_rows.append(report.Row("rollup computed at", str(rc)))
+
+    as_of = _cap_field(adm, "as_of")
+    admission_sections = []
+    for label, key in (("admission \u00b7 last 7 days", "last_7d"),
+                       ("admission \u00b7 last 30 days", "last_30d")):
+        entries = _cap_field(adm, key)
+        rows = [report.Row(
+            "covers", "one entry per complete UTC day%s - the in-progress day "
+            "is never included, so a bursty afternoon must not read as a "
+            "collapse" % (f", through {as_of} (as_of)" if as_of is not None else "")),
+            report.Row("counts", CAPACITY_COUNTS_EXCLUDE)]
+        if isinstance(entries, list) and entries:
+            for e in entries:
+                if isinstance(e, dict):
+                    rows.append(_capacity_admission_row(e))
+        else:
+            rows.append(report.Row("days", "not reported by the account (unknown)"))
+        admission_sections.append(report.Section(label, rows))
+
+    head_bits = []
+    plan = _cap_field(cfg, "plan")
+    pri = _cap_field(cfg, "priority_lanes")
+    if plan is not None:
+        head_bits.append(f"plan {plan}")
+    if pri is not None:
+        head_bits.append(f"priority concurrency {pri}")
+    headline = "account capacity"
+    headline += ": " + " \u00b7 ".join(head_bits) if head_bits \
+        else ": plan and concurrency not reported (unknown)"
+
+    foot = note or cap.describe()
+    foot += (" \u00b7 history is cached \u22485 minutes server-side; now and "
+             "admission are computed per call \u00b7 rate limit 60/min per key")
+    if cap.stale:
+        foot += (" \u00b7 the cache is past its 5-minute TTL: run with "
+                 "--online to refresh")
+    foot += f"\nluna-doctor v{VERSION}"
+
+    sections = ([report.Section("now", now_rows), report.Section("config", config_rows),
+                 report.Section("history", hist_rows)] + admission_sections)
+    return report.Report(headline=headline, sections=sections, footnote=foot)
+
+
+def cmd_capacity(args) -> int:
+    """The one command that may fetch the capacity live: --online refreshes
+    the 5-minute disk cache from api.lunaroute.com; the default serves the
+    cache and never touches the network. Whatever cannot be established
+    renders unknown with its reason - a network failure never turns the
+    report red, and exit codes follow the tool's convention (0 data, 2 none).
+    """
+    online = bool(getattr(args, "online", False))
+    try:
+        cap, note = sources._capacity_with_note(online)
+    except Exception as e:
+        cap, note = None, f"collection failed: {type(e).__name__}: {e}"[:200]
+    if cap is None and online:
+        print(f"luna-doctor: capacity unavailable ({note}); reported unknown",
+              file=sys.stderr)
+    if args.json:
+        payload = ({"capacity": cap.to_dict()} if cap is not None
+                   else {"capacity": {"provenance": sources.PROV_UNKNOWN,
+                                       "reason": note}})
+        print(json.dumps(envelope("capacity", payload, contract=CONTRACT), indent=2))
+    else:
+        print_report(build_capacity_report(cap, note), args)
+    return 0 if cap is not None else 2
+
+
 PRERELEASE_NOTE = "alpha — not for production" if "-" in VERSION else ""
 
 def _version_string() -> str:
@@ -2632,39 +2926,135 @@ def _add_copy(sp) -> None:
                          "unchanged, so nothing is lost when no tool exists")
 
 
-def _add_network(sp) -> None:
-    """The offline/online pair for the commands that consume the snapshot.
+def _add_network(sp, subject: str = "the live model catalog from the gateway",
+                 ttl: str = "24h") -> None:
+    """The offline/online pair for the commands that consume fetched facts.
 
-    The default is offline: a cached catalog serves (a stale one too, marked
-    stale), and the network is never touched. `--online` allows one
-    authenticated GET of the model catalog (refreshing the 24h cache) and a
-    probe of the not-yet-deployed /v1/limits; a network failure still never
-    turns the report into an error - what could not be fetched is reported
-    unknown.
+    The default is offline: a cached payload serves (a stale one too,
+    marked stale), and the network is never touched. `--online` allows one
+    authenticated GET (refreshing the disk cache); a network failure still
+    never turns the report into an error - what could not be fetched is
+    reported unknown.
     """
     grp = sp.add_mutually_exclusive_group()
     grp.add_argument("--online", action="store_true",
-                     help="fetch the live model catalog from the gateway (one "
-                          "authenticated GET) and refresh the 24h disk cache; "
-                          "without this flag nothing leaves the machine")
+                     help=f"fetch {subject} (one authenticated GET) and "
+                          f"refresh the {ttl} disk cache; without this flag "
+                          f"nothing leaves the machine")
     grp.add_argument("--offline", action="store_true",
-                     help="never touch the network, even for the catalog "
-                          "(this is the default; stated for scripts)")
+                     help=f"never touch the network, even for {subject} "
+                          f"(this is the default; stated for scripts)")
 
 
 def probe_required_message(cmd: str, n: int, model: str, budget_s: float) -> str:
-    """What a burst would do, stated without running it.
+    """What a load test would do, stated without running it.
 
     LunaRoute bills concurrent sessions, so the message counts sessions,
-    not usage of any other kind.
+    not usage of any other kind. The run is opt-in because it is real:
+    it opens live sessions against the gateway and spends included
+    inference, and the message says both.
     """
     width = f"{n:g}"
     if cmd == "compare":
-        return (f"compare would open two bursts of {width} concurrent sessions each "
-                f"at {model} (and its -background twin) for up to {budget_s:g}s; "
-                f"pass --enable-probe to run it")
-    return (f"{cmd} would open {width} concurrent sessions at {model} "
-            f"for up to {budget_s:g}s; pass --enable-probe to run it")
+        return (f"compare would load-test {model} and its -background twin: two "
+                f"bursts of {width} concurrent sessions each, for up to "
+                f"{budget_s:g}s, spending included inference - a load test "
+                f"against the live gateway, opt-in only; pass "
+                f"--load-test-enable to run it")
+    return (f"{cmd} would open {width} concurrent sessions at {model} for up "
+            f"to {budget_s:g}s, spending included inference - a load test "
+            f"against the live gateway, opt-in only; pass --load-test-enable "
+            f"to run it")
+
+
+# ---- the friendly default run (bare `luna-doctor`) ---------------------------
+
+WELCOME = (
+    "LunaRoute is the gateway in front of your models, and its capacity is\n"
+    "measured in concurrent requests, not tokens: how many may run at once.\n"
+    "\n"
+    "This run read the last hour of your local agent logs - nothing was sent\n"
+    "anywhere. The same hour is drawn as a chart beside the report below,\n"
+    "written to this directory as an SVG and a PNG (their paths print after\n"
+    "the report).\n"
+    "\n"
+    "The rest of the picture, one command per line:\n"
+    "  analyze   the same report for any window (luna-doctor analyze --since 24h)\n"
+    "  chart     the drawing alone, for any window\n"
+    "  fix       copy-paste settings that lower your concurrency\n"
+    "  capacity  the account line above, in full: plan, occupancy, admission"
+)
+
+
+def _account_line() -> str:
+    """The account's own capacity facts, one line, from the disk cache.
+
+    The default run opens with this because it frames everything after
+    it: the local numbers are being judged against the account's real
+    allowance. Cache-only by construction - the bare run never waits on
+    the 4-17s endpoint - and a cold cache, a null config or a collection
+    failure is unknown with the command that fills it: never a block,
+    never a fabrication."""
+    try:
+        cap, _ = sources._capacity_with_note(False)
+    except Exception:
+        cap = None
+    cfg = getattr(cap, "config", None) if cap is not None else None
+
+    def _num(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    bits: list = []
+    plan_name = getattr(cfg, "plan", None)
+    if isinstance(plan_name, str) and plan_name:
+        bits.append("%s plan" % plan_name)
+    if _num(getattr(cfg, "priority_lanes", None)) is not None:
+        bits.append("%d priority concurrent requests" % cfg.priority_lanes)
+    if _num(getattr(cfg, "background_lanes", None)) is not None:
+        bits.append("%d background" % cfg.background_lanes)
+    overflow = getattr(cfg, "overflow_routing", None)
+    if isinstance(overflow, str) and overflow:
+        bits.append("overflow %s" % overflow)
+    if not bits:
+        return "account: unknown (fetch with: luna-doctor capacity)"
+    return "LunaRoute account: " + " \u00b7 ".join(bits)
+
+
+def _open_png_quietly(path) -> None:
+    """Open the chart PNG in the system viewer, when that can work.
+
+    macOS `open`, and only when stdout is a terminal someone is reading:
+    printing the paths is the required minimum, and this can never be a
+    failure point - every way it can go wrong is swallowed."""
+    if not path or not sys.stdout.isatty() or sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(["open", path], check=False, timeout=10,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _default_run(ap) -> int:
+    """What bare `luna-doctor` does: the friendly default run.
+
+    The account line first - it frames the judgement - then a short
+    welcome mat, then the one-hour analysis and the chart beside it, SVG
+    and PNG both written to the working directory. The exit code is the
+    analysis verdict; the chart is a bonus that can never turn the run
+    red, and a chart that cannot be drawn says so and steps aside."""
+    print(_account_line())
+    print()
+    print(WELCOME)
+    code = _run(ap.parse_args(["analyze", "--since", "1h"]))
+    chart_args = ap.parse_args(["chart", "--since", "1h"])
+    try:
+        _run(chart_args)
+    except Exception as e:
+        print("luna-doctor: the chart could not be drawn: %s: %s"
+              % (type(e).__name__, e), file=sys.stderr)
+    _open_png_quietly(getattr(chart_args, "_png_path", None))
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2677,7 +3067,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="luna-doctor", description=desc,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=_version_string())
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    # No subcommand is the friendly default run, so `cmd` is optional; the
+    # welcome path prints the account line, a short explanation, the
+    # one-hour analysis and the chart beside it.
+    sub = ap.add_subparsers(dest="cmd", required=False)
 
     d = sub.add_parser("discover", help="what log stores exist on this machine")
     d.add_argument("--json", action="store_true")
@@ -2708,14 +3101,24 @@ def main(argv: list[str] | None = None) -> int:
     _add_style(a)
     a.set_defaults(func=cmd_analyze)
 
-    p = sub.add_parser("probe", help="measure the gateway at a chosen burst width "
-                                      "(needs --enable-probe to actually open one)")
+    # Out of the advertised surfaces on purpose: this command opens real
+    # concurrent sessions against the live gateway, so it is opt-in (the
+    # gate below) and undocumented - the README, the skill and the bare
+    # run's welcome do not mention it. `--help` is the one place it stays
+    # visible: argparse cannot hide a subcommand cleanly (help=SUPPRESS
+    # leaks a literal marker into the listing), so it is listed like any
+    # other command, invocable as ever, and its own `--help` documents it.
+    p = sub.add_parser("load-test",
+                       help="load-test the gateway at a chosen burst width "
+                            "(needs --load-test-enable to actually open one)",
+                       description="load-test the gateway at a chosen burst width "
+                                   "(needs --load-test-enable to actually open one)")
     p.add_argument("--n", type=int, default=10)
     p.add_argument("--model", default="glm-5.3")
     p.add_argument("--max-tokens", type=int, default=800)
     p.add_argument("--timeout", type=float, default=320.0)
     p.add_argument("--max-seconds", type=float, default=170.0)
-    p.add_argument("--enable-probe", action="store_true",
+    p.add_argument("--load-test-enable", action="store_true",
                    help="open the burst; without this flag luna-doctor only says "
                         "what it would open")
     p.add_argument("--json", action="store_true")
@@ -2723,14 +3126,14 @@ def main(argv: list[str] | None = None) -> int:
     _add_style(p)
     p.set_defaults(func=cmd_probe)
 
-    c = sub.add_parser("compare", help="run the same burst on a model and its -background twin "
-                                       "(needs --enable-probe to actually open one)")
+    c = sub.add_parser("compare", help="load-test a model and its -background twin "
+                                       "(needs --load-test-enable to actually open one)")
     c.add_argument("--n", type=int, default=10)
     c.add_argument("--model", default="glm-5.3")
     c.add_argument("--max-tokens", type=int, default=800)
     c.add_argument("--timeout", type=float, default=320.0)
     c.add_argument("--max-seconds", type=float, default=170.0)
-    c.add_argument("--enable-probe", action="store_true",
+    c.add_argument("--load-test-enable", action="store_true",
                    help="open the bursts; without this flag luna-doctor only says "
                         "what they would open")
     c.add_argument("--json", action="store_true")
@@ -2753,11 +3156,15 @@ def main(argv: list[str] | None = None) -> int:
     _add_network(f)
     f.set_defaults(func=None)
 
-    ch = sub.add_parser("chart", help="write a standalone SVG of concurrency and latency")
+    ch = sub.add_parser("chart", help="write the chart as a standalone SVG, plus a pasteable PNG")
     ch.add_argument("--since", default=None)
     ch.add_argument("--now", action="store_true")
     ch.add_argument("--harness", default="pi,claude-code")
-    ch.add_argument("--out", default=None, help="path for the .svg (default: ./luna-doctor-<ts>.svg)")
+    ch.add_argument("--out", default=None,
+                   help="path for the .svg (default: ./luna-doctor-<ts>.svg); "
+                        "the PNG takes the same stem")
+    ch.add_argument("--no-image", action="store_true",
+                    help="do not write the PNG beside the SVG")
     ch.add_argument("--width", type=int, default=1120)
     ch.add_argument("--height", type=int, default=640)
     ch.add_argument("--open", action="store_true", help="open the SVG when it is written")
@@ -2770,14 +3177,28 @@ def main(argv: list[str] | None = None) -> int:
     _add_style(ch)
     ch.set_defaults(func=None)
 
+    cp = sub.add_parser("capacity",
+                        help="the account's capacity: plan, priority concurrency, "
+                              "occupancy and admission (api.lunaroute.com, cached)")
+    cp.add_argument("--json", action="store_true")
+    _add_copy(cp)
+    _add_network(cp, subject="the account's capacity from api.lunaroute.com",
+                 ttl="5-minute")
+    _add_style(cp)
+    cp.set_defaults(func=cmd_capacity)
+
     args = ap.parse_args(argv)
-    if args.cmd in ("probe", "compare") and getattr(args, "n", 1) < 1:
+    if args.cmd is None:
+        # the bare run: account line, welcome mat, the one-hour analysis,
+        # and the chart (SVG and PNG) beside it
+        return _default_run(ap)
+    if args.cmd in ("load-test", "compare") and getattr(args, "n", 1) < 1:
         print("luna-doctor: --n must be at least 1", file=sys.stderr)
         return 2
     # A burst opens real concurrent sessions on the account, so it stays
     # behind an explicit opt-in: without the flag we say what it would do
     # and nothing is opened.
-    if args.cmd in ("probe", "compare") and not args.enable_probe:
+    if args.cmd in ("load-test", "compare") and not args.load_test_enable:
         print(probe_required_message(args.cmd, args.n, args.model, args.max_seconds),
               file=sys.stderr)
         return 2
@@ -2837,6 +3258,87 @@ def _run_captured(args) -> int:
     return code
 
 
+# ---- the account's capacity (analyze consumes the cache) ---------------------
+
+# What the capacity API's admission and history counts cover, stated wherever
+# server counts sit beside local ones: the server sees only traffic
+# contending for the shared pool. Requests routed on the account's own
+# provider keys (BYOK), embeddings, and dedicated-capacity traffic are
+# always excluded (System One decision requests count only when the org has
+# no dedicated System One allocation); the local logs DO see such requests,
+# so the two counts may legitimately differ for reasons that are not errors
+# - and nothing reconciles them.
+CAPACITY_COUNTS_EXCLUDE = (
+    "server counts cover only traffic contending for the shared pool: requests "
+    "routed on your own provider keys (BYOK), embeddings, and dedicated-capacity "
+    "traffic are always excluded (System One decision requests count only without "
+    "a dedicated System One allocation); the local counts are not so filtered, so "
+    "the two may differ for those reasons and are never reconciled")
+
+
+def _utc_days(since: float, until: float) -> list:
+    """The UTC calendar-day strings a window touches, ascending.
+
+    The capacity API reports admission per complete UTC day, so this is
+    the join key: every calendar day the window overlaps, whether or not
+    the API has an entry for it (the in-progress day never has one)."""
+    out: list = []
+    if until < since:
+        return out
+    d = datetime.fromtimestamp(since, timezone.utc).date()
+    last = datetime.fromtimestamp(until, timezone.utc).date()
+    while d <= last:
+        out.append(d.isoformat())
+        d += timedelta(days=1)
+    return out
+
+
+def _capacity_metrics(since: float, until: float, m: dict) -> dict:
+    """The additive metrics.capacity block: the account's plan, concurrency
+    and overflow routing, plus - when the window overlaps the API's complete
+    UTC days - the server's admission counts for those days placed next to
+    the local outcome counts.
+
+    analyze reads the 5-minute disk cache and never fetches live: the
+    endpoint answers in 4-17s, and `luna-doctor capacity` is the command
+    that refreshes it. No cache, an unreadable cache or a null config all
+    degrade to unknown with a reason - never to zero, never to an error,
+    and every field keeps the API's own name verbatim.
+    """
+    try:
+        cap, note = sources._capacity_with_note(False)
+    except Exception as e:
+        return {"provenance": sources.PROV_UNKNOWN,
+                "reason": f"collection failed: {type(e).__name__}: {e}"[:200]}
+    if cap is None:
+        return {"provenance": sources.PROV_UNKNOWN, "reason": note}
+
+    def cfg(name):
+        return getattr(cap.config, name, None) if cap.config is not None else None
+
+    block = {
+        "provenance": sources.PROV_ACCOUNT,
+        "source": cap.describe(),
+        "stale": cap.stale,
+        "note": note,
+        "plan": cfg("plan"),
+        "priority_lanes": cfg("priority_lanes"),
+        "background_lanes": cfg("background_lanes"),
+        "overflow_routing": cfg("overflow_routing"),
+    }
+    if cap.admission is not None:
+        block["admission_as_of"] = getattr(cap.admission, "as_of", None)
+    by_day = dict(sources.capacity_admission_days(cap))
+    days = [d for d in _utc_days(since, until) if d in by_day]
+    if days:
+        # verbatim day entries - accepted/deferred/denied/denied_after_wait/
+        # avg_queue_wait_ms keep the API's names and nulls
+        block["window_days"] = [dict(by_day[d]) for d in days]
+        block["local_outcomes"] = dict(m.get("by_outcome") or {})
+        block["counts_exclude"] = CAPACITY_COUNTS_EXCLUDE
+    return block
+
+
 def cmd_analyze(args) -> int:
     try:
         hours = window_hours(args.since, args.now)
@@ -2875,6 +3377,16 @@ def cmd_analyze(args) -> int:
         m["snapshot"] = snap.to_dict()
     except Exception as e:
         m["snapshot"] = {"provenance": sources.PROV_UNKNOWN,
+                         "reason": f"collection failed: {type(e).__name__}: {e}"[:200]}
+    # The account's capacity block (additive; schema stays 4): plan and
+    # concurrency from the disk cache, plus the server's admission counts
+    # for the window's complete UTC days next to the local outcome counts.
+    # Cache-only by construction - the 4-17s endpoint is never on this
+    # path - and a failure degrades to unknown, never to an error.
+    try:
+        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
+    except Exception as e:
+        m["capacity"] = {"provenance": sources.PROV_UNKNOWN,
                          "reason": f"collection failed: {type(e).__name__}: {e}"[:200]}
     if bool(getattr(args, "online", False)) and (snap is None or snap.catalog is None):
         note = snap.catalog_note if snap is not None else m["snapshot"].get("reason", "")
