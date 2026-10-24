@@ -48,7 +48,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from luna_doctor import plan
-from luna_doctor import render_share
 from luna_doctor import report
 from luna_doctor import sources
 from luna_doctor.render_pretty import render_pretty, reveal, style_for
@@ -56,7 +55,7 @@ from luna_doctor.sources import (CLAUDE_STORE, CODEX_STORE, GATEWAY_HOST,
                                  PI_STORE, SWAMP_EXTRACT_CONCURRENCY_DEFAULT,
                                  SWAMP_LLM_CONCURRENCY_DEFAULT)
 
-VERSION = "0.2.0-alpha.1"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+VERSION = "0.2.0-alpha.2"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 4         # 4: capacity fields renamed to the LunaRoute
                            #     vocabulary (contract.advised_concurrency,
                            #     findings.priority_concurrency: null until
@@ -2173,11 +2172,10 @@ def print_report(rep: report.Report, args) -> None:
     """Render `rep` to stdout the way this run's `--style` asked for.
 
     `--json` never reaches here - it prints its own envelope, and no Style
-    is ever constructed on that path. `plain` renders undecorated; `share`
-    never reaches here either - `render()` routes it to the share renderer
-    before this is called - and `pretty` always takes the pretty layout -
-    with the gate closed the same layout prints bare - and `auto` picks
-    pretty only when the gate opened for this stream.
+    is ever constructed on that path. `plain` renders undecorated, and
+    `pretty` always takes the pretty layout - with the gate closed the same
+    layout prints bare - and `auto` picks pretty only when the gate opened
+    for this stream.
     """
     style = getattr(args, "_style", None)
     requested = getattr(args, "style", None)
@@ -2186,22 +2184,6 @@ def print_report(rep: report.Report, args) -> None:
         return
     write_out(report.render_plain(rep))
 
-
-def _share(m: dict, head: str, adj: list, args) -> None:
-    """Print the WhatsApp message to stdout and the card's path to stderr.
-
-    stdout alone is the copyable artifact: the message, nothing else. The
-    PNG path (and any failure to write it) goes to stderr, so piping stdout
-    straight into a paste yields clean share text.
-    """
-    write_out(render_share.render_share_text(build_report(m, head, adj), m))
-    out = getattr(args, "out", None) or render_share.default_card_path()
-    try:
-        path = render_share.write_card(m, head, out)
-    except OSError as e:
-        print(f"luna-doctor: could not write the share card: {e}", file=sys.stderr)
-        return
-    print(f"share card: {os.path.abspath(path)}", file=sys.stderr)
 
 
 def render(m: dict, head: str, adj: list[str], as_json: bool,
@@ -2220,9 +2202,6 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
             doc["store"] = {"path": stored["path"], "ledger": stored["ledger"],
                             "findings": len(stored["findings"])}
         print(json.dumps(doc, indent=2))
-        return
-    if getattr(args, "share", False) or getattr(args, "style", None) == "share":
-        _share(m, head, adj, args)
         return
     print_report(build_report(m, head, adj), args)
 
@@ -2908,7 +2887,7 @@ def _version_string() -> str:
 
 def _add_style(sp) -> None:
     """The renderer selector every report-producing command takes."""
-    sp.add_argument("--style", choices=("auto", "pretty", "plain", "share"),
+    sp.add_argument("--style", choices=("auto", "pretty", "plain"),
                     default=None,
                     help="how to render the report: auto picks pretty on a color "
                          "terminal and plain otherwise (default)")
@@ -3091,12 +3070,6 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--no-store", action="store_true", help="do not persist this run")
     a.add_argument("--json", action="store_true")
     _add_copy(a)
-    a.add_argument("--share", action="store_true",
-                   help="print a WhatsApp-ready message to stdout and write a "
-                        "1080x1350 share card PNG (implies plain output)")
-    a.add_argument("--out", default=None, metavar="PATH",
-                   help="path for the --share card PNG "
-                        "(default: ./luna-doctor-share-<ts>.png)")
     _add_network(a)
     _add_style(a)
     a.set_defaults(func=cmd_analyze)
@@ -3213,12 +3186,6 @@ def _run(args) -> int:
     # no Style is constructed on that path, so no code can reach the envelope.
     if hasattr(args, "style") and not args.json:
         args._style = style_for(args.style, sys.stdout)
-        if args.style == "share" and args.cmd != "analyze":
-            # Share is analyze's renderer: `analyze --share` prints the
-            # message and writes the card. On any other command the request
-            # falls back to plain output rather than being refused.
-            print("luna-doctor: --style share is the analyze share renderer; "
-                  "this command shows plain output.", file=sys.stderr)
     else:
         args._style = None
     if args.cmd == "analyze":
@@ -3235,7 +3202,7 @@ def _run_captured(args) -> int:
 
     Capture is the only mechanism that can promise "exactly what the command
     printed" across five commands that each own their printing - `fix` prints
-    its block directly, `analyze --share` prints the share message, `--json`
+    its block directly, `--json`
     prints its own envelope. The captured text is echoed to the real stdout
     after the run, so stdout is unchanged and a failed copy is never a lost
     answer. It is also why `--copy` renders plain even under an explicit

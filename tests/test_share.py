@@ -172,6 +172,17 @@ class ShareText(unittest.TestCase):
         self.assertNotIn("swamp", text.lower())
 
 
+def _pixels(data, w, h):
+    """Yield every (r, g, b) of a filter-0 truecolor PNG, for content checks."""
+    idat = data[data.index(b"IDAT") + 4:data.index(b"IEND") - 8]
+    raw = zlib.decompress(idat)
+    stride = w * 3
+    for y in range(h):
+        base = y * (stride + 1) + 1
+        row = raw[base:base + stride]
+        for x in range(w):
+            yield (row[x * 3], row[x * 3 + 1], row[x * 3 + 2])
+
 class ShareCard(unittest.TestCase):
     def _m(self, **over):
         m = {"requests": 1661, "peak_concurrency": 17,
@@ -238,39 +249,3 @@ class ShareCard(unittest.TestCase):
         self.assertNotIn("None", svg)
 
 
-class ShareCli(unittest.TestCase):
-    """The stdout/stderr split: stdout alone is the copyable artifact."""
-
-    def test_share_puts_the_message_on_stdout_and_the_path_on_stderr(self):
-        with tempfile.TemporaryDirectory() as d:
-            out = os.path.join(d, "card.png")
-            env = dict(os.environ)
-            env["LUNA_DOCTOR_STORE"] = os.path.join(d, "store")
-            proc = subprocess.run(
-                [sys.executable, CLI, "analyze", "--since", "1h", "--share", "--out", out],
-                capture_output=True, text=True, timeout=180, cwd=ROOT, env=env)
-            self.assertIn(proc.returncode, (0, 1, 2))
-            self.assertTrue(proc.stdout.startswith("> "))
-            self.assertNotIn("\033", proc.stdout)
-            self.assertNotIn("\U0001F319", proc.stdout)
-            self.assertIn(os.path.basename(out), proc.stderr)
-            self.assertNotIn("share card", proc.stdout)
-            self.assertTrue(os.path.isfile(out))
-            with open(out, "rb") as fh:
-                self.assertTrue(fh.read(8).startswith(b"\x89PNG"))
-
-
-def _pixels(data, w, h):
-    """Yield every (r, g, b) of a filter-0 truecolor PNG, for content checks."""
-    idat = data[data.index(b"IDAT") + 4:data.index(b"IEND") - 8]
-    raw = zlib.decompress(idat)
-    stride = w * 3
-    for y in range(h):
-        base = y * (stride + 1) + 1
-        row = raw[base:base + stride]
-        for x in range(w):
-            yield (row[x * 3], row[x * 3 + 1], row[x * 3 + 2])
-
-
-if __name__ == "__main__":
-    unittest.main()

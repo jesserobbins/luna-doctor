@@ -17,6 +17,15 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.2.0-alpha.2] - 2026-10-24
+
+### Removed
+
+- The `--share` WhatsApp surface and share-card PNG are suppressed: `analyze --share`,
+  `--style share`, and the card output no longer exist. The renderer module and its
+  unit tests remain, so the surface can return when it earns its place. The README
+  no longer documents it.
+
 ### Added
 
 - The account's real capacity, from LunaRoute's `GET /v1/capacity`. One data-collection layer in `luna_doctor/sources.py`: `fetch_capacity()` beside the existing fetchers, cached to disk for 5 minutes (the endpoint answers in 4–17s and rate-limits at 60/min, so nothing fetches per-render), provenance-carrying (`account` — a new sixth provenance word for fetched-account values, beside measured/declared/catalog/configured/unknown), degrading to unknown — never zero, never a default, every null preserved as the API's own story. `luna-doctor capacity` renders the API's four pages as a first-class report — now (live occupancy, ledger health, saturation), config (plan, priority and background concurrency, overflow routing), history (7d/30d occupancy rollups), and admission (per complete UTC day: accepted / deferred / denied / denied_after_wait, with a null `avg_queue_wait_ms` rendered as no waiting that day, not 0) — and `capacity --online` is the one command that refreshes the cache; every other consumer reads the cache and never touches the network. `analyze` gains an additive `metrics.capacity` block: plan, concurrency and overflow routing, plus the server's admission counts for the window's complete UTC days placed beside the local outcome counts, with `denied_after_wait` rendered as corroboration for the park-deadline rejection class — the paired “local peak 17 · account limit 12” line included. The doc page's semantics are stated wherever server counts sit beside local ones: `days_active` is not `days_covered` (idle days are covered but not active), the overflow-routing caveat says overflow is a capacity allowance, not a promise, and shared-pool exclusions (requests on your own provider keys, embeddings, dedicated capacity) mean the two counts are never reconciled. The chart's priority-concurrency rule now resolves from the account's cached `priority_lanes`, labelled “(account, plan apex)”. A canned live payload — captured once, 2026-10-23, with its null and degraded fields intact — is committed under `tests/fixtures/` so the offline suite tests against the API's real shape.

@@ -1,7 +1,7 @@
 """Decide how output may be decorated: color, emoji and motion.
 
 `resolve_style` is the single gate every renderer asks before emitting
-anything; renderers never re-implement the rules. Plain and share output
+anything; renderers never re-implement the rules. Plain output
 are never decorated, `NO_COLOR` beats an explicit `--style pretty`, and
 `CLICOLOR_FORCE` colors a pipe that would otherwise stay plain.
 """
@@ -47,11 +47,11 @@ class Style:
 def resolve_style(requested, stream, env=None):
     """Resolve a `--style` request against the stream and environment.
 
-    `requested` is one of `None`, "auto", "pretty", "plain", "share".
+    `requested` is one of `None`, "auto", "pretty", "plain".
     `env` defaults to `os.environ`; an empty `NO_COLOR` counts as unset.
     """
     env = os.environ if env is None else env
-    if requested in ("plain", "share"):
+    if requested == "plain":
         return Style(False, False, False)
 
     no_color = bool(env.get("NO_COLOR", ""))
