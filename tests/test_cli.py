@@ -45,18 +45,20 @@ def _capacity_cache_doc(payload, fetched_at):
             "url": "https://api.lunaroute.com/v1/capacity", "response": payload}
 
 
-def run(*args, timeout=180, store=None, capacity=None):
-    env = dict(os.environ)
-    env["LUNA_DOCTOR_STORE"] = store or _TEST_STORE
+def run(*args, timeout=180, store=None, capacity=None, env=None):
+    _env = dict(os.environ)
+    _env["LUNA_DOCTOR_STORE"] = store or _TEST_STORE
     if capacity is None:
-        env["LUNA_DOCTOR_CAPACITY"] = _TEST_CAPACITY
+        _env["LUNA_DOCTOR_CAPACITY"] = _TEST_CAPACITY
     else:
         d = tempfile.mkdtemp(prefix="luna-doctor-capacity-")
-        env["LUNA_DOCTOR_CAPACITY"] = os.path.join(d, "capacity.json")
-        with open(env["LUNA_DOCTOR_CAPACITY"], "w") as fh:
+        _env["LUNA_DOCTOR_CAPACITY"] = os.path.join(d, "capacity.json")
+        with open(_env["LUNA_DOCTOR_CAPACITY"], "w") as fh:
             json.dump(_capacity_cache_doc(capacity, time.time()), fh)
+    if env:
+        _env.update(env)
     proc = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True,
-                          timeout=timeout, cwd=ROOT, env=env)
+                          timeout=timeout, cwd=ROOT, env=_env)
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -1308,7 +1310,8 @@ def _load_cli():
     return cli
 
 
-def _pi_line(ts, model, start_ms, end_ms, err=None, stop="stop", out=100):
+def _pi_line(ts, model, start_ms, end_ms, err=None, stop="stop", out=100,
+             provider="lunaroute"):
     """One pi assistant record, the shape iter_pi reads."""
     rec = {
         "type": "message",
@@ -1317,7 +1320,7 @@ def _pi_line(ts, model, start_ms, end_ms, err=None, stop="stop", out=100):
         "message": {
             "role": "assistant",
             "model": model,
-            "provider": "lunaroute",
+            "provider": provider,
             "timestamp": start_ms,
             "usage": {"input": 10, "output": out},
             "stopReason": "error" if err else stop,
@@ -1327,6 +1330,54 @@ def _pi_line(ts, model, start_ms, end_ms, err=None, stop="stop", out=100):
         },
     }
     return json.dumps(rec)
+
+
+def _claude_line(mid, model, ts, stop="end_turn", out=10):
+    """One claude-code assistant record, shaped like the real vendors.
+
+    The two vendor populations in the live store differ in more than the
+    model name, and these fixtures keep that corroboration: an
+    Anthropic-direct record carries Anthropic's native msg_011C... id and a
+    non-empty inference_geo, while a LunaRoute-routed one carries the
+    gateway's own msg_<uuid> id and empty geo (verified store-wide; see
+    claude_route's docstring).
+    """
+    anthropic = model.startswith("claude-") and "-lr" not in model
+    return json.dumps({
+        "type": "assistant",
+        "timestamp": ts,
+        "message": {
+            "id": mid,
+            "model": model,
+            "stop_reason": stop,
+            "usage": {"input_tokens": 3, "output_tokens": out,
+                      "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 0,
+                      "service_tier": "standard",
+                      "inference_geo": "global" if anthropic else "",
+                      "speed": "standard", "fallback_credit": None,
+                      "iterations": 1},
+        },
+    })
+
+
+def _write_catalog(path, models):
+    """A cached LunaRoute catalog naming `models`, in the file shape
+    sources._read_catalog_cache serves. Tests point LUNA_DOCTOR_CATALOG at
+    it, so the claude-code classifier reads a fixture cache and never the
+    real one, the network, or $HOME."""
+    with open(path, "w") as fh:
+        json.dump({"fetched_at": time.time(),
+                   "response": {"data": [{"id": m} for m in models]}}, fh)
+    return path
+
+
+# The catalog the claude-code regression fixtures route through: their
+# sessions ran on glm-5.3, which no naming rule can attribute, so the
+# classifier must see it in a catalog (see the VendorFilterClaude tests for
+# the naming rules themselves).
+_REGRESSION_CATALOG = _write_catalog(
+    os.path.join(_TEST_STORE, "catalog-glm-5.3.json"), ("glm-5.3",))
 
 
 class OutcomeClasses(unittest.TestCase):
@@ -1761,6 +1812,12 @@ class ReviewerRegressions(unittest.TestCase):
 
     def setUp(self):
         self.m = _load_cli()
+        # claude-code fixtures route through a catalog: the classifier must
+        # see their model as LunaRoute's, and no test reads the real cache.
+        os.environ["LUNA_DOCTOR_CATALOG"] = _REGRESSION_CATALOG
+
+    def tearDown(self):
+        os.environ.pop("LUNA_DOCTOR_CATALOG", None)
 
     def test_zero_length_request_does_not_inflate_later_bands(self):
         """codex: a zero-length interval stayed active forever, poisoning the sweep."""
@@ -1879,6 +1936,12 @@ class SecondReviewRegressions(unittest.TestCase):
 
     def setUp(self):
         self.m = _load_cli()
+        # claude-code fixtures route through a catalog: the classifier must
+        # see their model as LunaRoute's, and no test reads the real cache.
+        os.environ["LUNA_DOCTOR_CATALOG"] = _REGRESSION_CATALOG
+
+    def tearDown(self):
+        os.environ.pop("LUNA_DOCTOR_CATALOG", None)
 
     def _r(self, start, dur, oc="client_idle_timeout"):
         return self.m.Request(harness="pi", session="s", model="glm-5.3",
@@ -1964,6 +2027,12 @@ class ThirdReviewRegressions(unittest.TestCase):
 
     def setUp(self):
         self.m = _load_cli()
+        # claude-code fixtures route through a catalog: the classifier must
+        # see their model as LunaRoute's, and no test reads the real cache.
+        os.environ["LUNA_DOCTOR_CATALOG"] = _REGRESSION_CATALOG
+
+    def tearDown(self):
+        os.environ.pop("LUNA_DOCTOR_CATALOG", None)
 
     def _reqs(self, base, n=3, dur=300.0):
         return [self.m.Request(harness="pi", session="s", model="glm-5.3",
@@ -2523,7 +2592,8 @@ class ThirdReviewRegressions(unittest.TestCase):
                 with open(os.path.join(d, "s.jsonl"), "w") as fh:
                     fh.write("\n".join(json.dumps(r) for r in records) + "\n")
             # window opens after the fragment's last record, before the terminal one
-            reqs = self.m.iter_claude([tmp], base + 10, base + 3600)
+            reqs = self.m.iter_claude([tmp], base + 10, base + 3600,
+                                      catalog={"glm-5.3"})
         self.assertEqual(len(reqs), 1)
         self.assertIsNotNone(reqs[0].start)
         self.assertGreater(reqs[0].end - reqs[0].start, 0, "the pre-window start survives")
@@ -2552,7 +2622,8 @@ class ThirdReviewRegressions(unittest.TestCase):
                         os.makedirs(d)
                         with open(os.path.join(d, "s.jsonl"), "w") as fh:
                             fh.write("\n".join(json.dumps(r) for r in records) + "\n")
-                    reqs = self.m.iter_claude([tmp], base + 10, base + 3600)
+                    reqs = self.m.iter_claude([tmp], base + 10, base + 3600,
+                                              catalog={"glm-5.3"})
                 self.assertEqual(len(reqs), 1)
                 self.assertGreater(reqs[0].end - reqs[0].start, 0,
                                    "the pre-window start must not depend on file order")
@@ -2590,6 +2661,12 @@ class FourthReviewRegressions(unittest.TestCase):
 
     def setUp(self):
         self.m = _load_cli()
+        # claude-code fixtures route through a catalog: the classifier must
+        # see their model as LunaRoute's, and no test reads the real cache.
+        os.environ["LUNA_DOCTOR_CATALOG"] = _REGRESSION_CATALOG
+
+    def tearDown(self):
+        os.environ.pop("LUNA_DOCTOR_CATALOG", None)
 
     def test_disjoint_windows_with_equal_counts_are_two_occurrences(self):
         """both: event findings that share a count but not a time must both record."""
@@ -3058,6 +3135,235 @@ class SaturatedVocabulary(unittest.TestCase):
         self.assertFalse(r.saturated)
         r2 = m.Request(harness="pi", session="s", model="m", outcome="client_idle_timeout")
         self.assertTrue(r2.saturated)
+
+
+class VendorFilterPi(unittest.TestCase):
+    """pi names the provider that answered; only lunaroute touched the gateway.
+
+    The real store carries lunaroute beside ollama, gengen, openai-codex,
+    lmstudio, poolside and test gateways. Local and direct sessions have
+    different latency, no admission, no parking - and were inflating the
+    concurrency, latency and per-model stats of a report about the gateway.
+    """
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _store(self, tmp, lines, name="s.jsonl"):
+        d = os.path.join(tmp, "proj")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    def _stamp(self, now, offset=800):
+        return datetime.datetime.fromtimestamp(
+            now - offset, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def test_only_lunaroute_traffic_reaches_the_request_set(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            start_ms = int((now - 900) * 1000)
+            self._store(tmp, [
+                _pi_line(self._stamp(now, 800), "glm-5.3", start_ms, None),
+                _pi_line(self._stamp(now, 780), "minimax-m3:cloud", start_ms, None,
+                         provider="ollama"),
+                _pi_line(self._stamp(now, 760), "glm-5-2-260617", start_ms, None,
+                         provider="gengen"),
+                # no record in the real store lacks the provider field, so an
+                # empty one is not attributable to the gateway either
+                _pi_line(self._stamp(now, 740), "glm-5.3", start_ms, None, provider=""),
+            ])
+            reqs = self.m.collect(1, ["pi"], pi_roots=[tmp])
+        self.assertEqual([r.model for r in reqs], ["glm-5.3"])
+        self.assertEqual(reqs.excluded["pi_non_lunaroute"], 3)
+        self.assertEqual(reqs.excluded["pi_by_provider"],
+                         {"(no provider)": 1, "gengen": 1, "ollama": 1})
+
+    def test_exclusions_are_counted_once_per_response(self):
+        """the filter sits after de-duplication: a mirrored copy of the same
+        ollama response is one exclusion, not two."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            start_ms = int((now - 900) * 1000)
+            line = _pi_line(self._stamp(now), "minimax-m3:cloud", start_ms, None,
+                            provider="ollama")
+            self._store(tmp, [line], name="a.jsonl")
+            self._store(tmp, [line], name="b.jsonl")
+            reqs = self.m.collect(1, ["pi"], pi_roots=[tmp])
+        self.assertEqual(len(reqs), 0)
+        self.assertEqual(reqs.excluded["pi_non_lunaroute"], 1)
+
+    def test_metrics_and_report_carry_the_exclusions(self):
+        from luna_doctor import report as _report
+        reqs = self.m.Requests(
+            [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                             start=1.0, end=2.0, outcome="completed")],
+            excluded={"pi_non_lunaroute": 2, "pi_by_provider": {"ollama": 2}})
+        m = self.m.analyse(reqs, 1.0)
+        self.assertEqual(m["excluded"],
+                         {"pi_non_lunaroute": 2, "pi_by_provider": {"ollama": 2}})
+        head, adj, _ = self.m.verdict(m)
+        out = _report.render_plain(self.m.build_report(m, head, adj))
+        self.assertIn("2 pi request(s) on other providers (ollama 2) excluded", out)
+        self.assertIn("never touched the gateway", out)
+        # a list assembled by hand filtered nothing, and says so by omission
+        self.assertNotIn("excluded", self.m.analyse(list(reqs), 1.0))
+
+    def test_a_clean_window_reports_zero_exclusions(self):
+        """the block is present when the filter ran, even when it dropped
+        nothing - a positive statement that the window is gateway-only."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            start_ms = int((now - 900) * 1000)
+            self._store(tmp, [_pi_line(self._stamp(now), "glm-5.3", start_ms, None)])
+            reqs = self.m.collect(1, ["pi"], pi_roots=[tmp])
+        m = self.m.analyse(reqs, 1.0)
+        self.assertEqual(m["excluded"],
+                         {"pi_non_lunaroute": 0, "pi_by_provider": {}})
+
+    def test_the_cli_reports_what_it_excluded(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            start_ms = int((now - 900) * 1000)
+            self._store(tmp, [
+                _pi_line(self._stamp(now, 800), "glm-5.3", start_ms, None),
+                _pi_line(self._stamp(now, 780), "minimax-m3:cloud", start_ms, None,
+                         provider="ollama"),
+            ])
+            code, out, err = run("analyze", "--since", "1h", "--pi-root", tmp,
+                                 "--harness", "pi", "--json")
+            self.assertIn(code, (0, 1), err)
+            doc = json.loads(out)
+            self.assertEqual(doc["metrics"]["excluded"]["pi_non_lunaroute"], 1)
+            self.assertEqual(doc["metrics"]["excluded"]["pi_by_provider"],
+                             {"ollama": 1})
+            code, out, err = run("analyze", "--since", "1h", "--pi-root", tmp,
+                                 "--harness", "pi")
+            self.assertIn(code, (0, 1), err)
+        self.assertIn("1 pi request(s) on other providers (ollama 1) excluded", out)
+        self.assertIn("never touched the gateway", out)
+
+
+class VendorFilterClaude(unittest.TestCase):
+    """claude-code logs no provider, so the route is read from the model name.
+
+    Verified against the live store: LunaRoute-routed sessions ran
+    deepseek-4.1-flash and its -background twin (live-catalog models) and the
+    -lr aliases claude-opus-lr11 / claude-opus-lr29 / claude-haiku-lr34;
+    Anthropic-direct sessions ran plain claude-sonnet-5-5 / claude-opus-5-5
+    and carry Anthropic-native msg_011C... ids; `<synthetic>` is claude-code's
+    own local placeholder, never an API call.
+    """
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _store(self, tmp, records, name="s.jsonl"):
+        d = os.path.join(tmp, "proj")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), "w") as fh:
+            fh.write("\n".join(records) + "\n")
+
+    def _stamp(self, now, offset=800):
+        return datetime.datetime.fromtimestamp(
+            now - offset, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def test_anthropic_direct_models_are_excluded_and_counted(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._store(tmp, [
+                _claude_line("msg_011Cabc123def456ghi78jkl",
+                             "claude-sonnet-5-5", self._stamp(now, 800)),
+                _claude_line("msg_011Czzz999yyy888xxx77www",
+                             "claude-opus-5-5", self._stamp(now, 780)),
+                _claude_line("msg_40e6185b-085e-4c9e-98d1-0981184a2888",
+                             "claude-opus-lr11", self._stamp(now, 760)),
+            ])
+            reqs = self.m.iter_claude([tmp], now - 3600, now, catalog=None)
+        self.assertEqual([r.model for r in reqs], ["claude-opus-lr11"])
+        self.assertEqual(reqs.excluded["claude_non_lunaroute"], 2)
+        self.assertEqual(reqs.excluded["claude_by_model"],
+                         {"claude-opus-5-5": 1, "claude-sonnet-5-5": 1})
+        self.assertEqual(reqs.excluded["claude_unclassified"], 0)
+
+    def test_catalog_models_and_their_background_twin_are_kept(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._store(tmp, [
+                _claude_line("msg_70f4aaaa-bbbb-4ccc-8ddd-0123456789ab",
+                             "deepseek-4.1-flash", self._stamp(now, 800)),
+                _claude_line("msg_70f4cccc-bbbb-4ccc-8ddd-0123456789ab",
+                             "deepseek-4.1-flash-background", self._stamp(now, 780)),
+            ])
+            reqs = self.m.iter_claude([tmp], now - 3600, now,
+                                      catalog={"deepseek-4.1-flash"})
+        self.assertEqual([r.model for r in reqs],
+                         ["deepseek-4.1-flash", "deepseek-4.1-flash-background"])
+        self.assertEqual(reqs.excluded["claude_non_lunaroute"], 0)
+        self.assertEqual(reqs.excluded["claude_unclassified"], 0)
+
+    def test_without_a_catalog_a_non_claude_model_is_unclassified(self):
+        """No catalog, no -lr alias, no claude naming: the honest bucket is
+        unclassified - excluded and counted, never guessed into the window."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._store(tmp, [
+                _claude_line("msg_70f4aaaa-bbbb-4ccc-8ddd-0123456789ab",
+                             "deepseek-4.1-flash", self._stamp(now, 800)),
+                _claude_line("5d841807-c4b5-4a1e-8f2a-63b7a52cb1a5",
+                             "<synthetic>", self._stamp(now, 780)),
+            ])
+            reqs = self.m.iter_claude([tmp], now - 3600, now, catalog=None)
+        self.assertEqual(len(reqs), 0)
+        self.assertEqual(reqs.excluded["claude_unclassified"], 2)
+        self.assertEqual(reqs.excluded["claude_unclassified_by_model"],
+                         {"<synthetic>": 1, "deepseek-4.1-flash": 1})
+        self.assertEqual(reqs.excluded["claude_non_lunaroute"], 0)
+
+    def test_the_classifier_reads_the_route_off_the_model_name(self):
+        route = self.m.claude_route
+        self.assertEqual(route("deepseek-4.1-flash", {"deepseek-4.1-flash"}),
+                         "lunaroute")
+        self.assertEqual(
+            route("deepseek-4.1-flash-background", {"deepseek-4.1-flash"}),
+            "lunaroute")
+        self.assertEqual(route("glm-5.3-vision", ["glm-5.3-vision"]), "lunaroute")
+        # the catalog trap: an alias today's catalog no longer lists is still
+        # LunaRoute's own naming, and still gateway traffic
+        self.assertEqual(route("claude-opus-lr11", None), "lunaroute")
+        self.assertEqual(route("claude-haiku-lr34", set()), "lunaroute")
+        # plain Anthropic naming, no alias: direct traffic
+        self.assertEqual(route("claude-sonnet-5-5", {"deepseek-4.1-flash"}),
+                         "anthropic")
+        self.assertEqual(route("claude-opus-4-8", None), "anthropic")
+        # everything else is unclassifiable from the logs alone
+        self.assertEqual(route("gpt-5.5", None), "")
+        self.assertEqual(route("<synthetic>", {"glm-5.3"}), "")
+        self.assertEqual(route("", {"deepseek-4.1-flash"}), "")
+
+    def test_the_cli_classifies_through_the_catalog_cache(self):
+        """collect() serves the classifier from the disk cache only: with a
+        cached catalog naming deepseek-4.1-flash the run keeps that traffic
+        and counts the Anthropic-direct session beside it."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as cat:
+            catalog_path = _write_catalog(os.path.join(cat, "catalog.json"),
+                                          ["deepseek-4.1-flash"])
+            self._store(tmp, [
+                _claude_line("msg_70f4aaaa-bbbb-4ccc-8ddd-0123456789ab",
+                             "deepseek-4.1-flash", self._stamp(now, 800)),
+                _claude_line("msg_011Cabc123def456ghi78jkl",
+                             "claude-sonnet-5-5", self._stamp(now, 780)),
+            ])
+            code, out, err = run("analyze", "--since", "1h", "--claude-root", tmp,
+                                 "--harness", "claude-code", "--json",
+                                 env={"LUNA_DOCTOR_CATALOG": catalog_path})
+            self.assertIn(code, (0, 1), err)
+            doc = json.loads(out)
+        self.assertEqual(doc["metrics"]["requests"], 1)
+        self.assertEqual(doc["metrics"]["excluded"]["claude_non_lunaroute"], 1)
+        self.assertEqual(doc["metrics"]["excluded"]["claude_by_model"],
+                         {"claude-sonnet-5-5": 1})
 
 
 if __name__ == "__main__":
