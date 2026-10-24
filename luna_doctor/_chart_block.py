@@ -113,6 +113,44 @@ from luna_doctor.plan import PLAN_PRIORITY, resolve_capacity
 from luna_doctor.png import png_from
 from luna_doctor.scene import Circle, Line, Rect, Scene, Text, svg_from
 
+
+def _system_rasterize(svg_path: str, png_path: str, width: int):
+    """Rasterise the written SVG with a system tool, best first.
+
+    The SVG names a real font stack, so a system rasteriser draws real
+    type; the package's own `png_from` carries only a 95-glyph bitmap font,
+    which renders the same chart in blocky pixel type. These tools are
+    optional extras detected at runtime - the stdlib guarantee holds:
+    when none exists the caller falls back to `png_from` and nothing
+    about the contract changes. Returns True when `png_path` was written.
+    """
+    import shutil
+    import subprocess
+    candidates = []
+    if shutil.which("rsvg-convert"):
+        candidates.append(["rsvg-convert", "-w", str(width), svg_path,
+                           "-o", png_path])
+    if shutil.which("inkscape"):
+        candidates.append(["inkscape", svg_path, "--export-type=png",
+                           "--export-filename=" + png_path,
+                           "--export-width=" + str(width)])
+    for name in ("magick", "convert"):
+        if shutil.which(name):
+            candidates.append([name, "-background", "white",
+                               svg_path, png_path])
+    if not candidates:
+        return False
+    for cmd in candidates:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=30)
+            if proc.returncode == 0 and os.path.isfile(png_path) \
+                    and os.path.getsize(png_path) > 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
 CHART_FONT = "ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif"
 
 # Colour carries meaning: one blue ramp for priority scheduling (one step
@@ -805,9 +843,6 @@ def cmd_chart(args) -> int:
     scene = build_chart_scene(reqs, m, hours, width=args.width,
                               height=args.height, capacity=capacity)
     svg = svg_from(scene)
-    png = None
-    if not getattr(args, "no_image", False):
-        png = png_from(scene)
 
     out = args.out
     if not out:
@@ -821,17 +856,21 @@ def cmd_chart(args) -> int:
         return 2
 
     png_out = None
-    if png is not None:
+    if not getattr(args, "no_image", False):
         png_out = os.path.splitext(out)[0] + ".png"
-        try:
-            with open(png_out, "wb") as fh:
-                fh.write(png)
-        except OSError as e:
-            # additive surface: a failed PNG write loses the inline image,
-            # never the chart and never the exit code
-            print("luna-doctor: cannot write %s: %s" % (png_out, e),
-                  file=sys.stderr)
-            png_out = None
+        # real type first: the SVG names a font stack, so a system
+        # rasteriser renders it properly; the package's bitmap renderer
+        # (95 ASCII glyphs, everything folded) is the everywhere-fallback
+        if not _system_rasterize(os.path.abspath(out), png_out, args.width):
+            try:
+                with open(png_out, "wb") as fh:
+                    fh.write(png_from(scene))
+            except OSError as e:
+                # additive surface: a failed PNG write loses the inline image,
+                # never the chart and never the exit code
+                print("luna-doctor: cannot write %s: %s" % (png_out, e),
+                      file=sys.stderr)
+                png_out = None
     # the paths ride on the namespace so a caller that ran the chart as
     # part of a bigger whole (the bare default run) can name or open them
     args._svg_path = os.path.abspath(out)
@@ -854,7 +893,7 @@ def cmd_chart(args) -> int:
         }
         if png_out:
             doc["png_path"] = os.path.abspath(png_out)
-            doc["png_bytes"] = len(png)
+            doc["png_bytes"] = os.path.getsize(png_out)
         print(json.dumps(envelope("chart", doc, contract=CONTRACT), indent=2))
     else:
         dead = (m["by_outcome"].get("admission_timeout", 0)
@@ -862,7 +901,7 @@ def cmd_chart(args) -> int:
         print("wrote %s  (%.0f KB)" % (os.path.abspath(out), len(svg) / 1024))
         if png_out:
             print("wrote %s  (%.0f KB) - the inline image, paste it anywhere"
-                  % (os.path.abspath(png_out), len(png) / 1024))
+                  % (os.path.abspath(png_out), os.path.getsize(png_out) / 1024))
         print("  %d requests, peak concurrency %d, %d rejected at admission"
               % (m["requests"], m["peak_concurrency"], dead))
         if capacity.known:
