@@ -1031,9 +1031,12 @@ class AnalyzeCapacity(unittest.TestCase):
         self.assertNotIn("BYOK", text)
 
     def test_a_byok_and_embedding_window_renders_the_exclusion_line(self):
-        """The local logs see BYOK and embedding requests the server's counts
-        exclude; the report must say so wherever the two sit beside each
-        other - and the server's denied_after_wait must corroborate."""
+        """Two exclusions that must not be conflated: the local window
+        excludes non-gateway traffic by provider (the vendor filter), while
+        the server excludes gateway-routed BYOK and embeddings from its
+        admission counts; the report must say the server's part wherever the
+        two sit beside each other - and the server's denied_after_wait must
+        corroborate."""
         with tempfile.TemporaryDirectory() as tmp:
             now = time.time()
             lines = []
@@ -1069,7 +1072,11 @@ class AnalyzeCapacity(unittest.TestCase):
             self.assertIn("BYOK", out)
             self.assertIn("denied_after_wait", out)
             self.assertIn("account limit 12 priority", out)
-            self.assertIn("5 requests", out)   # the local window sees all five
+            self.assertIn("3 requests", out)   # the vendor filter keeps the
+            # window gateway-only: the two openai (BYOK/embedding) requests
+            # are excluded and reported in their own row, not counted.
+            self.assertIn("excluded: 2 pi request(s) on other providers "
+                          "(openai 2)", out)
 
 
 class CapacityCommand(unittest.TestCase):
