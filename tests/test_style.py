@@ -35,8 +35,6 @@ class StyleGate(unittest.TestCase):
         s = resolve_style("plain", _Stream(True), {"CLICOLOR_FORCE": "1"})
         self.assertFalse(s.color); self.assertFalse(s.emoji)
 
-    def test_share_is_never_colored(self):
-        self.assertFalse(resolve_style("share", _Stream(True), {}).color)
 
     def test_emoji_degrades_to_ascii_symbol(self):
         s = resolve_style("plain", _Stream(True), {})

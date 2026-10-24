@@ -39,17 +39,6 @@ luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # …or one agent at a time (pi | claude-code | codex | swamp)
 luna-doctor chart --since 24h # SVG: concurrent requests over time + every request's latency
 luna-doctor chart --since 24h --open  # …and open it in your browser
-luna-doctor analyze --share          # WhatsApp text + PNG card, for pasting into a chat
-```
-
-`--share` renders the same report twice for a chat: a WhatsApp-ready message on
-stdout — a quoted headline, at most five `*label:* value` lines, at most three
-bullets, one provenance line — and a 1080x1350 PNG card beside it, with the
-card's path on stderr so stdout alone is the thing to paste:
-
-```bash
-luna-doctor analyze --share                # message on stdout, card path on stderr
-luna-doctor analyze --share --out card.png # …and the card written where you say
 ```
 
 Exit codes: `0` no pressure, `1` pressure found, `2` no data — usable from a shell prompt, a skill, or cron.
@@ -78,8 +67,7 @@ lines — the picture is the SVG.
 printed text on the clipboard too — via the first of `pbcopy`, `wl-copy`,
 `xclip` or `xsel` found on PATH — as plain text, while stdout stays exactly as
 it would have been, so a machine with no clipboard tool loses nothing (stderr
-says so, never as an error). `analyze --share --copy` copies the chat message,
-not the card's path.
+says so, never as an error).
 
 ### `analyze` — what your machine has been doing
 
