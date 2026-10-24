@@ -786,6 +786,15 @@ _CLAUDE_ENV_KEYS = (
      "absent; subagents inherit the parent model"),
     ("env.ANTHROPIC_BASE_URL", _NO_DEFAULT, "",
      "absent; claude-code may not be routed through LunaRoute"),
+    # The sizing keys (the 2026-10-23 family, judged in luna_doctor/sizing.py):
+    # the key names are V - both are read through claude-code's per-model
+    # default+upperLimit helper - but the numeric defaults were never
+    # captured, so these Facts carry no default and sizing renders them as
+    # informational lines, never findings.
+    ("env.CLAUDE_CODE_MAX_OUTPUT_TOKENS", _NO_DEFAULT, "",
+     "absent; the shipped default is unverified"),
+    ("env.CLAUDE_CODE_MAX_CONTEXT_TOKENS", _NO_DEFAULT, "",
+     "absent; the shipped default is unverified"),
 )
 _CODEX_KEYS = (
     ("model", _NO_DEFAULT, "", "absent; no documented default"),
@@ -793,6 +802,10 @@ _CODEX_KEYS = (
      "absent; no documented default"),
     ("agents.default_subagent_model", _NO_DEFAULT, "",
      "absent; no documented default"),
+    # V by observation (`model_context_window = 262144` in a real config);
+    # its default and semantics are U, so sizing judges declared values only.
+    ("model_context_window", _NO_DEFAULT, "",
+     "absent; the shipped default is unverified"),
 )
 
 
