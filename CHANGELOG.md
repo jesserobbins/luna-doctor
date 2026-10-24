@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.2.0-alpha.2] - 2026-10-24
+
 ### Removed
 
 - The `--share` WhatsApp surface and share-card PNG are suppressed: `analyze --share`,
