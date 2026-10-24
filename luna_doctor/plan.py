@@ -9,19 +9,26 @@ queue is full.
 
 The number a user can know without probing is their plan's published
 default, and this module is the one seam where that constant enters the
-tool. Today only `chart` consumes it; the thresholds that are still
-hardcoded elsewhere (analyze's pressure verdict, fix's advice, probe and
-compare's default widths, the share card's copy) are per-plan wrong and
-should read their number from here in a follow-up pass.
+tool. Two sources now meet here: the account's real `priority_lanes` from
+GET /v1/capacity (fetched by the `capacity` command, served to everyone
+else from its disk cache) and the user's `--plan` declaration. The account
+is the first authority on every account fact; `--plan` is the fallback
+for when the API is unreachable. Today `chart` consumes the resolution;
+the thresholds that are still hardcoded elsewhere (analyze's pressure
+verdict, fix's advice, the load-test command's default widths, the share
+card's copy) are per-plan wrong and should read their number from here in
+a follow-up pass.
 
-Two rules this module never breaks:
+Three rules this module never breaks:
 
 - It never infers a plan from observed traffic. A guessed number drawn as
   a threshold is worse than no threshold.
 - It never claims `lunaroute whoami` reports a plan. Verified: `whoami`
   (via `lunaroute` on PATH or `npx --yes @lunaroute/cli`) prints login,
-  organization id, profile and API base only -- no plan, no number. A
-  future source may be added here only when something actually exposes one.
+  organization id, profile and API base only -- no plan, no number.
+- The account source is only ever the fetched capacity payload: its
+  `config.priority_lanes` verbatim, null preserved as unknown. Nothing is
+  inferred from it and no default is substituted when it is null.
 """
 
 from __future__ import annotations
@@ -46,10 +53,13 @@ PLAN_NAMES = ", ".join(PLAN_PRIORITY)
 
 PLAN_HELP = (
     "declare this account's priority concurrency: a plan name (%s) or a "
-    "plain number of priority concurrent requests. Names map to LunaRoute's "
-    "published plan defaults; an organization-level override on the "
-    "dashboard Metrics page wins over them. This declares a capacity, it "
-    "does not measure one." % PLAN_NAMES
+    "plain number of priority concurrent requests. The capacity API is the "
+    "first authority: this declaration is used only when the account's "
+    "capacity payload has no number, and one that disagrees with the "
+    "account is ignored and said so. Names map to LunaRoute's published "
+    "plan defaults; an organization-level override on the dashboard "
+    "Metrics page wins over them. This declares a capacity, it does not "
+    "measure one." % PLAN_NAMES
 )
 
 
@@ -86,14 +96,34 @@ class Capacity:
     `priority` is None when unknown. Unknown is never expressed as zero or
     as any real number, so a caller cannot mistake "not known" for a
     measured capacity -- including personal's 1. `source` names where the
-    number came from: "plan" (the user's --plan declaration), "default"
-    (an explicit config read; reserved, never traffic inference), or
-    "none". `declared` is the raw string the user wrote, "" when absent.
-    """
+    number came from: "account" (the fetched capacity payload's
+    config.priority_lanes -- the first authority), "plan" (the user's
+    --plan declaration, the fallback when the account has no number),
+    "default" (an explicit config read; reserved, never traffic
+    inference), or "none". `declared` is the raw string the user wrote,
+    "" when absent -- kept even when the account's number won, so the
+    consumer can say the declaration was set aside.
+
+    The `account_*` fields carry the fetched-account facts whenever a
+    capacity payload was available, whatever won the resolution, so a
+    consumer can say what the account reports even when a --plan
+    declaration is in play: `account_present` (a payload was served at
+    all), `account_priority` (None when the account did not report one --
+    null is unknown, never zero), `account_plan`, `account_stale` (the
+    payload was past its TTL when served) and `account_note` (the
+    cache/fetch note). `declared_ignored` is True when a --plan
+    declaration was set aside because the account reports a different
+    number."""
 
     priority: "int | None"
     source: str
     declared: str
+    declared_ignored: bool = False
+    account_present: bool = False
+    account_priority: "int | None" = None
+    account_plan: "str | None" = None
+    account_stale: bool = False
+    account_note: str = ""
 
     @property
     def known(self) -> bool:
@@ -101,25 +131,61 @@ class Capacity:
         return self.priority is not None
 
 
-def resolve_capacity(args) -> Capacity:
-    """Read the account's declared priority concurrency from --plan.
+def _account_facts(account):
+    """The fetched payload's priority-concurrency facts, None-safe.
 
-    No --plan means exactly that: nothing is known. The number is specific
-    to the account and cannot be read from these logs, so this returns
-    priority None rather than guessing -- not from traffic, and not from
-    `lunaroute whoami`, which reports no plan.
-    """
+    `account` is a sources.Capacity or None. `config.priority_lanes` null
+    (or a config block the account did not send) is unknown, never zero;
+    only a real integer counts, so a boolean or a float never sneaks in."""
+    if account is None:
+        return None
+    cfg = getattr(account, "config", None)
+    pri = getattr(cfg, "priority_lanes", None) if cfg is not None else None
+    if isinstance(pri, bool) or not isinstance(pri, int):
+        pri = None
+    name = getattr(cfg, "plan", None) if cfg is not None else None
+    if not isinstance(name, str):
+        name = None
+    return {"account_present": True, "account_priority": pri,
+            "account_plan": name,
+            "account_stale": bool(getattr(account, "stale", False)),
+            "account_note": str(getattr(account, "note", "") or "")}
+
+
+def resolve_capacity(args, account=None) -> Capacity:
+    """Resolve the account's priority concurrency, the best source known.
+
+    Order: the capacity API first -- a payload with a real
+    config.priority_lanes is THE number, fresh or stale (staleness is the
+    cache's, labelled by the consumer, and never a reason to demote the
+    account behind a declaration). Then a --plan declaration, the
+    fallback for when the API is unreachable or reports no number. No
+    payload and no --plan means exactly that nothing is known -- never a
+    guess, not from traffic, and not from `lunaroute whoami`, which reports
+    no plan.
+
+    A --plan that disagrees with the account's number is not an error: the
+    account wins, `declared_ignored` is set so the consumer can say the
+    declaration was set aside, and a payload whose priority_lanes is null
+    falls back to the declaration."""
+    acct = _account_facts(account)
     raw = getattr(args, "plan", None)
-    if raw is None:
-        return Capacity(priority=None, source="none", declared="")
-    return Capacity(priority=parse_plan(raw), source="plan",
-                    declared=str(raw).strip())
+    declared = str(raw).strip() if raw is not None else ""
+    if acct and acct["account_priority"] is not None:
+        ignored = bool(declared) and parse_plan(declared) != acct["account_priority"]
+        return Capacity(priority=acct["account_priority"], source="account",
+                        declared=declared, declared_ignored=ignored, **acct)
+    if declared:
+        return Capacity(priority=parse_plan(declared), source="plan",
+                        declared=declared, **(acct or {}))
+    return Capacity(priority=None, source="none", declared="", **(acct or {}))
 
 
 def add_plan_arg(parser, help_text: str = PLAN_HELP) -> None:
     """Add the one --plan definition every command shares.
 
-    One helper so `chart`, `analyze`, `fix`, `probe` and `compare` cannot
-    drift apart as the follow-up pass wires them to resolve_capacity().
+    One helper so `chart`, `analyze`, `fix`, `load-test` and `compare`
+    cannot drift apart as the follow-up pass wires them to
+    resolve_capacity().
     """
     parser.add_argument("--plan", default=None, metavar="NAME|N", help=help_text)

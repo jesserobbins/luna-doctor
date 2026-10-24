@@ -1,0 +1,349 @@
+{
+  "data": {
+    "admission": {
+      "as_of": "2026-10-23",
+      "last_30d": [
+        {
+          "accepted": 0,
+          "avg_queue_wait_ms": null,
+          "day": "2026-09-24",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 0,
+          "avg_queue_wait_ms": null,
+          "day": "2026-09-25",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 0,
+          "avg_queue_wait_ms": null,
+          "day": "2026-09-26",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 0,
+          "avg_queue_wait_ms": null,
+          "day": "2026-09-27",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 6307,
+          "avg_queue_wait_ms": null,
+          "day": "2026-09-28",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 3074,
+          "avg_queue_wait_ms": null,
+          "day": "2026-09-29",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 1925,
+          "avg_queue_wait_ms": null,
+          "day": "2026-09-30",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 2630,
+          "avg_queue_wait_ms": 217502.12,
+          "day": "2026-10-01",
+          "deferred": 2,
+          "denied": 0,
+          "denied_after_wait": 27
+        },
+        {
+          "accepted": 2422,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-02",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 1313,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-03",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 3237,
+          "avg_queue_wait_ms": 181478.12,
+          "day": "2026-10-04",
+          "deferred": 14,
+          "denied": 0,
+          "denied_after_wait": 28
+        },
+        {
+          "accepted": 3963,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-05",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 1941,
+          "avg_queue_wait_ms": 38240.52,
+          "day": "2026-10-06",
+          "deferred": 345,
+          "denied": 0,
+          "denied_after_wait": 36
+        },
+        {
+          "accepted": 1607,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-07",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 3220,
+          "avg_queue_wait_ms": 79380.8,
+          "day": "2026-10-08",
+          "deferred": 1,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 1380,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-09",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 15379,
+          "avg_queue_wait_ms": 20284.3,
+          "day": "2026-10-10",
+          "deferred": 21378,
+          "denied": 0,
+          "denied_after_wait": 467
+        },
+        {
+          "accepted": 39396,
+          "avg_queue_wait_ms": 4604.73,
+          "day": "2026-10-11",
+          "deferred": 51203,
+          "denied": 0,
+          "denied_after_wait": 1
+        },
+        {
+          "accepted": 21352,
+          "avg_queue_wait_ms": 8129.91,
+          "day": "2026-10-12",
+          "deferred": 50386,
+          "denied": 0,
+          "denied_after_wait": 57
+        },
+        {
+          "accepted": 7215,
+          "avg_queue_wait_ms": 16391.6,
+          "day": "2026-10-13",
+          "deferred": 30792,
+          "denied": 0,
+          "denied_after_wait": 329
+        },
+        {
+          "accepted": 9874,
+          "avg_queue_wait_ms": 19804.2,
+          "day": "2026-10-14",
+          "deferred": 10514,
+          "denied": 0,
+          "denied_after_wait": 178
+        },
+        {
+          "accepted": 6647,
+          "avg_queue_wait_ms": 8785.12,
+          "day": "2026-10-15",
+          "deferred": 6169,
+          "denied": 0,
+          "denied_after_wait": 6
+        },
+        {
+          "accepted": 1801,
+          "avg_queue_wait_ms": 8226.97,
+          "day": "2026-10-16",
+          "deferred": 2,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 1513,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-17",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 1553,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-18",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 2501,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-19",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 4570,
+          "avg_queue_wait_ms": 144544.82,
+          "day": "2026-10-20",
+          "deferred": 12,
+          "denied": 0,
+          "denied_after_wait": 16
+        },
+        {
+          "accepted": 4527,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-21",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 7326,
+          "avg_queue_wait_ms": 4612.31,
+          "day": "2026-10-22",
+          "deferred": 17,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 5754,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-23",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        }
+      ],
+      "last_7d": [
+        {
+          "accepted": 1513,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-17",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 1553,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-18",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 2501,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-19",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 4570,
+          "avg_queue_wait_ms": 144544.82,
+          "day": "2026-10-20",
+          "deferred": 12,
+          "denied": 0,
+          "denied_after_wait": 16
+        },
+        {
+          "accepted": 4527,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-21",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 7326,
+          "avg_queue_wait_ms": 4612.31,
+          "day": "2026-10-22",
+          "deferred": 17,
+          "denied": 0,
+          "denied_after_wait": 0
+        },
+        {
+          "accepted": 5754,
+          "avg_queue_wait_ms": null,
+          "day": "2026-10-23",
+          "deferred": 0,
+          "denied": 0,
+          "denied_after_wait": 0
+        }
+      ]
+    },
+    "config": {
+      "background_lanes": 12,
+      "overflow_routing": "enabled",
+      "plan": "apex",
+      "priority_lanes": 12
+    },
+    "history": {
+      "as_of": "2026-10-22",
+      "last_30d": {
+        "avg_lanes": 0.187,
+        "days_active": 25,
+        "days_covered": 29,
+        "lane_hours": 112.417,
+        "p95_lanes": 9,
+        "peak_lanes": 18,
+        "queued_pct": 0.03
+      },
+      "last_7d": {
+        "avg_lanes": 0.465,
+        "days_active": 5,
+        "days_covered": 6,
+        "lane_hours": 55.896,
+        "p95_lanes": 14,
+        "peak_lanes": 18,
+        "queued_pct": 0.08
+      },
+      "rollup_computed_at": "2026-10-23T15:19:01.958669Z",
+      "tail": {
+        "calculated_at": "2026-10-24T00:05:14.528567203Z",
+        "through": "2026-10-24T00:05:14.458609Z"
+      }
+    },
+    "now": {
+      "available": 12,
+      "in_use": 0,
+      "ledger": "up",
+      "limit": 12,
+      "sampled_at": "2026-10-24T00:05:14.510815919Z",
+      "saturated": false
+    }
+  },
+  "generated_at": "2026-10-24T00:05:14.458609995Z",
+  "success": true
+}

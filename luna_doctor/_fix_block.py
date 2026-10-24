@@ -217,7 +217,7 @@ def demotion_note(reason: str, model: str) -> str:
                 f"and count against interactive headroom.")
     return (f"your `-background` traffic may be running on priority concurrency: if this account has "
             f"no background entitlement, `{model}` requests are downgraded into the priority pool, "
-            f"which is why a background model can still be squeezed. Only a probe can see the "
+            f"which is why a background model can still be squeezed. Only a load test can see the "
             f"served tier.")
 
 
@@ -242,7 +242,7 @@ LUNAROUTE_ROUTING_PREFACE = (
     "Every non-interactive call should use the background variant of your model (e.g. "
     "`glm-5.3-background` rather than `glm-5.3`). If your account has no background "
     "entitlement, background requests are downgraded into the priority pool and still "
-    "count against the same budget — a probe shows the served tier either way."
+    "count against the same budget — a load test shows the served tier either way."
 )
 
 LUNAROUTE_COMMAND_PREFACE = (

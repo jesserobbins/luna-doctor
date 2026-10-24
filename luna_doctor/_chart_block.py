@@ -43,10 +43,15 @@ Grey outline   the busiest moment in each column. Averages smooth away the
                the peaks the areas cannot. It is the envelope of the
                account total: the stack's own height at its worst.
 Open circle    the exact peak, and when it happened.
-Dashed rule    the account's priority concurrency, drawn only when the user
-               declares it with --plan, and labelled with the declaration
-               ("priority concurrency (--plan max = 4)") so a declared
-               threshold can never be mistaken for a measured one. It is
+Dashed rule    the account's priority concurrency, drawn when the number is
+               established, and labelled with its source so a fetched
+               account value can never be mistaken for a declared one:
+               "priority concurrency 12 (account, plan apex)" when the
+               capacity payload is cached, "priority concurrency
+               (--plan max = 4)" when the user declared it and the
+               account had no number. The capacity API is the first
+               authority: a --plan declaration is the fallback, and one
+               the account contradicts is set aside with a note. It is
                an account-wide limit, so it is drawn once, against the
                one total it governs.
 Flare ticks    one tick per request the gateway rejected, hung from the top
@@ -86,8 +91,9 @@ the tool; a number drawn here would be a guess wearing a ruler.
 No overflow-capacity rule. Only one plan documents overflow capacity, it
 is not declarable yet, and a missing line is honest where a wrong one is
 not.
-No priority rule at all when nothing is declared: the footer says the
-number is specific to the account and cannot be read from these logs.
+No priority rule at all when nothing is established: the footer says the
+number is specific to the account and cannot be read from these logs, and
+points at `luna-doctor capacity` and --plan.
 No latency picture. It shared a frame with the old bars and halved the
 space each story got; latency keeps its own home in `analyze`.
 No plot fills, plot borders, or legend: the data is the ink.
@@ -104,6 +110,7 @@ window -- empty axes and the honest footer, never a bare message.
 """
 
 from luna_doctor.plan import PLAN_PRIORITY, resolve_capacity
+from luna_doctor.png import png_from
 from luna_doctor.scene import Circle, Line, Rect, Scene, Text, svg_from
 
 CHART_FONT = "ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif"
@@ -339,15 +346,28 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
 
     `m` is the metrics dict from analyse(); `reqs` the raw requests, because
     the picture draws one tick per rejected request. `capacity` is a
-    plan.Capacity (None means nothing was declared, and then no priority
-    rule is drawn). Shape order below is paint order.
+    plan.Capacity: the rule is drawn when it carries a number, from the
+    account's fetched config.priority_lanes (source "account", the first
+    authority) or from `--plan` (source "plan", the fallback when the
+    account has no number), and the label says which. None means nothing
+    was established, and then no priority rule is drawn. Shape order
+    below is paint order.
     """
     timed_reqs = timed(reqs)
 
     cap = capacity
-    declared_n = cap.priority if cap is not None and cap.priority is not None else None
+    rule_n = cap.priority if cap is not None and cap.priority is not None else None
+    rule_src = cap.source if cap is not None else "none"
     declared_txt = cap.declared if cap is not None else ""
     declared_named = bool(declared_txt) and declared_txt.lower() in PLAN_PRIORITY
+    acct_n = cap.account_priority if cap is not None else None
+    acct_plan = cap.account_plan if cap is not None else None
+    acct_stale = cap.account_stale if cap is not None else False
+    # The capacity API is the first authority: a --plan that disagrees
+    # with the account's number was set aside in resolve_capacity, and
+    # the footer says so -- the declaration is named as ignored, never
+    # silently dropped.
+    conflict = (rule_src == "account" and cap.declared_ignored)
 
     if timed_reqs:
         t0 = min(r.start for r in timed_reqs)
@@ -404,10 +424,10 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
                 -pk, -sum(mv), b["display"])
     bands = sorted(bands, key=_stack_order)
 
-    # one vertical scale: the peak of everything, plus the declared
-    # priority concurrency when there is one (a declared rule must be
-    # drawable, so it joins the scale instead of clipping off the plot)
-    y_raw = max(1, peak_total, declared_n or 0)
+    # one vertical scale: the peak of everything, plus the resolved
+    # priority concurrency when there is one (a rule must be drawable, so
+    # it joins the scale instead of clipping off the plot)
+    y_raw = max(1, peak_total, rule_n or 0)
     step = 1 if y_raw <= 10 else (2 if y_raw <= 30 else 5)
     head = max(2, y_raw // 8 + 1)
     y_max = ((y_raw + head + step - 1) // step) * step
@@ -599,56 +619,93 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
         # a Line cannot carry a tooltip, so an invisible hover spot does
         add(Circle(x, top + 3.5, 3, fill=None, stroke=None, title=title))
 
-    # ---- the declared priority concurrency, against the one stack ----------
-    if declared_n is not None:
-        ry = y_of(declared_n)
+    # ---- the resolved priority concurrency, against the one stack ----------
+    if rule_n is not None:
+        ry = y_of(rule_n)
         add(Line(px, ry, px + plot_w, ry, C["rule"], 1.0, (5, 4), 0.9))
-        if declared_named:
+        if rule_src == "account":
+            rule_label = "priority concurrency %d (account" % rule_n
+            if acct_plan:
+                rule_label += ", plan %s" % acct_plan
+            rule_label += ")"
+            if acct_stale:
+                # a rule drawn from a stale payload is still the best number
+                # available, but it is never drawn without saying so
+                rule_label += " \u00b7 stale cache"
+        elif declared_named:
             rule_label = "priority concurrency (--plan %s = %d)" % (
-                declared_txt, declared_n)
+                declared_txt, rule_n)
         else:
-            rule_label = "priority concurrency (--plan %d)" % declared_n
+            rule_label = "priority concurrency (--plan %d)" % rule_n
         ly = ry - 5 if ry - 15 >= top else ry + 12
         add(Text(px + 5, ly, rule_label, size=10, fill=C["rule"]))
 
     add(Text(width - pad_r, xlab_y, "UTC", size=9.5, anchor="end", fill=C["muted"]))
 
-    # ---- footer: provenance, measured vs declared --------------------------
-    if declared_n is not None:
+    # ---- footer: provenance, measured vs declared vs fetched ---------------
+    if rule_src == "account":
+        line1 = "account: priority concurrency %d" % rule_n
+        if acct_plan:
+            line1 += " (plan %s)" % acct_plan
+        line1 += (" \u2014 fetched from api.lunaroute.com, served from disk cache; "
+                  "the account's own number, never a declaration")
+        if conflict:
+            # capacity API first: the declaration was set aside because the
+            # account reports otherwise, and the footer says so
+            line1 += (" Note: your --plan %s declaration was ignored \u2014 the "
+                      "account reports priority concurrency %d%s."
+                      % (declared_txt, acct_n,
+                         ", plan %s" % acct_plan if acct_plan else ""))
+        if acct_stale:
+            line1 += "; the cache is stale, so the rule may be out of date"
+    elif rule_src == "plan":
         if declared_named:
             line1 = ("declared: priority concurrency %d (--plan %s) \u2014 "
                      "LunaRoute's published plan default; an org-level override "
                      "on the dashboard Metrics page wins. A declaration, not a "
-                     "measurement." % (declared_n, declared_txt))
+                     "measurement." % (rule_n, declared_txt))
         else:
             line1 = ("declared: priority concurrency %d (--plan %s) \u2014 "
                      "declared by you; an org-level override on the dashboard "
                      "Metrics page wins. A declaration, not a measurement."
-                     % (declared_n, declared_txt))
+                     % (rule_n, declared_txt))
+        if cap is not None and cap.account_present:
+            # the payload served but had no number, so the declaration
+            # stood as the fallback -- the footer keeps the two states apart
+            line1 += (" The account's capacity payload reports no priority "
+                      "concurrency, so the declaration stands.")
+    elif cap is not None and cap.account_present:
+        line1 = ("no priority concurrency rule drawn: the account's capacity "
+                 "payload is cached but reports no priority concurrency; "
+                 "declare it with chart --plan <plan name or number>")
     else:
         line1 = ("no priority concurrency rule drawn: priority concurrency is "
                  "specific to the account and cannot be read from these logs "
-                 "\u2014 declare it with chart --plan <plan name or number>")
+                 "\u2014 fetch the account's real number with `luna-doctor capacity` "
+                 "(the chart reads its disk cache), or declare it with "
+                 "chart --plan <plan name or number>")
 
     if not timed_reqs:
         line2 = ("reading: no timed request in this window; the axes span the "
                  "requested window and nothing was measured \u2014 try a wider "
                  "--since or run luna-doctor discover")
-    elif declared_n is not None and m["peak_concurrency"] > declared_n:
+    elif rule_n is not None and m["peak_concurrency"] > rule_n:
+        kind = "declared" if rule_src == "plan" else "account"
         if dead:
             line2 = ("reading: the peak of %d concurrent inference requests "
-                     "exceeded the declared priority concurrency %d; %d "
+                     "exceeded the %s priority concurrency %d; %d "
                      "request(s) waited for admission and were rejected"
-                     % (m["peak_concurrency"], declared_n, dead))
+                     % (m["peak_concurrency"], kind, rule_n, dead))
         else:
             line2 = ("reading: the peak of %d concurrent inference requests "
-                     "exceeded the declared priority concurrency %d; no request "
+                     "exceeded the %s priority concurrency %d; no request "
                      "was rejected in this window"
-                     % (m["peak_concurrency"], declared_n))
-    elif declared_n is not None:
+                     % (m["peak_concurrency"], kind, rule_n))
+    elif rule_n is not None:
         line2 = ("reading: the peak of %d concurrent inference requests stayed "
-                 "within the declared priority concurrency %d"
-                 % (m["peak_concurrency"], declared_n))
+                 "within the %s priority concurrency %d"
+                 % (m["peak_concurrency"],
+                    "declared" if rule_src == "plan" else "account", rule_n))
     elif dead:
         line2 = ("reading: %d request(s) waited for admission and were rejected; "
                  "declare --plan to see them against your priority concurrency"
@@ -717,9 +774,16 @@ def cmd_chart(args) -> int:
         return 2
     # --plan is a declaration, and a malformed one is a usage error, not a
     # guess: the message lists what is accepted, and nothing is drawn from
-    # an unreadable number.
+    # an unreadable number. The account source beside it is the capacity
+    # cache (the chart never waits on the 4-17s endpoint; `luna-doctor
+    # capacity` refreshes it), and a collection failure there is unknown,
+    # never an error.
     try:
-        capacity = resolve_capacity(args)
+        account_payload = sources.fetch_capacity(False)
+    except Exception:
+        account_payload = None
+    try:
+        capacity = resolve_capacity(args, account_payload)
     except ValueError as e:
         print("luna-doctor: %s" % e, file=sys.stderr)
         return 2
@@ -733,8 +797,17 @@ def cmd_chart(args) -> int:
     claude_roots = _check_roots(raw_claude, "--claude-root") if raw_claude else None
     reqs = collect(hours, harnesses, pi_roots, claude_roots)
     m = analyse(reqs, hours)
-    svg = svg_chart(reqs, m, hours, width=args.width, height=args.height,
-                    capacity=capacity)
+    # one scene, two pictures: the PNG is the same scene the SVG serialises,
+    # rasterised by the package's own renderer, so the two cannot disagree
+    # and no new dependency enters. --no-image suppresses the PNG; the
+    # default writes it beside the SVG under the same stem because the
+    # raster is the one a chat, a note or a doc can paste inline.
+    scene = build_chart_scene(reqs, m, hours, width=args.width,
+                              height=args.height, capacity=capacity)
+    svg = svg_from(scene)
+    png = None
+    if not getattr(args, "no_image", False):
+        png = png_from(scene)
 
     out = args.out
     if not out:
@@ -747,27 +820,82 @@ def cmd_chart(args) -> int:
         print("luna-doctor: cannot write %s: %s" % (out, e), file=sys.stderr)
         return 2
 
+    png_out = None
+    if png is not None:
+        png_out = os.path.splitext(out)[0] + ".png"
+        try:
+            with open(png_out, "wb") as fh:
+                fh.write(png)
+        except OSError as e:
+            # additive surface: a failed PNG write loses the inline image,
+            # never the chart and never the exit code
+            print("luna-doctor: cannot write %s: %s" % (png_out, e),
+                  file=sys.stderr)
+            png_out = None
+    # the paths ride on the namespace so a caller that ran the chart as
+    # part of a bigger whole (the bare default run) can name or open them
+    args._svg_path = os.path.abspath(out)
+    args._png_path = os.path.abspath(png_out) if png_out else None
+
     if args.json:
-        print(json.dumps(envelope("chart", {
+        doc = {
             "path": os.path.abspath(out),
             "bytes": len(svg),
             "metrics": m,
             "plan": {"priority": capacity.priority,
                      "source": capacity.source,
-                     "declared": capacity.declared},
-        }, contract=CONTRACT), indent=2))
+                     "declared": capacity.declared,
+                     "declared_ignored": capacity.declared_ignored,
+                     "account_present": capacity.account_present,
+                     "account_priority": capacity.account_priority,
+                     "account_plan": capacity.account_plan,
+                     "account_stale": capacity.account_stale,
+                     "account_note": capacity.account_note},
+        }
+        if png_out:
+            doc["png_path"] = os.path.abspath(png_out)
+            doc["png_bytes"] = len(png)
+        print(json.dumps(envelope("chart", doc, contract=CONTRACT), indent=2))
     else:
         dead = (m["by_outcome"].get("admission_timeout", 0)
                 + m["by_outcome"].get("org_concurrency_limit", 0))
         print("wrote %s  (%.0f KB)" % (os.path.abspath(out), len(svg) / 1024))
+        if png_out:
+            print("wrote %s  (%.0f KB) - the inline image, paste it anywhere"
+                  % (os.path.abspath(png_out), len(png) / 1024))
         print("  %d requests, peak concurrency %d, %d rejected at admission"
               % (m["requests"], m["peak_concurrency"], dead))
         if capacity.known:
-            print("  priority concurrency %d (declared via --plan %s): rule drawn"
-                  % (capacity.priority, capacity.declared))
+            if capacity.source == "account":
+                who = "account"
+                if capacity.account_plan:
+                    who += ", plan %s" % capacity.account_plan
+                if capacity.account_stale:
+                    who += ", stale cache"
+                print("  priority concurrency %d (%s): rule drawn"
+                      % (capacity.priority, who))
+                if capacity.declared_ignored:
+                    print("  the --plan %s declaration was ignored: the account "
+                          "reports priority concurrency %d%s"
+                          % (capacity.declared, capacity.account_priority,
+                             " (plan %s)" % capacity.account_plan
+                             if capacity.account_plan else ""))
+            else:
+                print("  priority concurrency %d (declared via --plan %s): rule drawn"
+                      % (capacity.priority, capacity.declared))
+                if capacity.account_present:
+                    # the payload served but had no number, so the fallback
+                    # stood -- say so rather than let the declaration look
+                    # like the only source that was asked
+                    print("  the account's capacity payload reports no priority "
+                          "concurrency, so the declaration stands")
+        elif capacity.account_present:
+            print("  priority concurrency: the cached capacity payload reports "
+                  "none; no rule drawn (declare it with --plan)")
         else:
-            print("  priority concurrency: not declared, no rule drawn "
-                  "(declare it with --plan)")
+            print("  priority concurrency: not established, no rule drawn "
+                  "(fetch it with `luna-doctor capacity`, or declare it "
+                  "with --plan)")
         if args.open:
             import webbrowser
             webbrowser.open("file://" + os.path.abspath(out))

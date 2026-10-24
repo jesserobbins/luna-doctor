@@ -1,11 +1,14 @@
 """Tests for luna_doctor/sources.py — the one data-collection layer.
 
-The suite runs offline by construction: every catalog/limits test patches
-luna_doctor.sources._urlopen (the only network seam in the package), and a
-meta-test pins that the offline default can never reach it. Config reading
-is tested against a fake $HOME so no test depends on this machine's real
-harness configs, and the cache lives in a temp file via LUNA_DOCTOR_CATALOG
-or an explicit cache_path so no test reads a real cache.
+The suite runs offline by construction: every catalog/limits/capacity test
+patches luna_doctor.sources._urlopen (the only network seam in the package),
+and a meta-test pins that the offline default can never reach it. Config
+reading is tested against a fake $HOME so no test depends on this machine's
+real harness configs, and the caches live in temp files via
+LUNA_DOCTOR_CATALOG / LUNA_DOCTOR_CAPACITY or an explicit cache_path so no
+test reads a real cache. The capacity fixtures are the one canned live
+payload, captured once on 2026-10-23 (tests/fixtures/), and every other
+shape is synthetic.
 """
 
 import datetime
@@ -92,6 +95,52 @@ class _NoNetwork:
 
 def _write_cache(path, payload, fetched_at):
     sources._write_catalog_cache(path, payload, fetched_at)
+
+
+def _capacity_payload():
+    """The canned live capacity payload, captured 2026-10-23 with the one
+    live GET this suite is ever allowed: plan apex, 12/12 concurrency,
+    overflow enabled, Oct 20 denied_after_wait 16, null avg_queue_wait_ms on
+    the days nobody waited, nanosecond timestamps, admission through the
+    last complete UTC day."""
+    with open(os.path.join(ROOT, "tests", "fixtures",
+                          "capacity-2026-10-23.json")) as fh:
+        return json.load(fh)
+
+
+def _write_cap_cache(path, payload, fetched_at):
+    sources._write_catalog_cache(path, payload, fetched_at,
+                                  url=sources.CAPACITY_URL)
+
+
+def _degraded_capacity_payload():
+    """The documented degraded shapes in one payload: config null (so every
+    concurrency number is unknown), now fields null with ledger 'unknown',
+    history tail null, and an admission day with null avg_queue_wait_ms.
+    Every null must survive as None, never as a zero."""
+    return {
+        "success": True,
+        "generated_at": "2026-10-24T00:05:14.458609995Z",
+        "data": {
+            "now": {"limit": None, "in_use": None, "available": None,
+                    "saturated": None, "ledger": "unknown",
+                    "sampled_at": None},
+            "config": None,
+            "history": {"as_of": "2026-10-22",
+                        "last_7d": {"avg_lanes": None, "days_active": 5,
+                                    "days_covered": 6, "lane_hours": None,
+                                    "p95_lanes": None, "peak_lanes": None,
+                                    "queued_pct": None},
+                        "last_30d": None,
+                        "rollup_computed_at": "2026-10-23T15:19:01.958669Z",
+                        "tail": None},
+            "admission": {"as_of": "2026-10-23",
+                          "last_7d": [{"accepted": 10, "avg_queue_wait_ms": None,
+                                       "day": "2026-10-22", "deferred": 0,
+                                       "denied": 0, "denied_after_wait": 0}],
+                          "last_30d": []},
+        },
+    }
 
 
 def _home_env(tmp, **extra):
@@ -216,6 +265,7 @@ class CatalogCacheAndTTL(_NoNetwork, unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 sources.fetch_catalog(False, cache_path=os.path.join(tmp, "c.json"))
                 sources.fetch_limits(False, key="k")
+                sources.fetch_capacity(False, cache_path=os.path.join(tmp, "cap.json"))
                 snap = sources.build_snapshot([], since=time.time() - 60,
                                               include_codex=False,
                                               cache_path=os.path.join(tmp, "c2.json"))
@@ -274,6 +324,197 @@ class LimitsSeam(_NoNetwork, unittest.TestCase):
         with mock.patch.object(sources, "_urlopen", _urlopen_returning(payload)):
             limits = sources.fetch_limits(True, key="k")
         self.assertEqual(limits.raw, payload)
+
+
+# ---- capacity: cache hit / miss / TTL / the null contract -------------------
+
+
+class CapacityFetch(_NoNetwork, unittest.TestCase):
+    """fetch_capacity mirrors fetch_catalog: cache-first, 5-minute TTL,
+    degrade to None - and the null contract is preserved end to end."""
+
+    def _cache(self, tmp, payload=None, age_s=0.0):
+        path = os.path.join(tmp, "capacity.json")
+        _write_cap_cache(path, payload if payload is not None else _capacity_payload(),
+                          time.time() - age_s)
+        return path
+
+    def test_offline_miss_is_none_with_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "capacity.json")
+            self.assertIsNone(sources.fetch_capacity(False, cache_path=path))
+            _, note = sources._capacity_with_note(False, cache_path=path)
+            self.assertEqual(note, "no cached capacity")
+
+    def test_offline_serves_a_fresh_cache_verbatim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = sources.fetch_capacity(False, cache_path=self._cache(tmp))
+            self.assertIsNotNone(cap)
+            self.assertEqual(cap.served_from, "cache")
+            self.assertFalse(cap.stale)
+            self.assertIn("cache", cap.note)
+            # fields verbatim from the canned live payload, including the
+            # nanosecond timestamp string - never parsed, never reformatted
+            self.assertEqual(cap.config.plan, "apex")
+            self.assertEqual(cap.config.priority_lanes, 12)
+            self.assertEqual(cap.config.background_lanes, 12)
+            self.assertEqual(cap.config.overflow_routing, "enabled")
+            self.assertEqual(cap.now.in_use, 0)
+            self.assertEqual(cap.now.limit, 12)
+            self.assertEqual(cap.now.available, 12)
+            self.assertIs(cap.now.saturated, False)
+            self.assertEqual(cap.now.ledger, "up")
+            self.assertEqual(cap.now.sampled_at, "2026-10-24T00:05:14.510815919Z")
+            self.assertEqual(cap.history.last_7d["peak_lanes"], 18)
+            self.assertEqual(cap.history.last_7d["days_active"], 5)
+            self.assertEqual(cap.history.last_7d["days_covered"], 6)
+            self.assertIsInstance(cap.history.tail, dict)
+            self.assertEqual(cap.admission.as_of, "2026-10-23")
+            days = dict(sources.capacity_admission_days(cap))
+            self.assertEqual(len(days), 30, "7d and 30d windows union to one per day")
+            oct20 = days["2026-10-20"]
+            self.assertEqual(oct20["denied_after_wait"], 16)
+            self.assertEqual(oct20["avg_queue_wait_ms"], 144544.82)
+            # the null path is common and must survive as None, never as 0
+            self.assertIsNone(days["2026-10-21"]["avg_queue_wait_ms"])
+
+    def test_offline_serves_an_expired_cache_marked_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = sources.fetch_capacity(
+                False, cache_path=self._cache(tmp, age_s=sources.CAPACITY_TTL_S + 10))
+            self.assertIsNotNone(cap, "a stale cache still serves when offline")
+            self.assertTrue(cap.stale)
+            self.assertIn("served stale", cap.note)
+
+    def test_online_refreshes_a_stale_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._cache(tmp, age_s=sources.CAPACITY_TTL_S + 10)
+            now = time.time()
+            with mock.patch.object(sources, "_urlopen",
+                                   _urlopen_returning(_capacity_payload())):
+                cap = sources.fetch_capacity(True, cache_path=path, now=now, key="k")
+            self.assertEqual(cap.served_from, "network")
+            self.assertFalse(cap.stale)
+            with open(path) as fh:
+                doc = json.load(fh)
+            self.assertGreaterEqual(doc["fetched_at"], now - 5,
+                                    "the refresh must rewrite the cache")
+            self.assertEqual(doc["url"], sources.CAPACITY_URL)
+
+    def test_online_uses_a_fresh_cache_without_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(sources, "_urlopen",
+                                   _urlopen_returning(AssertionError("network!"))):
+                cap = sources.fetch_capacity(True, cache_path=self._cache(tmp), key="k")
+            self.assertEqual(cap.served_from, "cache",
+                             "a fresh cache serves; the network is only for stale or missing")
+
+    def test_the_documented_header_and_the_longer_timeout(self):
+        """The capacity GET carries the documented LUNAROUTE-API-KEY header
+        (not Bearer) and the 30s timeout the 4-17s endpoint needs; a timeout
+        still degrades, never blocks."""
+        seen = {}
+
+        def recorder(req, timeout=None):
+            seen["url"] = req.full_url
+            seen["timeout"] = timeout
+            seen["key"] = req.get_header("Lunaroute-api-key")   # urllib capitalizes
+            seen["auth"] = req.get_header("Authorization")
+            return _FakeResponse(json.dumps(_capacity_payload()))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(sources, "_urlopen", recorder):
+                cap = sources.fetch_capacity(
+                    True, cache_path=os.path.join(tmp, "c.json"), key="lr_x")
+        self.assertEqual(seen["url"], sources.CAPACITY_URL)
+        self.assertEqual(seen["timeout"], sources.CAPACITY_TIMEOUT_S)
+        self.assertEqual(seen["key"], "lr_x")
+        self.assertIsNone(seen["auth"], "the documented form, not Bearer")
+        self.assertIsNotNone(cap)
+
+    def test_no_key_degrades_to_none_and_writes_no_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "capacity.json")
+            with mock.patch.object(sources, "catalog_key", return_value=None):
+                cap = sources.fetch_capacity(True, cache_path=path)
+            self.assertIsNone(cap)
+            self.assertFalse(os.path.exists(path), "no cache may be written on failure")
+
+    def test_401_and_timeout_degrade_to_none_with_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "capacity.json")
+            with mock.patch.object(sources, "_urlopen",
+                                   _urlopen_returning(_http_error(401))):
+                self.assertIsNone(sources.fetch_capacity(True, cache_path=path, key="k"))
+                _, note = sources._capacity_with_note(True, cache_path=path, key="k")
+            self.assertIn("401", note)
+            with mock.patch.object(sources, "_urlopen",
+                                   _urlopen_returning(TimeoutError())):
+                self.assertIsNone(sources.fetch_capacity(True, cache_path=path, key="k"))
+
+    def test_a_stale_cache_survives_a_failed_online_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._cache(tmp, age_s=sources.CAPACITY_TTL_S + 10)
+            with mock.patch.object(sources, "_urlopen",
+                                   _urlopen_returning(_http_error(503))):
+                cap = sources.fetch_capacity(True, cache_path=path, key="k")
+            self.assertIsNotNone(cap, "a network failure never turns a report into an error")
+            self.assertTrue(cap.stale)
+            self.assertIn("served stale", cap.note)
+
+    def test_degraded_null_blocks_are_preserved_never_zeroed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = sources.fetch_capacity(
+                False, cache_path=self._cache(tmp, _degraded_capacity_payload()))
+            self.assertIsNone(cap.config, "config: null is None, not a defaulted block")
+            self.assertIsNone(cap.now.limit)
+            self.assertIsNone(cap.now.in_use)
+            self.assertIsNone(cap.now.saturated)
+            self.assertEqual(cap.now.ledger, "unknown")
+            self.assertIsNone(cap.history.tail)
+            self.assertIsNone(cap.history.last_7d["peak_lanes"])
+            days = sources.capacity_admission_days(cap)
+            self.assertEqual(days, [("2026-10-22",
+                                     {"accepted": 10, "avg_queue_wait_ms": None,
+                                      "day": "2026-10-22", "deferred": 0,
+                                      "denied": 0, "denied_after_wait": 0})])
+            doc = cap.to_dict()
+            self.assertIsNone(doc["config"])
+            # a null round-trips through JSON as null - the contract a
+            # consumer of the envelope relies on
+            self.assertIsNone(json.loads(json.dumps(doc))["config"])
+
+    def test_background_lanes_zero_is_a_real_value(self):
+        payload = _capacity_payload()
+        payload["data"]["config"] = {"plan": "pro", "priority_lanes": 2,
+                                     "background_lanes": 0,
+                                     "overflow_routing": "disabled"}
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = sources.fetch_capacity(False, cache_path=self._cache(tmp, payload))
+            self.assertEqual(cap.config.background_lanes, 0,
+                             "0 is sent as a value: entitled to no overflow")
+            self.assertEqual(cap.config.priority_lanes, 2)
+            self.assertEqual(cap.to_dict()["config"]["background_lanes"], 0)
+
+    def test_unexpected_payload_shapes_degrade_to_none(self):
+        for bad in ({}, {"data": None}, {"data": "nope"}, ["not", "a", "dict"]):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "capacity.json")
+                _write_cap_cache(path, bad, time.time())
+                self.assertIsNone(sources.fetch_capacity(False, cache_path=path), bad)
+
+    def test_capacity_cache_path_env_override(self):
+        with mock.patch.dict(os.environ, {"LUNA_DOCTOR_CAPACITY": "/tmp/x/capacity.json"}):
+            self.assertEqual(sources.capacity_cache_path(), "/tmp/x/capacity.json")
+
+    def test_a_null_config_block_yields_unknown_not_zero(self):
+        """The chart and analyze consume config through getattr: a null
+        config must read as unknown (None), never as a zero."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = sources.fetch_capacity(
+                False, cache_path=self._cache(tmp, _degraded_capacity_payload()))
+            self.assertIsNone(getattr(cap.config, "priority_lanes", None)
+                              if cap.config is not None else None)
 
 
 # ---- configs: provenance, defaults, unchecked ---------------------------------
@@ -691,6 +932,9 @@ def _run_cli(*args):
     env = dict(os.environ)
     env["LUNA_DOCTOR_STORE"] = store
     env["LUNA_DOCTOR_CATALOG"] = os.path.join(store, "catalog.json")
+    # hermetic: no test in this suite may read this machine's real capacity
+    # cache (the fetch layer itself is tested in-process, mocked)
+    env["LUNA_DOCTOR_CAPACITY"] = os.path.join(store, "absent-capacity.json")
     proc = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "luna-doctor"), *args],
                           capture_output=True, text=True, timeout=180, cwd=ROOT, env=env)
     return proc.returncode, proc.stdout, proc.stderr

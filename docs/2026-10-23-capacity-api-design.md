@@ -1,7 +1,8 @@
 # Capacity API — design (short)
 
 Date: 2026-10-23
-Status: proposed
+Status: implemented (the capacity-api branch; the precedence below reflects the
+owner's later call: the capacity API is the first authority, `--plan` is the fallback)
 Owner: Jesse (decisions marked "Jesse's call" below were settled in conversation)
 
 ## Intent
@@ -26,8 +27,9 @@ dependency of every command.
    disk, provenance-carrying, degrading to unknown — never zero, never a
    default.
 2. The chart's priority rule draws from the account's real `priority_lanes`
-   when a capacity payload is cached or fetchable; `--plan` remains as the
-   explicit override for when the API is unreachable.
+   when a capacity payload is cached or fetchable; the capacity API is the
+   first authority, and `--plan` remains as the fallback declaration for
+   when the API is unreachable.
 3. `analyze` reports the server-side capacity facts next to the local ones —
    "server limit 12 · local peak 17" — and surfaces `denied_after_wait` as
    corroboration for the park-deadline class of rejections.
@@ -100,12 +102,15 @@ api.lunaroute.com, served from disk cache") as a sixth word; update
 
 ### `chart`
 
-- Rule line resolution order: `--plan` (explicit user declaration, wins) →
-  cached/fetched `config.priority_lanes` → none drawn. Label states which:
-  "priority concurrency 12 (account, plan apex)" vs "(declared via --plan
-  max)" vs "not established; no rule drawn".
+- Rule line resolution order: cached/fetched `config.priority_lanes` (the
+  capacity API, the first authority) → `--plan` (a user declaration, the
+  fallback for when the API is unreachable or reports no number) → none
+  drawn. Label states which: "priority concurrency 12 (account, plan
+  apex)" vs "(declared via --plan max)" vs "not established; no rule
+  drawn".
 - `--plan` conflicting with the account value is not an error — the
-  declaration wins, but the report notes the account says otherwise.
+  account wins, and the report notes that the declaration was ignored
+  because the account reports otherwise.
 
 ### `analyze`
 
