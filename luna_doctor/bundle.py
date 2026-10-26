@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """The paste-safe evidence block: one thing to hand a maintainer.
 
-A report pasted into a support thread is usually undatable and unattributable -
-no tool version, no window, no store identity - and the --json path adds the
-absolute home paths of the machine that produced it. A maintainer cannot
-reproduce that, and the reporter has published the shape of their filesystem
-to say it. This module makes the one block that fixes both halves:
+A report that a user pastes into a support thread is usually undatable and
+unattributable. It carries no tool version, no window and no store identity.
+The --json path also adds the absolute home paths of the machine that
+produced it. A maintainer cannot reproduce that report. The reporter
+published the shape of the filesystem to say it. This module makes one block
+that fixes both halves.
 
-  redact()       the same text with home paths, email addresses and opaque
-                 tokens replaced by markers, so it can be pasted in public.
-  issue_block()  tool and version, the window, the stores the evidence came
-                 from, the verdict when there is one, the headline and the
-                 rows: plain ASCII lines no wider than 100 columns, safe
-                 inside a fenced code block.
+  redact()       the same text, with home paths, email addresses and opaque
+                 tokens replaced by markers. A user can paste it in public.
+  issue_block()  tool and version, the window, the stores, the verdict when
+                 there is one, the headline and the rows. The stores are the
+                 ones that the evidence came from. Each line is plain ASCII
+                 and no wider than 100 columns. A chat client or an issue
+                 tracker therefore shows the block unchanged.
   manifest()     what the block names and what it leaves out. It always
                  states the omission, because a reader must be able to tell a
                  quiet window from a truncated one.
@@ -20,15 +22,15 @@ to say it. This module makes the one block that fixes both halves:
 Three rules hold throughout:
 
 - Redaction is narrow on purpose. A date, an ISO timestamp, a duration, a
-  count and a model id are the facts a maintainer needs in order to date and
-  reproduce a report, so redact() leaves them alone: it removes identity, not
-  evidence.
-- LunaRoute bills concurrent sessions. Nothing here counts or prices any other
-  unit, and nothing here states a capacity width as a universal fact - a width
-  belongs to one account or one declaration, never to the product.
-- These are pure functions over strings and lists: no file is read, no socket
-  is opened, no command is run, no clock is consulted. A block is exactly as
-  reproducible as the data handed to it.
+  count and a model id are facts that a maintainer needs. A maintainer uses
+  them to date a report and to reproduce it. redact() therefore leaves them
+  alone. It removes identity, not evidence.
+- LunaRoute bills concurrent sessions. Nothing here counts or prices any
+  other unit. Nothing here states a capacity width as a universal fact. A
+  width belongs to one account or to one declaration, never to the product.
+- These are pure functions over strings and lists. No file is read, no socket
+  is opened, no command is run and no clock is consulted. A block is exactly
+  as reproducible as the data that a caller hands to it.
 """
 
 from __future__ import annotations
@@ -67,9 +69,9 @@ _TOKEN = r"[A-Za-z0-9_\-]{24,}"
 def _redaction_pattern(home):
     """The one pass over the text: email, home, path, token, in that order.
 
-    Order is the contract. An email address outranks a token because its local
-    part is the same alphabet, and the whole address reads better redacted as
-    an address; the home-specific prefix outranks the generic forms so a home
+    Order is the contract. An email address outranks a token, because its local
+    part uses the same alphabet and the whole address reads better redacted as
+    an address. The home-specific prefix outranks the generic forms, so a home
     outside /Users and /home is still caught.
     """
     parts = ["(?P<email>%s)" % _EMAIL]
@@ -89,26 +91,26 @@ def _redacted(match):
 
 
 def redact(text, home=None):
-    """`text` with the machine's identity removed and its evidence intact.
+    """`text` with the identity of the machine removed and its evidence intact.
 
     Replaced:
 
-    - an absolute path under `home`, when a home directory is given, and the
-      generic /Users/<name> and /home/<name> prefixes whether or not it is.
-      The prefix becomes ~, so ~/GitHub/repo still says where a file was
-      without saying whose machine it was on.
+    - an absolute path under `home`, when a caller gives a home directory, and
+      also the generic /Users/<name> and /home/<name> prefixes. The prefix
+      becomes ~, so ~/GitHub/repo still says where a file was. It does not say
+      whose machine it was on.
     - an email address -> <redacted:email>.
-    - a run of 24 or more characters of [A-Za-z0-9_-] -> <redacted:token>,
-      which is what an API key looks like.
+    - a run of 24 or more characters of [A-Za-z0-9_-] -> <redacted:token>.
+      That run is what an API key looks like.
 
     Deliberately left alone: dates, ISO timestamps, durations ("120.2s"),
-    counts, sizes and model ids. They are what dates and reproduces a report,
-    and none of them names a person or a credential.
+    counts, sizes and model ids. They are what dates and reproduces a report.
+    None of them names a person or a credential.
 
-    The result is idempotent - redact(redact(x)) == redact(x) - because every
-    marker it writes contains a character ("<", ":", ">", "~") that no pattern
-    above matches, and none of the markers is long enough or joined enough to
-    read as a token. That matters wherever a caller redacts a block a second
+    The result is idempotent, so redact(redact(x)) == redact(x). Each marker
+    that it writes contains a character ("<", ":", ">", "~") that no pattern
+    above matches. No marker is long enough or joined enough to read as a
+    token. That property matters wherever a caller redacts a block a second
     time on its way out.
     """
     if not isinstance(text, str):
@@ -135,10 +137,10 @@ def _clean(text) -> str:
 
 
 def _lines(text, indent="") -> List[str]:
-    """`text` as cleaned, wrapped lines, none longer than MAX_LINE.
+    """`text` as cleaned, wrapped lines, each no longer than MAX_LINE.
 
-    A word longer than the width is broken rather than allowed to overflow: the
-    width is a promise to the reader, and one long path should not break it.
+    A word that is longer than the width is broken, because the width is a
+    promise to the reader. One long path must not break that promise.
     """
     body = _clean(text)
     if not body.strip():
@@ -173,18 +175,19 @@ def issue_block(headline, rows, provenance, verdict=None) -> str:
     """The paste-safe block: datable, attributable and reproducible.
 
     `rows` are (label, value) pairs. `provenance` carries the version, the log
-    schema, the ISO window bounds and the store names the evidence came from;
-    it is a dict with keys version, schema, window_start, window_end, stores.
-    `verdict` is an optional (word, sentence) pair - the attribution's owner and
-    the sentence that explains it - and is left out of the block when absent,
-    because a block without a verdict is a report of what was measured, not a
-    claim about who was at fault.
+    schema, the ISO window bounds and the store names that the evidence came
+    from. It is a dict with the keys version, schema, window_start, window_end
+    and stores. `verdict` is an optional (word, sentence) pair: the owner from
+    the attribution and the sentence that explains it. The block leaves the
+    verdict out when there is none, because a block without a verdict reports
+    what was measured. It makes no claim about who was at fault.
 
     The order is fixed: tool and version, the window, the stores, the verdict
-    when given, the headline, then the rows. Every line is ASCII, carries no
-    ANSI escape and no emoji, and fits inside MAX_LINE columns, so the block
-    survives a fenced code block in a chat client or an issue tracker without
-    being reflowed or reinterpreted. The result ends in a single newline.
+    when a caller gives one, the headline, then the rows. Every line is ASCII,
+    with no ANSI escape and no emoji, and each line fits inside MAX_LINE
+    columns. A fenced code block in a chat client or an issue tracker
+    therefore keeps the block as it is. Nothing reflows it and nothing
+    reinterprets it. The result ends in a single newline.
     """
     provenance = provenance if isinstance(provenance, dict) else {}
     lines = []
@@ -215,11 +218,12 @@ def _manifest_line(kind, what, detail) -> str:
 def manifest(included, omitted) -> List[str]:
     """What the block includes and what it leaves out, one line each.
 
-    `included` and `omitted` are lists of (what, detail) pairs. Every entry is
-    named on both sides: an empty side still gets a line, so a reader can tell
-    a quiet window from a truncated one and never has to guess what was cut.
-    The omissions are always listed, even when there are none, because "nothing
-    was omitted" is itself the answer to a question the reader will ask.
+    `included` and `omitted` are lists of (what, detail) pairs. Each entry is
+    named on both sides, and an empty side still gets a line. A reader can then
+    tell a quiet window from a truncated one, and never has to guess what a
+    caller cut. The omissions are always listed, even when there are none. The
+    line "omitted: none" is itself the answer to a question that the reader
+    will ask.
     """
     lines = [_manifest_line("included", what, detail)
              for what, detail in included or ()]

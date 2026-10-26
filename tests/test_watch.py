@@ -337,6 +337,8 @@ class Summary(unittest.TestCase):
         self.assertIn("peak unknown (this machine)", lines[1])
         self.assertIn("in use unknown (account)", lines[2])
         self.assertIn("luna-doctor capacity --online", lines[2])
+        self.assertIn("in use unknown (account). Run ", lines[2],
+                      "the command is a second sentence, not a clause")
 
 
 # ---- a 429-only window ------------------------------------------------------
