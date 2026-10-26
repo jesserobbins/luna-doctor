@@ -607,13 +607,24 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
         add(Text(pad_l - 10, y_of(v) + 3.5, str(v), size=10.5,
                  fill=C["muted"], anchor="end"))
 
-    # time ticks: marks on the axis, labels under it
-    for i in range(x_ticks + 1):
-        ts = t0 + span * i / x_ticks
+    # time ticks: marks on the axis, labels under it. A short window puts two
+    # ticks in the same minute, and two identical labels on one axis read as a
+    # rendering bug - so the format gains seconds before the ticks are reduced,
+    # and only if that still repeats does the axis carry fewer, unique ticks.
+    fmt = "%b %d" if day_labels else "%H:%M"
+    ticks = [t0 + span * i / x_ticks for i in range(x_ticks + 1)]
+    def _labels(f, ts_list):
+        return [datetime.fromtimestamp(t, timezone.utc).strftime(f) for t in ts_list]
+    labels = _labels(fmt, ticks)
+    if not day_labels and len(set(labels)) != len(labels):
+        fmt = "%H:%M:%S"
+        labels = _labels(fmt, ticks)
+        while len(set(labels)) != len(labels) and len(ticks) > 2:
+            ticks = ticks[::2]
+            labels = _labels(fmt, ticks)
+    for ts, label in zip(ticks, labels):
         x = x_of(ts)
         add(Line(x, bot, x, bot + 5, C["axis"]))
-        fmt = "%b %d" if day_labels else "%H:%M"
-        label = datetime.fromtimestamp(ts, timezone.utc).strftime(fmt)
         add(Text(x, xlab_y, label, size=9.5, anchor="middle", fill=C["muted"]))
 
     # direct labels: one per band at the right-hand edge, in the band's
@@ -633,8 +644,17 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
             if ys[i] < ys[i - 1] + 11.0:
                 ys[i] = ys[i - 1] + 11.0
     for (b, y0, lx), y in zip(label_entries, ys):
-        if lx is not None and px + plot_w - lx > 4:
+        if lx is None or px + plot_w - lx <= 4:
+            continue
+        if px + plot_w - lx <= 60:
+            # a short leader: the band ended near the right edge, so the line
+            # joins the name to the band's own end
             add(Line(lx, y0, px + plot_w + 2, y, C["axis"], 0.7, (), 0.6))
+        else:
+            # a band that ended early would need a long diagonal across the data
+            # to reach its name. A stub at the edge names it without drawing
+            # over the picture.
+            add(Line(px + plot_w - 10, y, px + plot_w + 2, y, C["axis"], 0.7, (), 0.6))
     for (b, y0, lx), y in zip(label_entries, ys):
         add(Text(px + plot_w + 6, y + 3.2, b["display"], size=10, fill=b["ink"]))
 
@@ -676,6 +696,11 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
         else:
             rule_label = "priority concurrency (--plan %d)" % rule_n
         ly = ry - 5 if ry - 15 >= top else ry + 12
+        # The rule crosses the stack, and its own ink on a dark band is
+        # unreadable. A white plate behind the label keeps the text legible on
+        # whatever the bands are doing underneath, without hiding the rule.
+        plate_w = 5.4 * len(rule_label) + 6
+        add(Rect(px + 2, ly - 10, plate_w, 14, fill="#ffffff", fill_opacity=0.88))
         add(Text(px + 5, ly, rule_label, size=10, fill=C["rule"]))
 
     add(Text(width - pad_r, xlab_y, "UTC", size=9.5, anchor="end", fill=C["muted"]))
