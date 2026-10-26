@@ -10,13 +10,13 @@ LunaRoute bills **concurrency**, not tokens. There is no quota or token-budget d
 
 ## Install
 
-**Requirements:** Python 3.9+. Everything below — `discover`, `analyze`, `fix`, `chart`, and the bare default run — is offline and needs no credentials.
+**Requirements:** Python 3.9+. Everything below — `discover`, `analyze`, `fix`, `chart`, and the bare default run — is offline and needs no credentials; `capacity` reads a disk cache the same way. The only fetches in the tool are opt-in and use the routing key `lunaroute login` already stored: `capacity --online`, and `analyze --online` / `fix --online` for the model catalog.
 
 ```bash
 git clone https://github.com/jesserobbins/luna-doctor.git
 cd luna-doctor
 pipx install .        # installs the `luna-doctor` command
-luna-doctor --version # should print 0.1.1-alpha.1
+luna-doctor --version # prints the version in VERSION (0.2.0-alpha.3)
 ```
 
 Or without packaging — just put it on your `PATH`:
@@ -34,10 +34,13 @@ luna-doctor discover          # what log stores exist, how big, how fresh
 luna-doctor analyze           # last 24h: what happened and what to adjust
 luna-doctor analyze --now     # last 15 minutes (alias for --since 15m)
 luna-doctor analyze --since 7d --json   # machine-readable, for cron/CI
+luna-doctor analyze --plan <plan name or number>   # declare the account's width
+luna-doctor analyze --baseline prev     # …this window against the one before it
 luna-doctor analyze --style plain       # undecorated text, for a paste or a pipe
+luna-doctor capacity          # the account's plan and priority concurrency (cached)
 luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # …or one agent at a time (pi | claude-code | codex | swamp)
-luna-doctor chart --since 24h # SVG: concurrent requests over time + every request's latency
+luna-doctor chart --since 24h # SVG: one stacked-area graph of concurrent requests
 luna-doctor chart --since 24h --open  # …and open it in your browser
 ```
 
@@ -60,8 +63,9 @@ default — picks `pretty` when stdout is a terminal and `NO_COLOR` is unset, an
 `plain` otherwise. `--style pretty` asks for decoration even down a pipe;
 `NO_COLOR` still wins over it. `CLICOLOR_FORCE` colors a pipe that would otherwise
 stay plain. `--json` is never styled: no `Style` is constructed on that path at
-all. `chart` takes the flag for consistency, but its console output is two plain
-lines — the picture is the SVG.
+all. `chart` takes the flag for consistency, but its console output is four plain
+lines — the two paths, the counts behind the picture and which source the drawn
+rule came from — and the picture is the SVG.
 
 `--copy` is on `discover`, `analyze`, `capacity` and `fix`: it puts the
 printed text on the clipboard too — via the first of `pbcopy`, `wl-copy`,
@@ -69,27 +73,102 @@ printed text on the clipboard too — via the first of `pbcopy`, `wl-copy`,
 it would have been, so a machine with no clipboard tool loses nothing (stderr
 says so, never as an error).
 
+### The attribution line
+
+The default run and `analyze` open with one line that answers the question an
+error string cannot: the wall you hit — was it **this machine**, **the account**,
+or **the gateway**? Its verdict word is exactly one of `you`, `your org`, `the
+gateway`, `not concurrency` or `unknown`. It leads the report because everything
+after it is being judged against one of those three walls, and mistaking one for
+another is how a concurrency report misleads: a gateway fault read as your own
+traffic sends you off to lower a setting that was never the problem.
+
 ### `analyze` — what your machine has been doing
 
-Reconstructs every model request from the local log stores (pi, claude-code) and classifies each outcome against measured gateway behaviour — admission timeouts, silent background demotions, upstream errors, concurrency rejections that surface as 429s, and more. Thresholds (admission deadlines, idle budgets) are measured per model, not hardcoded — and the number of interactive requests the gateway admits at once is specific to the account and cannot be read from these logs. `analyze` reports what it observed for each model in the window.
+Reconstructs every model request from the pi and claude-code log stores and
+classifies each outcome against measured gateway behaviour — admission timeouts,
+silent background demotions, upstream errors, concurrency rejections that surface
+as 429s, and more. Thresholds (admission deadlines, idle budgets) are measured
+per model, not hardcoded: the report carries each model's observed deadline with
+its sample count rather than lending one model's number to another.
+
+The combined snapshot (`metrics.snapshot` in the `--json` envelope) reads one
+store further: codex rollouts are parsed into requests and counted as measured,
+per model and per harness, and codex's declared config keys join the catalog
+beside their siblings — but codex requests do not enter the outcome classes
+above, which stay gated to the harnesses `--harness` names (pi and claude-code
+by default). Token totals stay per harness and are never merged: codex's
+`input_tokens` includes its cached tokens while pi's `input` excludes
+`cacheRead`, so one merged "input tokens" number would be a silent wrong answer.
+
+`--plan <plan name or number>` declares the account's priority concurrency for
+that run. It is a declaration and never a measurement, and it is used only when
+the account's own capacity payload carries no number: when the account does
+report one, the declaration is set aside and the report says so. Account values
+are labelled `(account)`, plan-derived ones `(declared plan <name>)`, and a value
+neither source supplies is `unknown` with the command that fetches the account
+half (`luna-doctor capacity`).
+
+`fix` takes the same `--plan` declaration, so the advice and the analysis are
+judged against the same number.
+
+### `--baseline prev` — this window against the one before it
+
+`analyze --baseline prev` compares the window with the immediately preceding
+equal-length window from the same logs, and prints a `change:` section of the
+form:
+
+```
+blocked at admission: 12 -> 3
+```
+
+Below its sample floor the verdict is `inconclusive`, because a direction built
+on too few requests is a coincidence with a number attached. Nothing in the
+section implies causation — it is two windows of the same logs, side by side —
+and the report does not claim that anything you changed caused the difference.
 
 ### `fix` — what to change, with copy-paste you can audit
 
-Prints one block per agent: the exact file, the snippet, and a command that backs the file up, validates it, merges the key, and prints `ok`. It never writes anything itself. Every key it emits was verified against the installed harness bundles or their shipped docs; anything unverifiable is not emitted.
+Prints one block per agent: the exact file, the snippet, and a command that backs
+the file up, validates it, merges the key, and prints `ok`. It never writes
+anything itself. Every key it emits was verified against the installed harness
+bundles or their shipped docs; anything unverifiable is not emitted.
+
+It ends with a verification step: restart the harness, then run
+`analyze --baseline prev`, and read the `change:` section against what success
+looks like there — the blocked-at-admission count coming down over a window wide
+enough to clear the sample floor.
 
 ### `chart` — one picture
 
-A standalone SVG (no fonts, scripts, or CDN — opens anywhere), with a PNG written beside it under the same stem — the inline image, pasteable into a chat, a note or a doc; `--no-image` suppresses it. One stacked-area graph: a single time axis and a single stack whose height is the account's total concurrent inference requests, layered by band — one model's traffic from one agent in one scheduling class (blues for priority, violets for background), each band named for the agent it belongs to ("glm-5.3 · pi"). A grey outline carries the busiest moment per column, an open circle marks the exact peak, red flare ticks hang where the gateway rejected a request, and the account's priority concurrency is one dashed rule drawn from the capacity API's cached account value (or declared with `--plan` when the API is unreachable). The footer carries the provenance: what was measured, what was declared.
+A standalone SVG (no embedded or remote fonts — the text names a system font
+stack — no scripts, no CDN; opens anywhere), with a PNG written beside it under
+the same stem — the inline image, pasteable into a chat, a note or a doc;
+`--no-image` suppresses it. One stacked-area graph: a single time axis and a
+single stack whose height is the account's total concurrent inference requests,
+layered by band — one model's traffic from one agent in one scheduling class
+(blues for priority, violets for background), each band named for the agent it
+belongs to ("glm-5.3 · pi") whenever more than one agent has traffic. A grey
+outline carries the busiest moment per column, an open circle marks the exact
+peak, red flare ticks hang where the gateway rejected a request, and the
+account's priority concurrency is one dashed rule drawn from the capacity API's
+cached account value (or declared with `--plan` when the account has no number),
+labelled with its source so a fetched value can never be mistaken for a declared
+one. The footer carries the provenance: what was measured, what was declared.
+
+The picture deliberately carries no universal admission deadline (it is per
+model), no advisory concurrency figure (advice that depends on the plan belongs
+to `analyze`) and no latency picture (latency lives in `analyze`).
 
 ## What it reads
 
-Read-only and offline for `discover` / `analyze` / `fix` / `chart`:
+Read-only, and offline by default for `discover` / `analyze` / `fix` / `chart`:
 
 | harness | store |
 |---|---|
 | pi | `~/.pi/agent/sessions/**/*.jsonl` |
 | claude-code | `~/.claude/projects/**/*.jsonl` |
-| codex | detected and reported, not analysed (zstd rollouts, usually not LunaRoute traffic) |
+| codex | `~/.codex/sessions/**/*.jsonl` — parsed into requests and counted as measured per model in the combined snapshot (compressed `*.jsonl.zst` rollouts are skipped: the Python 3.9 stdlib has no zstd), but not classified into the outcome classes above |
 | swamp | `~/.swamp` / sibling `swamp-tracker` repo — reported only while its activity falls inside the window |
 
 Swamp is counted only when it is in use: files under `.swamp/data` or
@@ -99,7 +178,7 @@ is not traffic. When swamp does appear, its concurrency is described as
 configured (its extract and verify settings, and where they came from), never
 as measured concurrency.
 
-`luna-doctor capacity` serves a disk cache of the account's plan and priority concurrency by default; only `capacity --online` touches the network, using the routing key already stored by `lunaroute login`.
+`luna-doctor capacity` serves a disk cache of the account's plan and priority concurrency by default; a cached payload, a stale one included, is served and the network stays untouched. Two flags can fetch, each a single authenticated GET: `capacity --online` refreshes the capacity cache (5 minutes), and `analyze --online` / `fix --online` refresh the 24-hour model catalog at `~/.luna-doctor/catalog.json`. Both use the routing key already stored by `lunaroute login`, and anything that cannot be fetched is reported unknown — never as an error.
 
 ## Limits worth knowing
 
@@ -147,7 +226,7 @@ Semantic versioning with prerelease identifiers (`0.1.1-alpha.1`, `0.1.1-beta.1`
 | JSON document shape | `"schema": 4` in every `--json` envelope — bumped independently when the shape changes |
 | measured gateway facts | `"contract": {...}` in every `--json` envelope |
 
-Every `--json` document carries `schema`, `version`, and `command`. The reporting commands (`discover`, `analyze`, `fix`, `capacity`) also carry `contract`, so a saved report stays readable after the tool moves on. While the project is prerelease, `schema` is bumped freely — the envelope has no stable consumers to protect yet. Usage errors print to stderr and exit `2` with no JSON document.
+Every `--json` document carries `schema`, `version`, and `command`. The reporting commands (`discover`, `analyze`, `fix`, `chart`, `capacity`) also carry `contract`, so a saved report stays readable after the tool moves on. While the project is prerelease, `schema` is bumped freely — the envelope has no stable consumers to protect yet. Usage errors print to stderr and exit `2` with no JSON document.
 
 Bumping a version updates the number in both places, opens a dated changelog section, and prints the tag and push commands. It never pushes:
 
