@@ -39,13 +39,17 @@ UNKNOWN = "unknown"
 ARROW = " -> "
 
 # The pressure signals, strongest first. The order is the verdict's
-# precedence: requests that never got in outrank requests that stalled,
-# which outrank requests the gateway rejected with a 429. A signal that did
-# not move hands the verdict to the next one.
+# precedence: requests that never got in outrank requests that stalled, which
+# outrank requests the gateway rejected. A signal that did not move hands the
+# verdict to the next one. The last signal is the named limit class
+# (`CONCURRENT_REQUEST_LIMIT_EXCEEDED`), which `classify()` assigns before the
+# bare 429 class: leaving it out made a window that went from zero named
+# refusals to ten read "unchanged".
 PRESSURES = (
     ("blocked at admission", "admission_timeout"),
     ("silent stalls", "client_idle_timeout"),
     ("concurrency rejections (429)", "rate_limited"),
+    ("refusals at the account limit", "org_concurrency_limit"),
 )
 
 FLOOR = 8

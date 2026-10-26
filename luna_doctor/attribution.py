@@ -132,6 +132,7 @@ class _LocalFacts(NamedTuple):
 
     requests: int
     peak: int
+    peak_priority: int           # interactive tier only: the pool the width bills
     window: str                    # rendered hours phrase, "" when unknown
     admission_timeout: int
     rate_limited: int
@@ -198,6 +199,9 @@ def _local_facts(local) -> _LocalFacts:
     return _LocalFacts(
         requests=_int(local.get("requests")) or 0,
         peak=_int(local.get("peak_concurrency")) or 0,
+        peak_priority=(_int(local.get("peak_concurrency_priority"))
+                       if isinstance(local.get("peak_concurrency_priority"), int)
+                       else (_int(local.get("peak_concurrency")) or 0)),
         window=_hours(local.get("window_hours")),
         admission_timeout=_count(by, "admission_timeout"),
         rate_limited=_count(by, "rate_limited"),
@@ -511,6 +515,20 @@ def attribute(local, capacity, priority) -> Attribution:
                     or facts.account_limit > 0)
     rows = _rows(facts, width, source, acct)
 
+    # ---- 0. nothing was measured --------------------------------------
+    # A window with no traffic cannot carry any verdict, and "not concurrency"
+    # is a diagnosis. This is the state `analyze --now` reaches at a quiet
+    # moment, which is exactly the invocation the skill recommends when a user
+    # says "it is slow right now".
+    if facts.requests == 0:
+        headline = ("No verdict: no request in this window, so nothing was measured. Widen the "
+                    "window with --since, or run `luna-doctor discover` to see which stores exist "
+                    "on this machine.")
+        return Attribution(VERDICT_UNKNOWN, headline, rows, [
+            "Widen the window, for example `luna-doctor analyze --since 7d`.",
+            "If the window is right and it stays empty, run `luna-doctor discover`.",
+        ])
+
     # ---- 1. neither half can name the owner -----------------------------
     if width is None and not acct.present:
         local_half = ("not measured, no requests in the window (this machine)"
@@ -532,7 +550,7 @@ def attribute(local, capacity, priority) -> Attribution:
         return Attribution(VERDICT_UNKNOWN, headline, rows, actions)
 
     # ---- 2. this machine's own peak reached the width -------------------
-    if width is not None and facts.peak >= width:
+    if width is not None and facts.peak_priority >= width:
         if evidence:
             tail = ("So the %s"
                     % _requests(
@@ -545,8 +563,8 @@ def attribute(local, capacity, priority) -> Attribution:
             tail = ("Nothing was refused, but the next burst at this machine "
                     "has no headroom.")
         headline = (
-            "You: this machine's peak concurrency was %s. %s %s"
-            % (_concurrent(facts.peak), _width_sentence(width, source), tail))
+            "You: this machine's peak on the priority tier was %s. %s %s"
+            % (_concurrent(facts.peak_priority), _width_sentence(width, source), tail))
         actions = [
             "Keep this machine's concurrent requests below %s. The peak "
             "already reached it." % _width_value(width, source),
@@ -557,7 +575,7 @@ def attribute(local, capacity, priority) -> Attribution:
         return Attribution(VERDICT_YOU, headline, rows, actions)
 
     # ---- 3. the account was the width, not this machine -----------------
-    if evidence and corroborated and (width is None or facts.peak < width):
+    if evidence and corroborated and (width is None or facts.peak_priority < width):
         headline = (
             "Your organization: this machine's peak concurrency was %s. That "
             "peak sat %s. %s This machine was not the width, the account was."

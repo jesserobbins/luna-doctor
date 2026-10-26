@@ -56,7 +56,7 @@ _BOUNDARY = r"(?<![A-Za-z0-9_.\-])"
 _EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+"
 # /Users/<name> and /home/<name>, up to the next slash: the rest of the path is
 # left as it was, so ~/GitHub/repo keeps its shape and its readability.
-_HOME_PATH = r"/(?:Users|home)/[A-Za-z0-9._\-]+"
+_HOME_PATH = r"(?i:/(?:Users|home))/[A-Za-z0-9._\-]+"
 # 24 characters of an alphabet real keys are drawn from. The floor is short
 # enough to catch a LunaRoute key and long enough that ordinary prose, a date, a
 # timestamp (its colons break the run) and a model id with a dot or a slash in
@@ -64,6 +64,12 @@ _HOME_PATH = r"/(?:Users|home)/[A-Za-z0-9._\-]+"
 # hyphenated identifier with no other separator is redacted: that fails closed,
 # and losing one word to a marker costs a reader less than leaking a key.
 _TOKEN = r"[A-Za-z0-9_\-]{24,}"
+# A name the tool itself wrote is evidence, not identity. `classify()` returns
+# constants such as CONCURRENT_REQUEST_LIMIT_EXCEEDED and the harness keys read
+# like CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS. A redactor that eats those removes
+# the reason the block exists. An all-caps-and-underscore run with no digit is a
+# name; a credential always carries digits or mixed case.
+_NAME_NOT_SECRET = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 def _redaction_pattern(home):
@@ -86,6 +92,9 @@ def _redacted(match):
     if match.group("email") is not None:
         return MARK_EMAIL
     if match.group("token") is not None:
+        token = match.group("token")
+        if _NAME_NOT_SECRET.match(token):
+            return token
         return MARK_TOKEN
     return "~"
 
@@ -100,7 +109,11 @@ def redact(text, home=None):
       becomes ~, so ~/GitHub/repo still says where a file was. It does not say
       whose machine it was on.
     - an email address -> <redacted:email>.
-    - a run of 24 or more characters of [A-Za-z0-9_-] -> <redacted:token>.
+    - a run of 24 or more characters of [A-Za-z0-9_-] -> <redacted:token>. An
+      all-caps name with no digit is kept as it is, because the constants this
+      tool classifies with (CONCURRENT_REQUEST_LIMIT_EXCEEDED) and the harness
+      keys it quotes (CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS) are evidence, and a
+      credential carries digits or mixed case.
       That run is what an API key looks like.
 
     Deliberately left alone: dates, ISO timestamps, durations ("120.2s"),

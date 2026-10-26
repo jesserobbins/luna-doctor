@@ -1951,7 +1951,11 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         # which wall the reader hit.
         w = m["longest_pressure_window"] or {}
         pv, _psrc = _priority_for_advice(m)
-        pressure = isinstance(pv, int) and not isinstance(pv, bool)
+        # OR, never assignment: an admission timeout or a stall has already set
+        # the flag above, and an unknown width must not clear the evidence those
+        # classes carry. This assignment shipped in the previous pass and turned
+        # a real refusal into exit 0 on any machine with no capacity cache.
+        pressure = pressure or (isinstance(pv, int) and not isinstance(pv, bool))
         width = (f"more than {pv} concurrent requests" if isinstance(pv, int) and not isinstance(pv, bool)
                  else "more concurrent requests than the account's priority concurrency admits")
         note = ("" if pressure else
@@ -3362,8 +3366,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="explain the slowest requests by duration instead of the ones that "
                          "were refused or stalled")
     ex.add_argument("--blocked", action="store_true",
-                    help="explain the most recent refused or stalled request instead of the "
-                         "slowest")
+                    help="explain the newest request that the gateway refused (blocked at "
+                         "admission, or refused at the account's limit) instead of the request "
+                         "that went wrong")
     ex.add_argument("id", nargs="?", default=None, metavar="ID",
                     help="a response id, session id or run id to explain")
     ex.add_argument("--harness", default="pi,claude-code")
@@ -3840,8 +3845,10 @@ def cmd_explain(args) -> int:
     elif getattr(args, "blocked", False):
         picked = explain.blocked(reqs, limit)
         if not picked:
-            print(f"luna-doctor: no request in the last {human_window(hours)} was refused or "
-                  f"stalled. There is no blocked request to explain.", file=sys.stderr)
+            print(f"luna-doctor: no request in the last {human_window(hours)} was refused by the "
+                  f"gateway. There is no blocked request to explain. A stalled request is a "
+                  f"different event: run `luna-doctor explain` with no flag to see it.",
+                  file=sys.stderr)
             return 0
     elif getattr(args, "slowest", False):
         picked = explain.slowest(reqs, limit)
@@ -3915,6 +3922,14 @@ def cmd_analyze(args) -> int:
     now = time.time()
     reqs = collect(hours, harnesses, pi_roots, claude_roots, now=now)
     m = analyse(reqs, hours)
+    # The account's width bills the priority tier, so the attribution needs that
+    # tier's own peak. Ten background requests beside one interactive request are
+    # not ten requests against a priority width of two.
+    try:
+        m["peak_concurrency_priority"] = max_concurrency(
+            [r for r in timed(reqs) if getattr(r, "tier", "") == "interactive"])[0]
+    except Exception:
+        m["peak_concurrency_priority"] = m.get("peak_concurrency")
     # A declared plan is the fallback for the account's own number, never an
     # override of it: attribution.resolve_priority_concurrency decides which
     # one leads, and the report says which it used.

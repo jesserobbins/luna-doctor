@@ -410,8 +410,22 @@ def _advice_width(m: dict):
         return (None, "unknown")
 
 
-def _impact(peak: int, width=None) -> str:
+def _impact(peak: int, width=None, known=True) -> str:
+    """What this change does at the peak this window measured.
+
+    When the width is known, the sentence compares the peak with that number.
+    When it is not, the comparison is against a starting point, and the sentence
+    says so: a claim about "this limit" made from a constant is the failure this
+    whole branch set out to remove.
+    """
     limit = width if isinstance(width, int) and not isinstance(width, bool) else ADVISED_CONCURRENCY
+    if not known:
+        if peak <= limit:
+            return (f"no effect at your current peak of {peak} concurrent requests, which is "
+                    f"already inside this starting point. Set the real number once "
+                    f"`luna-doctor capacity` reports it.")
+        return (f"your peak of {peak} concurrent requests is above this starting point, so the "
+                f"change bites. Make sure that the number is the account's before you apply it.")
     if peak <= limit:
         return (f"no effect at your current peak of {peak} concurrent requests - this is headroom so "
                 f"a later burst cannot overflow into the background tier.")
@@ -500,8 +514,9 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
     # When the width is unknown, the number in the instruction is a starting
     # point, never the account's. The sentence below every such instruction says
     # so, because a config value a reader cannot check is worse than no value.
+    width_known = isinstance(resolved, int) and not isinstance(resolved, bool)
     start_note = ""
-    if not isinstance(resolved, int) or isinstance(resolved, bool):
+    if not width_known:
         start_note = (" This value is a starting point. The priority concurrency of your "
                       "account is unknown here. Run `luna-doctor capacity --online`, or declare "
                       "`--plan <name or number>`, and use that number instead.")
@@ -533,15 +548,18 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                 "from": limit,
                 "to": target,
                 "why": _why(evidence,
-                            f"This machine caps children at {limit}, wider than the interactive "
-                            f"admission width - {CAP_COPY}. Past that width, the excess concurrent "
-                            f"requests park or overflow into background scheduling, where the first "
-                            f"token takes about 600s."),
+                            f"This machine caps children at {limit}, wider than "
+                            + ("the priority concurrency of the account" if width_known
+                               else "the starting point this tool uses while your account width "
+                                    "is unknown")
+                            + f" - {CAP_COPY}. Past that width, the excess concurrent requests "
+                            f"park or overflow into background scheduling, where the first token "
+                            f"takes about 600s."),
                 "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {target} "
                                 f"(was {limit}). This caps simultaneous child agents so your concurrent requests stay "
                                 f"within the interactive admission width instead of overflowing into background "
                                 f"scheduling. Restart the harness after the change." + start_note),
-                "impact": _impact(peak, target),
+                "impact": _impact(peak, target, width_known),
             })
         elif limit is None:
             changes.append({
@@ -555,7 +573,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                 "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {target}. "
                                 f"The current default (20) will keep overflowing the interactive tier under load; lower it. "
                                 f"Have the agent read the existing file first, preserve other keys, then apply the change." + start_note),
-                "impact": _impact(peak, target),
+                "impact": _impact(peak, target, width_known),
             })
 
         if isinstance(idle_ms, int) and 0 < idle_ms < 600000:
@@ -606,7 +624,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                     "instruction": (f"Ask your agent: in {PI_SETTINGS} set your default background model to {bg_model} "
                                     f"so child agents ride the background tier by default (was {cur!r}). Ask it to verify the model "
                                     f"exists via: lunaroute models --json   (or: npx @lunaroute/cli models --json)."),
-                    "impact": _impact(peak, target),
+                    "impact": _impact(peak, target, width_known),
                 })
         if changes:
             out.append({"agent": "pi", "changes": changes})
@@ -639,7 +657,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                             f"admission width - {CAP_COPY}."),
                 "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {target}. "
                                 f"The default 20 keeps overflowing interactive headroom." + start_note),
-                "impact": _impact(peak, target),
+                "impact": _impact(peak, target, width_known),
             })
 
         idle_env = _declared(cc_cfg.get("env.CLAUDE_STREAM_IDLE_TIMEOUT_MS"))
@@ -674,7 +692,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                     "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_SUBAGENT_MODEL to {bg} "
                                     f"so spawned subagents use the background model. Verify with: lunaroute models --json | grep {bg} "
                                     f"(or npx @lunaroute/cli models --json)."),
-                    "impact": _impact(peak, target),
+                    "impact": _impact(peak, target, width_known),
                 })
         if changes:
             out.append({"agent": "claude-code", "changes": changes, "note": note})
@@ -712,7 +730,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                                     f"Existing keys in that file must be preserved. No shell is needed — let the agent edit the TOML directly. "
                                     f"Remember codex reads [agents] from config.toml, but a LunaRoute profile in "
                                     f"~/.codex/lunaroute.config.toml can override tier — keep tier there, limits here."),
-                    "impact": _impact(peak, target),
+                    "impact": _impact(peak, target, width_known),
                 }],
                 "note": ("Codex reads `[agents]` from config.toml, but a LunaRoute profile lives in"
                          " ~/.codex/lunaroute.config.toml and wins for the keys it sets. Keep tier changes"

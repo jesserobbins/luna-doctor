@@ -152,6 +152,18 @@ class PreviousWindowArithmetic(unittest.TestCase):
         self.assertEqual((start - 10, end - 10), baseline.previous_window(NOW, 2))
 
 
+class AccountLimitSignal(unittest.TestCase):
+    def test_a_window_that_gained_named_refusals_is_worse(self):
+        """classify() assigns org_concurrency_limit before rate_limited, so a
+        comparison that ignores it calls ten new refusals "unchanged"."""
+        previous = window(requests=30, rate_limited=0)
+        current = window(requests=30)
+        current["by_outcome"]["org_concurrency_limit"] = 10
+        word, reason = baseline.change_verdict(current, previous)
+        self.assertEqual("worse", word, reason)
+        self.assertIn("refusals at the account limit", reason)
+
+
 class Verdict(unittest.TestCase):
     """The four words, and how precedence and the floor reach them."""
 
@@ -290,7 +302,8 @@ class Rows(unittest.TestCase):
         labels = [label for label, _ in
                   baseline.change_rows(window(), window())]
         self.assertEqual(["requests", "blocked at admission", "silent stalls",
-                          "concurrency rejections (429)", "peak concurrency",
+                          "concurrency rejections (429)",
+                          "refusals at the account limit", "peak concurrency",
                           "admission conversion", "change"], labels)
 
     def test_every_count_cell_reads_previous_then_current(self):

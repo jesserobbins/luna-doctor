@@ -185,7 +185,7 @@ class YouVerdict(unittest.TestCase):
                                                 "admission_timeout": 3}),
                         account(12), (12, "account"))
         self.assertEqual(VERDICT_YOU, att.verdict)
-        self.assertIn("peak concurrency was 12 concurrent requests (this machine)",
+        self.assertIn("peak on the priority tier was 12 concurrent requests (this machine)",
                       att.headline)
         self.assertIn("12 priority concurrent requests (account)", att.headline)
 
@@ -277,6 +277,27 @@ class YourOrgVerdict(unittest.TestCase):
         self.assertIn("width unknown", att.headline)
 
 
+class PriorityTier(unittest.TestCase):
+    def test_background_traffic_does_not_count_against_the_priority_width(self):
+        """Ten background requests beside one interactive request are not ten
+        requests against a priority width of two."""
+        att = attribute(
+            {"requests": 11, "by_outcome": {"completed": 11}, "peak_concurrency": 11,
+             "peak_concurrency_priority": 1,
+             "admission_conversion": {"interactive": {"admitted_pct": 100.0}}},
+            account(2), (2, "account"))
+        self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)
+
+    def test_the_priority_peak_still_reaches_the_width(self):
+        att = attribute(
+            {"requests": 4, "by_outcome": {"completed": 4}, "peak_concurrency": 12,
+             "peak_concurrency_priority": 3,
+             "admission_conversion": {"interactive": {"admitted_pct": 100.0}}},
+            account(2), (2, "account"))
+        self.assertEqual(VERDICT_YOU, att.verdict)
+        self.assertIn("priority tier", att.headline)
+
+
 class GatewayVerdict(unittest.TestCase):
     def test_upstream_failures_without_a_refusal_or_occupancy(self):
         att = attribute(
@@ -359,12 +380,12 @@ class Precedence(unittest.TestCase):
     def test_every_verdict_is_reachable(self):
         seen = {
             attribute(local_store(requests=9, peak=9), None, (None, "unknown")).verdict,
-            attribute(local_store(peak=12), account(12), (12, "account")).verdict,
-            attribute(local_store(peak=2, by_outcome={"rate_limited": 1}),
+            attribute(local_store(requests=30, peak=12), account(12), (12, "account")).verdict,
+            attribute(local_store(requests=30, peak=2, by_outcome={"rate_limited": 1}),
                       account(12, now=busy_now()), (12, "account")).verdict,
-            attribute(local_store(peak=2, by_outcome={"upstream_error": 1}),
+            attribute(local_store(requests=30, peak=2, by_outcome={"upstream_error": 1}),
                       account(12, now=quiet_now()), (12, "account")).verdict,
-            attribute(local_store(peak=1), account(12), (12, "account")).verdict,
+            attribute(local_store(requests=5, peak=1), account(12), (12, "account")).verdict,
         }
         self.assertEqual(set(VERDICTS), seen)
 
@@ -576,7 +597,13 @@ class Contract(unittest.TestCase):
                            "per_model_deadlines": None}):
             att = attribute(store, None, (None, "unknown"))
             self.assertEqual(VERDICT_UNKNOWN, att.verdict)
+        # An empty window carries no verdict: with traffic it would be
+        # not-concurrency, but "no requests" is not evidence of anything.
         att = attribute({}, account(12), (12, "account"))
+        self.assertEqual(VERDICT_UNKNOWN, att.verdict)
+        self.assertIn("no verdict", att.headline.lower())
+        att = attribute({"requests": 5, "by_outcome": {}, "peak_concurrency": 1},
+                        account(12), (12, "account"))
         self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)
 
 

@@ -181,7 +181,7 @@ class OwnerLabels(unittest.TestCase):
     def test_a_saturated_pool_is_the_accounts_word_not_ours(self):
         line = watch.sample_line(local_store({}), account(in_use=12, limit=12),
                                  "2026-10-24T17:42:03Z")
-        self.assertIn("12/12 in use, saturated (account)", line)
+        self.assertIn("12/12 in use (account)", line)
 
     def test_an_absent_value_is_unknown_never_zero(self):
         lines = [watch.sample_line({}, None, "2026-10-24T17:42:03Z"),
@@ -386,6 +386,22 @@ class EveryEmittedString(unittest.TestCase):
         for line in all_surfaces()["frame"]:
             outside_ascii = {ch for ch in line if ord(ch) > 127}
             self.assertLessEqual(outside_ascii, {"·"}, line)
+
+
+class OwnerLabelSurvivesTheCap(unittest.TestCase):
+    def test_a_saturated_absurd_sample_keeps_the_account_label(self):
+        """40 blocked and a full pool is the widest line this can build, and the
+        owner label must still be on it."""
+        local = {"requests": 90,
+                 "by_outcome": {"admission_timeout": 40, "client_idle_timeout": 12},
+                 "peak_concurrency": 40, "window_hours": 1.0}
+        cap = {"provenance": "account", "now": {"in_use": 12, "limit": 12,
+                                                "saturated": True,
+                                                "sampled_at": "2026-10-26T04:00:00Z"}}
+        line = watch.sample_line(local, cap, "2026-10-26T04:00:01Z")
+        self.assertLessEqual(len(line), 100, line)
+        self.assertIn("(account)", line)
+        self.assertIn("(this machine)", line)
 
 
 if __name__ == "__main__":

@@ -181,6 +181,22 @@ def resolve_capacity(args, account=None) -> Capacity:
     return Capacity(priority=None, source="none", declared="", **(acct or {}))
 
 
+def _plan_arg(value):
+    """argparse type for --plan: validate once, so no command can drop it silently.
+
+    Without this, a typo (`--plan team`) reached the resolver, which swallows the
+    ValueError and reports "unknown", so the report claimed no declaration was
+    made when one was. argparse turns a bad value into exit 2 with the accepted
+    names, which is what `chart` already did by hand.
+    """
+    try:
+        parse_plan(value)
+    except ValueError as e:
+        import argparse
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return value
+
+
 def add_plan_arg(parser, help_text: str = PLAN_HELP) -> None:
     """Add the one --plan definition every command shares.
 
@@ -188,4 +204,5 @@ def add_plan_arg(parser, help_text: str = PLAN_HELP) -> None:
     cannot drift apart as the follow-up pass wires them to
     resolve_capacity().
     """
-    parser.add_argument("--plan", default=None, metavar="NAME|N", help=help_text)
+    parser.add_argument("--plan", default=None, metavar="NAME|N", help=help_text,
+                        type=_plan_arg)

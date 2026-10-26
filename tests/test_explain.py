@@ -137,7 +137,7 @@ class Rows(unittest.TestCase):
         now = {"in_use": 12, "limit": 12, "sampled_at": "2026-10-24T00:05:14Z"}
         capacity = {"provenance": "account", "priority_lanes": 12, "now": now}
         doc = explain.explain(req(), [req()], capacity, (12, "account"))
-        self.assertIn("12 of 12 in use", dict(doc["rows"])["account occupancy"])
+        self.assertIn("in use 12 of 12", dict(doc["rows"])["account occupancy"])
         self.assertIn("(account)", dict(doc["rows"])["account occupancy"])
 
     def test_a_long_error_message_is_clipped(self):

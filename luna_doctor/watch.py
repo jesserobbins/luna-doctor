@@ -300,7 +300,12 @@ def _account_clause(acct: _Account, compact: bool = False) -> str:
     if acct.in_use is not None and acct.limit is not None:
         text = ("%d/%d in use" if compact else "%d of %d in use") % (
             acct.in_use, acct.limit)
-        if acct.saturated:
+        # The compact form is on a shared 100-character budget. It drops
+        # ", saturated" because "12/12" already says the pool is full, and the
+        # characters it frees are what keeps "(account)" from being clipped off
+        # the end. A count without its owner label is the one thing this line
+        # must never show.
+        if acct.saturated and not compact:
             text += ", saturated"
         return text + " (account)"
     if acct.in_use is not None:

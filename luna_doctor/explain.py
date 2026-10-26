@@ -149,13 +149,61 @@ def _session_label(req) -> str:
     return " · ".join(bits)
 
 
-def _account_full(capacity) -> bool:
+def _occupancy(now) -> str:
+    """The account's occupancy as copy, with a missing half named, never `None`.
+
+    The API can report `in_use` without `limit` (and the reverse). Printing
+    "3 of None" reads as a bug in the tool, so each half that is absent is
+    named instead.
+    """
+    in_use, limit = now.get("in_use"), now.get("limit")
+    where = now.get("sampled_at") or "an unknown time"
+    if isinstance(in_use, int) and isinstance(limit, int):
+        return "in use %d of %d priority concurrent requests at %s (account)" % (in_use, limit, where)
+    if isinstance(in_use, int):
+        return ("in use %d priority concurrent requests, limit not reported, at %s (account)"
+                % (in_use, where))
+    if isinstance(limit, int):
+        return ("limit %d priority concurrent requests, in use not reported, at %s (account)"
+                % (limit, where))
+    return ""
+
+
+SAMPLE_WINDOW_S = 900.0   # 15 minutes: how close a sample must be to the request
+
+
+def _sample_covers(now, req) -> bool:
+    """True when the capacity sample was taken close enough to this request.
+
+    A sample fetched today cannot explain a stall from yesterday. The sample
+    carries `sampled_at`, so this compares it with the end of the request and
+    accepts it inside `SAMPLE_WINDOW_S`. An unparseable or absent timestamp
+    means the sample does not cover the request: unknown is not a licence.
+    """
+    stamp = (now or {}).get("sampled_at")
+    if not isinstance(stamp, str) or req.end is None:
+        return False
+    try:
+        sampled = datetime.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return False
+    return abs(float(req.end) - sampled) <= SAMPLE_WINDOW_S
+
+
+def _account_full(capacity, req=None) -> bool:
     """True when the account sample shows the concurrent-request pool full.
 
-    A cached sample that reports 1 of 12 in use cannot explain a refusal, so it
-    is data in the rows and never a cause in the headline.
+    Two conditions, and both are needed before this function lets a headline
+    blame the account. The pool must be full: a cached sample that reports 1 of
+    12 in use cannot explain a refusal. And the sample must be close enough in
+    time to the request to say anything about it, when the caller passes the
+    request. Without a request the time test is skipped, which is what the
+    window-level attribution wants: it is judging a window, not a moment.
     """
     now = (capacity or {}).get("now") or {}
+    if req is not None and not _sample_covers(now, req):
+        return False
     if now.get("saturated") is True:
         return True
     in_use, limit = now.get("in_use"), now.get("limit")
@@ -232,7 +280,7 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
             actions.append("Narrow the concurrent requests on this machine to fit %s. Or send "
                            "the wide work to the -background variant of the same model."
                            % _width_words(value, source))
-        elif _account_full(capacity):
+        elif _account_full(capacity, req):
             # The account sample has to show the pool full. A sample that says
             # 1 of 12 in use does not explain a refusal, and saying that it did
             # would be the same mistake the attribution module refuses to make.
@@ -247,9 +295,12 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
         else:
             now = (capacity or {}).get("now") or {}
             sample = ""
-            if now.get("in_use") is not None and now.get("limit") is not None:
-                sample = (" The account sample shows %s of %s in use, which is not full."
-                          % (now.get("in_use"), now.get("limit")))
+            occupancy = _occupancy(now)
+            if occupancy:
+                when = ("at a time close to this request" if _sample_covers(now, req)
+                        else "at a different time from this request, so it is background "
+                             "information and not evidence here")
+                sample = (" The account sample, %s, was taken %s." % (occupancy, when))
             head = ("No width on this machine explains this request. This machine peaked at %s "
                     "during the span.%s The cause of this wait is not established."
                     % (peak if peak is not None else "unknown", sample))
@@ -403,9 +454,9 @@ def explain(req, reqs, capacity=None, priority=None) -> dict:
         rows.append(("same model, served meanwhile",
                      "%d request(s) completed inside this request's span (this machine)" % peers))
     now = (capacity or {}).get("now") or {}
-    if now.get("in_use") is not None:
-        rows.append(("account occupancy", "%s of %s in use at %s (account)"
-                     % (now.get("in_use"), now.get("limit"), now.get("sampled_at") or "an unknown time")))
+    occupancy = _occupancy(now)
+    if occupancy:
+        rows.append(("account occupancy", occupancy))
     if req.error_message:
         text = " ".join(str(req.error_message).split())
         rows.append(("error text", text[:220] + ("…" if len(text) > 220 else "")))

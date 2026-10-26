@@ -227,5 +227,20 @@ class NoRetiredOrBillingVocabulary(unittest.TestCase):
                                  "%s contains the forbidden word %r" % (name, word))
 
 
+class ToolEvidenceSurvives(unittest.TestCase):
+    def test_a_named_gateway_constant_is_not_redacted(self):
+        text = "refused with CONCURRENT_REQUEST_LIMIT_EXCEEDED on 3 requests"
+        self.assertIn("CONCURRENT_REQUEST_LIMIT_EXCEEDED", redact(text))
+
+    def test_a_harness_key_is_not_redacted(self):
+        text = "set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to 8"
+        self.assertIn("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", redact(text))
+
+    def test_a_lowercased_home_path_is_still_redacted(self):
+        """error_signature() lowercases error text before it reaches this block."""
+        self.assertNotIn("/users/jesse", redact("at /users/jesse/private/x"))
+        self.assertIn("~/private/x", redact("at /users/jesse/private/x"))
+
+
 if __name__ == "__main__":
     unittest.main()
