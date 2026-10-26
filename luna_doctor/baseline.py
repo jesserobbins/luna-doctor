@@ -124,14 +124,24 @@ def change_verdict(current, previous, floor=FLOOR):
 
     `current` and `previous` are analyse() dicts. The floor applies to the
     smaller of the two request counts. Under the floor the word is
-    `inconclusive`, and the reason names the small count, because a window
-    that thin cannot carry a claim either way. At or above the floor, the
-    first pressure signal that moved decides, in the order that PRESSURES
-    gives. The reason quotes the counts that moved it. When none of the
-    three moved, the windows read `unchanged`. Peak concurrency and
-    admission conversion appear in the rows and never in this word.
+    `inconclusive`, and the reason names the small count, because a window that
+    thin cannot carry a claim either way.
+
+    At or above the floor, this function compares rates, not raw counts. The two
+    windows rarely hold the same amount of traffic, so a raw count can invert the
+    answer: 5 blocked of 40 is a worse rate than 2 blocked of 9, and a count-only
+    comparison calls that an improvement. The rate is the count divided by the
+    requests in that window. The first pressure signal that moved decides, in the
+    order that PRESSURES gives.
+
+    The reason quotes both rates and both counts, so a reader can make sure that
+    the word follows the numbers. When no signal moved, the windows read
+    `unchanged`. Peak concurrency and admission conversion appear in the rows and
+    never in this word.
     """
-    small = min(_requests(previous), _requests(current))
+    before_n = _requests(previous)
+    after_n = _requests(current)
+    small = min(before_n, after_n)
     if small < floor:
         return ("inconclusive",
                 "inconclusive: %d requests in one of the windows, below the "
@@ -139,12 +149,28 @@ def change_verdict(current, previous, floor=FLOOR):
     for label, outcome in PRESSURES:
         before = _outcome(previous, outcome)
         after = _outcome(current, outcome)
-        if after == before:
+        before_rate = _rate(before, before_n)
+        after_rate = _rate(after, after_n)
+        if before_rate == after_rate:
             continue
-        word = "better" if after < before else "worse"
-        moved = "fell" if after < before else "rose"
-        return word, "%s: %s %s from %d to %d" % (word, label, moved,
-                                                   before, after)
+        word = "better" if after_rate < before_rate else "worse"
+        moved = "fell" if after_rate < before_rate else "rose"
+        return word, "%s: %s %s from %s (%d of %d requests) to %s (%d of %d requests)" % (
+            word, label, moved,
+            _percent(before_rate), before, before_n,
+            _percent(after_rate), after, after_n)
     return ("unchanged",
             "unchanged: blocked at admission, silent stalls and concurrency "
-            "rejections (429) sit at the same counts in both windows")
+            "rejections (429) sit at the same rate in both windows")
+
+
+def _rate(count, requests):
+    """The share of a window's requests that hit one outcome, 0.0 when empty."""
+    if not requests:
+        return 0.0
+    return float(count) / float(requests)
+
+
+def _percent(rate):
+    """A rate as copy. One decimal place, so a small move stays visible."""
+    return "%.1f%%" % (100.0 * rate)

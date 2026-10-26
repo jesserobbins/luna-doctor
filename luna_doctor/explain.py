@@ -149,6 +149,21 @@ def _session_label(req) -> str:
     return " · ".join(bits)
 
 
+def _account_full(capacity) -> bool:
+    """True when the account sample shows the concurrent-request pool full.
+
+    A cached sample that reports 1 of 12 in use cannot explain a refusal, so it
+    is data in the rows and never a cause in the headline.
+    """
+    now = (capacity or {}).get("now") or {}
+    if now.get("saturated") is True:
+        return True
+    in_use, limit = now.get("in_use"), now.get("limit")
+    if isinstance(in_use, int) and isinstance(limit, int):
+        return in_use >= limit
+    return False
+
+
 def _why(req, reqs, capacity, priority) -> tuple[str, list]:
     """The one sentence the reader came for, plus the actions that follow it.
 
@@ -196,12 +211,12 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
             # user already holds in their hand.
             named = ("the gateway said so in the response (CONCURRENT_REQUEST_LIMIT_EXCEEDED)"
                      if own == "org_concurrency_limit" else "the gateway returned a 429")
-            held = ("this machine held %d concurrent requests at that moment"
+            held = ("this machine held %d concurrent requests"
                     % in_flight if in_flight else
                     "the number of concurrent requests on this machine at that moment is unknown")
             head = ("The concurrent-request pool of the account was full at %s. %s. At that "
-                    "moment, %s. The room that this request needed was not free on this machine."
-                    % (_clock(req.start), _sentence(named), held))
+                    "moment, %s. The room that this request needed was not free in the pool of "
+                    "the account." % (_clock(req.start), _sentence(named), held))
             actions.append("Other sessions on the account held the room. Run `luna-doctor "
                            "capacity` to read the occupancy of the account. Send wide work to "
                            "the -background variant.")
@@ -217,19 +232,27 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
             actions.append("Narrow the concurrent requests on this machine to fit %s. Or send "
                            "the wide work to the -background variant of the same model."
                            % _width_words(value, source))
-        elif capacity and (capacity.get("now") or {}).get("in_use") is not None and (capacity.get("now") or {}).get("limit") is not None:
+        elif _account_full(capacity):
+            # The account sample has to show the pool full. A sample that says
+            # 1 of 12 in use does not explain a refusal, and saying that it did
+            # would be the same mistake the attribution module refuses to make.
             now = capacity["now"]
             head = ("This machine held only %s concurrent requests at %s. The account was "
-                    "holding %s of %s. The pool is shared, so the wait came from outside this "
-                    "machine."
+                    "holding %s of %s at that sample, so the pool was full and the wait came "
+                    "from outside this machine."
                     % (peak if peak is not None else "unknown", _clock(req.start),
                        now.get("in_use"), now.get("limit")))
             actions.append("Other machines or other agents held the room. Run `luna-doctor "
                            "capacity` and send this work again when in_use is lower.")
         else:
+            now = (capacity or {}).get("now") or {}
+            sample = ""
+            if now.get("in_use") is not None and now.get("limit") is not None:
+                sample = (" The account sample shows %s of %s in use, which is not full."
+                          % (now.get("in_use"), now.get("limit")))
             head = ("No width on this machine explains this request. This machine peaked at %s "
-                    "during the span, and no capacity sample covers that moment."
-                    % (peak if peak is not None else "unknown"))
+                    "during the span.%s The cause of this wait is not established."
+                    % (peak if peak is not None else "unknown", sample))
             actions.append("Run `luna-doctor capacity --online` to read the occupancy of the "
                            "account. Without that value, this tool cannot name the owner of the "
                            "wait.")

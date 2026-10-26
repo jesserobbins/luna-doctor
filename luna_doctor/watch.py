@@ -68,6 +68,7 @@ PIPE_SEPARATOR = " | "
 _REFUSALS = (
     ("blocked", "blocked at admission"),
     ("rate_limited", "rate limited"),
+    ("stalls", "silent stall(s)"),
     ("account_limit", "refused at the account limit"),
 )
 
@@ -96,6 +97,7 @@ class _Local(NamedTuple):
     """
 
     blocked: int
+    stalls: int
     rate_limited: int
     account_limit: int
     peak: Optional[int]
@@ -106,6 +108,7 @@ def _local_facts(local) -> _Local:
     local = local if isinstance(local, dict) else {}
     by = local.get("by_outcome")
     return _Local(blocked=_count(by, "admission_timeout"),
+                  stalls=_count(by, "client_idle_timeout"),
                   rate_limited=_count(by, "rate_limited"),
                   account_limit=_count(by, "org_concurrency_limit"),
                   peak=_int(local.get("peak_concurrency")),
@@ -448,7 +451,7 @@ def state_changed(previous, current, capacity_previous=None,
 def _local_state(local) -> tuple:
     """What a line reports about this machine, for comparison."""
     facts = _local_facts(local)
-    return (facts.blocked, facts.rate_limited, facts.account_limit, facts.peak)
+    return (facts.blocked, facts.stalls, facts.rate_limited, facts.account_limit, facts.peak)
 
 
 def _account_state(capacity) -> tuple:

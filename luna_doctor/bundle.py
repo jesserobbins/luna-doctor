@@ -56,7 +56,7 @@ _BOUNDARY = r"(?<![A-Za-z0-9_.\-])"
 _EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+"
 # /Users/<name> and /home/<name>, up to the next slash: the rest of the path is
 # left as it was, so ~/GitHub/repo keeps its shape and its readability.
-_HOME_PATH = r"/(?:Users|home)/[^/\s]+(?=/|$)"
+_HOME_PATH = r"/(?:Users|home)/[A-Za-z0-9._\-]+"
 # 24 characters of an alphabet real keys are drawn from. The floor is short
 # enough to catch a LunaRoute key and long enough that ordinary prose, a date, a
 # timestamp (its colons break the run) and a model id with a dot or a slash in

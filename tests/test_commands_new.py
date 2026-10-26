@@ -18,8 +18,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "bin", "luna-doctor")
 
 
-def _store(n=6, hours_ago=0.2):
-    """A small pi store: one stalled request inside a wide burst."""
+def _store(n=6, hours_ago=0.2, kind="mixed"):
+    """A small pi store.
+
+    `mixed` is one stalled request inside a wide burst. `refusals_only` is a
+    quiet machine whose only signal is 429s. `stall_only` is one stalled
+    request and nothing else.
+    """
     home = tempfile.mkdtemp(prefix="luna-doctor-newcmd-")
     d = os.path.join(home, ".pi", "agent", "sessions", "s")
     os.makedirs(d)
@@ -40,10 +45,17 @@ def _store(n=6, hours_ago=0.2):
                      "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
                                                 time.gmtime(end)),
                      "message": msg})
-    for i in range(n):
-        add(200 + i, 60 + i, "completed", "resp-ok-%d" % i)
-    add(198, 100, "client_idle_timeout", "resp-stalled")
-    add(150, 149.5, "org_concurrency_limit", "resp-refused")
+    if kind == "stall_only":
+        add(200, 100, "client_idle_timeout", "resp-stalled")
+    elif kind == "refusals_only":
+        for i in range(4):
+            add(300 - i * 20, 299.5 - i * 20, "org_concurrency_limit",
+                "resp-refused-%d" % i)
+    else:
+        for i in range(n):
+            add(200 + i, 60 + i, "completed", "resp-ok-%d" % i)
+        add(198, 100, "client_idle_timeout", "resp-stalled")
+        add(150, 149.5, "org_concurrency_limit", "resp-refused")
     path = os.path.join(d, "s.jsonl")
     with open(path, "w") as fh:
         fh.write("\n".join(json.dumps(r) for r in rows) + "\n")
@@ -51,11 +63,26 @@ def _store(n=6, hours_ago=0.2):
     return home
 
 
-def run(home, *args, timeout=120):
+def capacity_cache(home, in_use=12, limit=12, sampled_at="2026-10-26T04:00:00Z"):
+    """A fresh cache file in the shape sources reads: {fetched_at, response}."""
+    doc = {"fetched_at": time.time() - 30,
+           "response": {"success": True, "data": {
+               "config": {"plan": "apex", "priority_lanes": limit,
+                          "background_lanes": 12, "overflow_routing": "enabled"},
+               "now": {"in_use": in_use, "limit": limit, "available": limit - in_use,
+                       "saturated": in_use >= limit, "ledger": "up",
+                       "sampled_at": sampled_at}}}}
+    path = os.path.join(home, "capacity.json")
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+    return path
+
+
+def run(home, *args, timeout=120, capacity=None):
     env = dict(os.environ)
     env["HOME"] = home
     env["LUNA_DOCTOR_STORE"] = os.path.join(home, "store")
-    env["LUNA_DOCTOR_CAPACITY"] = os.path.join(home, "no-capacity.json")
+    env["LUNA_DOCTOR_CAPACITY"] = capacity or os.path.join(home, "no-capacity.json")
     env["NO_COLOR"] = "1"
     proc = subprocess.run([sys.executable, CLI, *args], capture_output=True,
                           text=True, cwd=ROOT, env=env, timeout=timeout)
@@ -91,6 +118,36 @@ class Watch(unittest.TestCase):
         self.assertIn("(this machine)", out)
 
 
+class CapacityWiring(unittest.TestCase):
+    """The account half has to reach the consumers, not stop at the cache."""
+
+    def test_the_live_sample_reaches_the_json_block(self):
+        home = _store()
+        cap = capacity_cache(home)
+        code, out, err = run(home, "analyze", "--since", "1h", "--json", capacity=cap)
+        self.assertIn(code, (0, 1), err)
+        doc = json.loads(out)
+        now = doc["metrics"]["capacity"].get("now") or {}
+        self.assertEqual(12, now.get("in_use"))
+        self.assertEqual("2026-10-26T04:00:00Z", now.get("sampled_at"))
+
+    def test_a_quiet_machine_with_429s_and_a_full_account_reads_your_org(self):
+        home = _store(kind="refusals_only")
+        cap = capacity_cache(home, in_use=12, limit=12)
+        code, out, err = run(home, "analyze", "--since", "1h", "--json", capacity=cap)
+        self.assertIn(code, (0, 1), err)
+        doc = json.loads(out)
+        self.assertEqual("your-org", doc["attribution"]["verdict"], doc["attribution"])
+
+
+class WatchStalls(unittest.TestCase):
+    def test_a_stall_shows_up_in_the_line(self):
+        home = _store(kind="stall_only")
+        code, out, err = run(home, "watch", "--once")
+        self.assertIn(code, (0, 1), err)
+        self.assertIn("stall", out.lower(), out)
+
+
 class ForIssue(unittest.TestCase):
     def test_issue_block_is_datable_and_redacted(self):
         home = _store()
@@ -103,6 +160,19 @@ class ForIssue(unittest.TestCase):
                          "the issue block must not carry an absolute store path")
         self.assertIn("window:", out)
         self.assertIn("verdict:", out)
+
+    def test_issue_block_redacts_an_explicit_store_root(self):
+        """The wiring, not just redact() in isolation: --pi-root puts a real
+        absolute path into the stores line, and it must not survive."""
+        home = _store()
+        root = os.path.join(home, ".pi", "agent", "sessions", "s")
+        code, out, err = run(home, "analyze", "--since", "1h", "--style", "plain",
+                             "--for-issue", "--pi-root", root)
+        self.assertIn(code, (0, 1), err)
+        for spelling in (home, os.path.realpath(home)):
+            for line in out.splitlines():
+                self.assertNotIn(spelling, line,
+                                 f"the issue block leaked {spelling}: {line}")
 
     def test_issue_block_replaces_the_report(self):
         home = _store()

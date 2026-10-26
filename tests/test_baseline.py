@@ -160,19 +160,31 @@ class Verdict(unittest.TestCase):
             window(admission_timeout=1), window(admission_timeout=5))
         self.assertEqual("better", word)
         self.assertIn("blocked at admission", reason)
-        self.assertIn("5 to 1", reason)
+        self.assertIn("5 of 10 requests", reason)
+        self.assertIn("1 of 10 requests", reason)
 
     def test_more_blocked_at_admission_is_worse(self):
         word, reason = baseline.change_verdict(
             window(admission_timeout=5), window(admission_timeout=1))
         self.assertEqual("worse", word)
-        self.assertIn("1 to 5", reason)
+        self.assertIn("1 of 10 requests", reason)
+        self.assertIn("5 of 10 requests", reason)
+
+    def test_a_smaller_window_with_a_worse_rate_is_not_an_improvement(self):
+        """5 blocked of 40 is a 12.5% rate. 2 blocked of 9 is 22%. A count-only
+        comparison calls that an improvement and gets the direction wrong."""
+        previous = window(requests=40, admission_timeout=5)
+        current = window(requests=9, admission_timeout=2)
+        word, reason = baseline.change_verdict(current, previous)
+        self.assertEqual("worse", word, reason)
+        self.assertIn("12.5%", reason)
+        self.assertIn("22.2%", reason)
 
     def test_equal_windows_are_unchanged(self):
         quiet = window(requests=40, peak_concurrency=4, admitted_pct=97.5)
         word, reason = baseline.change_verdict(quiet, dict(quiet))
         self.assertEqual("unchanged", word)
-        self.assertIn("same counts", reason)
+        self.assertIn("same rate", reason)
 
     def test_the_floor_counts_the_smaller_window(self):
         big, small = window(requests=400), window(requests=7)

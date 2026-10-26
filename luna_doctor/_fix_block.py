@@ -410,8 +410,9 @@ def _advice_width(m: dict):
         return (None, "unknown")
 
 
-def _impact(peak: int) -> str:
-    if peak <= ADVISED_CONCURRENCY:
+def _impact(peak: int, width=None) -> str:
+    limit = width if isinstance(width, int) and not isinstance(width, bool) else ADVISED_CONCURRENCY
+    if peak <= limit:
         return (f"no effect at your current peak of {peak} concurrent requests - this is headroom so "
                 f"a later burst cannot overflow into the background tier.")
     return f"your peak of {peak} concurrent requests is already past this limit, so this is the change that bites."
@@ -456,7 +457,7 @@ LUNAROUTE_COMMAND_PREFACE = (
     "To inspect your LunaRoute setup, use the `lunaroute` command:\n"
     "  lunaroute whoami          # who is signed in and which org (no plan number here)\n"
     "  lunaroute models --json   # what models are available on this account\n"
-    "  lunaroute-doctor capacity # the account's own priority concurrency\n"
+    "  luna-doctor capacity      # the account's own priority concurrency\n"
     "If `lunaroute` is not on your PATH, run it via npx instead:\n"
     "  npx @lunaroute/cli whoami\n"
     "  npx @lunaroute/cli models --json\n"
@@ -494,7 +495,16 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
     # The width the advice aims at: the account's own priority concurrency, a
     # declared plan's, or - when neither is known - the old conservative
     # starting point, labelled as advice rather than as a gateway fact.
-    target = _advice_width(m)[0] or ADVISED_CONCURRENCY
+    resolved, resolved_src = _advice_width(m)
+    target = resolved or ADVISED_CONCURRENCY
+    # When the width is unknown, the number in the instruction is a starting
+    # point, never the account's. The sentence below every such instruction says
+    # so, because a config value a reader cannot check is worse than no value.
+    start_note = ""
+    if not isinstance(resolved, int) or isinstance(resolved, bool):
+        start_note = (" This value is a starting point. The priority concurrency of your "
+                      "account is unknown here. Run `luna-doctor capacity --online`, or declare "
+                      "`--plan <name or number>`, and use that number instead.")
     peak = m["peak_concurrency"]
     dead = m["by_outcome"].get("admission_timeout", 0)
     idle_stalls = m["by_outcome"].get("client_idle_timeout", 0)
@@ -530,8 +540,8 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                 "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {target} "
                                 f"(was {limit}). This caps simultaneous child agents so your concurrent requests stay "
                                 f"within the interactive admission width instead of overflowing into background "
-                                f"scheduling. Restart the harness after the change."),
-                "impact": _impact(peak),
+                                f"scheduling. Restart the harness after the change." + start_note),
+                "impact": _impact(peak, target),
             })
         elif limit is None:
             changes.append({
@@ -544,8 +554,8 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                             f"admission width - {CAP_COPY}."),
                 "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {target}. "
                                 f"The current default (20) will keep overflowing the interactive tier under load; lower it. "
-                                f"Have the agent read the existing file first, preserve other keys, then apply the change."),
-                "impact": _impact(peak),
+                                f"Have the agent read the existing file first, preserve other keys, then apply the change." + start_note),
+                "impact": _impact(peak, target),
             })
 
         if isinstance(idle_ms, int) and 0 < idle_ms < 600000:
@@ -577,22 +587,26 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
             })
 
         if bg and wide:
-            target = bg if "/" in bg else f"lunaroute/{bg}"
+            # `bg_model`, never `target`: `target` above is the numeric width the
+            # advice aims at, and reusing the name here put a model id where a
+            # concurrency number belongs. The claude and codex branches compare
+            # against that number, so the reuse crashed them on a string compare.
+            bg_model = bg if "/" in bg else f"lunaroute/{bg}"
             cur = _declared(pi_cfg.get("subagents.defaultModel"))
-            if cur != target:
+            if cur != bg_model:
                 changes.append({
                     "key": "subagents.defaultModel",
                     "file": PI_SETTINGS,
                     "from": cur,
-                    "to": target,
+                    "to": bg_model,
                     "why": _why(evidence,
                                 f"Children currently inherit the interactive model. `{bg}` is the tier with"
                                 f" the larger concurrency allowance; the trade is a much slower SLA.",
                                 bg_note),
-                    "instruction": (f"Ask your agent: in {PI_SETTINGS} set your default background model to {target} "
+                    "instruction": (f"Ask your agent: in {PI_SETTINGS} set your default background model to {bg_model} "
                                     f"so child agents ride the background tier by default (was {cur!r}). Ask it to verify the model "
                                     f"exists via: lunaroute models --json   (or: npx @lunaroute/cli models --json)."),
-                    "impact": _impact(peak),
+                    "impact": _impact(peak, target),
                 })
         if changes:
             out.append({"agent": "pi", "changes": changes})
@@ -624,8 +638,8 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                             f"The default is 20 concurrent subagents, well past the interactive "
                             f"admission width - {CAP_COPY}."),
                 "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {target}. "
-                                f"The default 20 keeps overflowing interactive headroom."),
-                "impact": _impact(peak),
+                                f"The default 20 keeps overflowing interactive headroom." + start_note),
+                "impact": _impact(peak, target),
             })
 
         idle_env = _declared(cc_cfg.get("env.CLAUDE_STREAM_IDLE_TIMEOUT_MS"))
@@ -660,7 +674,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                     "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_SUBAGENT_MODEL to {bg} "
                                     f"so spawned subagents use the background model. Verify with: lunaroute models --json | grep {bg} "
                                     f"(or npx @lunaroute/cli models --json)."),
-                    "impact": _impact(peak),
+                    "impact": _impact(peak, target),
                 })
         if changes:
             out.append({"agent": "claude-code", "changes": changes, "note": note})
@@ -698,7 +712,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                                     f"Existing keys in that file must be preserved. No shell is needed — let the agent edit the TOML directly. "
                                     f"Remember codex reads [agents] from config.toml, but a LunaRoute profile in "
                                     f"~/.codex/lunaroute.config.toml can override tier — keep tier there, limits here."),
-                    "impact": _impact(peak),
+                    "impact": _impact(peak, target),
                 }],
                 "note": ("Codex reads `[agents]` from config.toml, but a LunaRoute profile lives in"
                          " ~/.codex/lunaroute.config.toml and wins for the keys it sets. Keep tier changes"

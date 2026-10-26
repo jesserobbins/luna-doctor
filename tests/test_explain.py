@@ -97,7 +97,7 @@ class Why(unittest.TestCase):
         doc = explain.explain(refused, wide_burst() + [refused], None, (6, "plan apex"))
         self.assertIn("CONCURRENT_REQUEST_LIMIT_EXCEEDED", doc["headline"])
         self.assertIn("11 concurrent requests", doc["headline"])
-        self.assertIn("was not free on this machine", doc["headline"])
+        self.assertIn("not free in the pool of the account", doc["headline"])
 
     def test_a_served_request_beside_a_wide_burst_is_explained_as_queueing(self):
         slow = req(start=T0, end=T0 + 145)

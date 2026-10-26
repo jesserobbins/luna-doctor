@@ -1879,6 +1879,8 @@ def _priority_phrase(value, source: str) -> str:
         return "your priority concurrency allowance"
     if source == "account":
         return f"the account's priority concurrency ({value}, account)"
+    if source == "declared":
+        return f"your declared plan's priority concurrency ({value}, declared by --plan)"
     name = source[len("plan "):] if source.startswith("plan ") else source
     return f"your declared plan's priority concurrency ({value}, declared plan {name})"
 
@@ -1942,17 +1944,26 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
             f"demoted to the background tier, which streams only SSE keep-alives for minutes."
         )
     if m["pressure_windows"]:
-        pressure = True
+        # Wide windows alone flip the verdict only when the width behind them is
+        # a real one. The count is produced against the tool's fallback constant
+        # when no account value and no declaration is available, and an exit code
+        # that rests on a number the report says it never uses is a lie about
+        # which wall the reader hit.
         w = m["longest_pressure_window"] or {}
         pv, _psrc = _priority_for_advice(m)
+        pressure = isinstance(pv, int) and not isinstance(pv, bool)
         width = (f"more than {pv} concurrent requests" if isinstance(pv, int) and not isinstance(pv, bool)
                  else "more concurrent requests than the account's priority concurrency admits")
+        note = ("" if pressure else
+                " That count uses this tool's fallback threshold, not the width of your "
+                "account, so it does not change the exit code. Run `luna-doctor capacity "
+                "--online` or declare `--plan` to judge against the real number.")
         adj.append(
             f"{m['pressure_windows']} window(s) held {width} at once. The longest lasted "
             f"{fmt(w.get('seconds'), 's')} and peaked at "
             f"{fmt(w.get('max_concurrent'))} concurrent. {CAP_COPY[0].upper()}{CAP_COPY[1:]}; "
             f"past that width, requests park or overflow into background scheduling "
-            f"rather than fail."
+            f"rather than fail.{note}"
         )
     if bg:
         adj.append(
@@ -3630,6 +3641,20 @@ def _capacity_metrics(since: float, until: float, m: dict) -> dict:
         "background_lanes": cfg("background_lanes"),
         "overflow_routing": cfg("overflow_routing"),
     }
+    # The live occupancy block, kept with its nulls and its sample time. Without
+    # it the attribution, `explain` and `watch` can name the account's width but
+    # never its current occupancy, and every consumer prints "in use unknown"
+    # even when the cache holds a fresh sample. A null stays null: the API's own
+    # story, never zero.
+    if cap.now is not None:
+        block["now"] = {
+            "in_use": getattr(cap.now, "in_use", None),
+            "limit": getattr(cap.now, "limit", None),
+            "available": getattr(cap.now, "available", None),
+            "saturated": getattr(cap.now, "saturated", None),
+            "ledger": getattr(cap.now, "ledger", None),
+            "sampled_at": getattr(cap.now, "sampled_at", None),
+        }
     if cap.admission is not None:
         block["admission_as_of"] = getattr(cap.admission, "as_of", None)
     by_day = dict(sources.capacity_admission_days(cap))
@@ -3661,6 +3686,18 @@ def _watch_sample(args, now_ts=None):
         m["capacity"] = {"provenance": sources.PROV_UNKNOWN}
     capm = m.get("capacity") or {}
     served = capm if capm.get("provenance") == sources.PROV_ACCOUNT else None
+    # `analyse()` counts wide windows against the fallback constant before the
+    # account is known. Re-count against the resolved width, so `watch` and
+    # `analyze` cannot disagree about the same logs.
+    pv, _src = _priority_for_advice(m)
+    if isinstance(pv, int) and not isinstance(pv, bool) and pv > 0 and m.get("requests"):
+        try:
+            wide = pressure_windows(timed(reqs), pv)
+            m["pressure_windows"] = len(wide)
+            m["longest_pressure_window"] = (max(wide, key=lambda w: w["seconds"])
+                                            if wide else None)
+        except Exception:
+            pass
     return m, served
 
 
@@ -3672,6 +3709,13 @@ def cmd_watch(args) -> int:
     sequences. Ctrl-C prints the session summary and exits with the verdict of
     the last sample, so `watch` is usable as a slow poll from a script.
     """
+    try:
+        window_hours(args.since, args.now)
+    except ValueError as e:
+        # Parsed once, before the banner prints: a bad --since is a usage error
+        # (exit 2) and never a traceback in the middle of a live view.
+        print(f"luna-doctor: {e}", file=sys.stderr)
+        return 2
     interval = max(1, int(getattr(args, "interval", 10) or 10))
     count = max(0, int(getattr(args, "count", 0) or 0))
     if getattr(args, "once", False):
@@ -3718,11 +3762,16 @@ def cmd_watch(args) -> int:
         head, adj, code = verdict(m)
         return line
 
+    # --json promises one JSON object per line on stdout, so the banner and the
+    # summary go to stderr in that mode. Anything else and a consumer that pipes
+    # the stream into a parser reads prose on the first and last lines.
+    as_json = bool(getattr(args, "json", False))
+    banner_out = sys.stderr if (tty or as_json) else sys.stdout
     print("luna-doctor watch: one line per state change. Press Ctrl-C to stop and to print a "
-          "summary.", file=sys.stderr if tty else sys.stdout, flush=True)
+          "summary.", file=banner_out, flush=True)
     print("Each sample reads the last %s of local logs. This command sends nothing anywhere."
           % human_window(window_hours(args.since, args.now)),
-          file=sys.stderr if tty else sys.stdout, flush=True)
+          file=banner_out, flush=True)
     try:
         one("print")
         while True:
@@ -3734,8 +3783,12 @@ def cmd_watch(args) -> int:
         pass
     ended = datetime.now(timezone.utc).isoformat()
     if m is not None:
-        for row in watch_mod.summary(m, served, samples, started, ended):
-            print(row, flush=True)
+        rows = watch_mod.summary(m, served, samples, started, ended)
+        if as_json:
+            print(json.dumps({"summary": rows}), file=sys.stderr, flush=True)
+        else:
+            for row in rows:
+                print(row, flush=True)
     return code
 
 
@@ -3773,7 +3826,12 @@ def cmd_explain(args) -> int:
         return 2
     limit = max(1, int(getattr(args, "last", 1) or 1))
     if getattr(args, "id", None):
-        picked = explain.by_id(reqs, args.id)
+        matches = explain.by_id(reqs, args.id)
+        # A session or run id names many requests. Showing every one of them
+        # contradicts the promise of "one request" and makes the exit code an
+        # aggregate, so the id path takes the newest `--last` matches.
+        matches.sort(key=lambda r: (r.end or r.start or 0.0), reverse=True)
+        picked = matches[:limit]
         if not picked:
             print(f"luna-doctor: no request in the last {human_window(hours)} matches "
                   f"{args.id!r}. An id is a response id, a session id, or a run id.",
@@ -3972,6 +4030,24 @@ def cmd_analyze(args) -> int:
                 rows.append((row.label, row.value))
         for line in rep.adjustments[:3]:
             rows.append(("next", line))
+        # Redaction is the promise of this surface, so it runs over everything
+        # that reaches it: the rows, the headline, the verdict sentence, and the
+        # store identity - which carries real paths whenever --pi-root or
+        # --claude-root names one. bundle.issue_block only strips ANSI, backtick
+        # fences and non-ASCII. It does not redact.
+        # Two spellings of the same home: os.path.expanduser keeps $HOME as given,
+        # and _source_id runs os.path.realpath, which turns /tmp/x into
+        # /private/tmp/x on macOS. Redacting only one spelling leaks the other.
+        home = os.path.expanduser("~")
+        homes = [home, os.path.realpath(home)]
+
+        def _redact(text):
+            out = text
+            for prefix in homes:
+                out = bundle_mod.redact(out, home=prefix)
+            return out
+
+        rows = [(_redact(label), _redact(value)) for label, value in rows]
         provenance = {
             "version": VERSION,
             "schema": SCHEMA_VERSION,
@@ -3979,10 +4055,11 @@ def cmd_analyze(args) -> int:
                                     .strftime("%Y-%m-%dT%H:%M:%SZ"),
             "window_end": datetime.fromtimestamp(now, timezone.utc)
                                   .strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "stores": [_source_id(harnesses, pi_roots, claude_roots)],
+            "stores": [_redact(_source_id(harnesses, pi_roots, claude_roots))],
         }
-        verdict_pair = (att.verdict, att.headline) if att is not None else None
-        print(bundle_mod.issue_block(head, rows, provenance, verdict_pair), end="")
+        verdict_pair = ((att.verdict, _redact(att.headline))
+                        if att is not None else None)
+        print(bundle_mod.issue_block(_redact(head), rows, provenance, verdict_pair), end="")
         return code
 
     stored = None
