@@ -1,42 +1,45 @@
 #!/usr/bin/env python3
 """Watch: the live view of one machine's concurrency pressure.
 
-`analyze --now` reads like a live view and is not one: it is a one-shot
-fifteen-minute lookback, so a user in an incident re-runs it by hand and
-diffs the screens in their head. This module is the live view. It renders
-three surfaces from the same two halves `attribution` places side by side:
+`analyze --now` reads like a live view. It is not one. It is a one-shot look
+back over fifteen minutes. A user in an incident runs it again by hand and
+compares the screens from memory. This module is the live view. It renders
+three surfaces from the same two halves that `attribution` places side by
+side:
 
-  sample_line  one line per state change: what was refused, what peak this
-               machine held, and what the account says is in use. Append-only
-               when piped, so a watch is also a log.
-  frame        the terminal view: a header of the current numbers, then the
-               tail of the samples. Fixed height, one line per sample.
-  summary      the three lines printed when the watch ends.
+  sample_line  one line per state change. It states what was refused, the
+               peak that this machine held, and what the account reports in
+               use. The line is append-only when a pipe receives it, so a
+               watch is also a log.
+  frame        the terminal view. A header carries the current numbers. The
+               tail of the samples follows. The height is fixed and each
+               sample takes one line.
+  summary      the three lines that print when the watch ends.
 
-Nothing here loops, reads a clock, opens a file or prints: the parent
-command owns the loop, the signals and the cursor, and passes every
-timestamp in. These are pure functions over the dicts `cli.analyse()` and
-the capacity payload already produce, so a frame is deterministic for the
-same inputs.
+Nothing here loops, reads a clock, opens a file or prints. The parent
+command owns the loop, the signals and the cursor. The parent passes each
+timestamp in. These are pure functions over the dicts that `cli.analyse()`
+and the capacity payload produce. One input gives one frame.
 
-The rules, the same ones `attribution` keeps:
+The rules are the same ones that `attribution` keeps:
 
-- LunaRoute bills *concurrent sessions*. A watch line counts requests that
-  contended and requests that were refused; it never mentions tokens,
-  credits or spend.
-- Every number names its owner. `(this machine)` is what this machine's log
-  store was measured to hold - a lower bound, since a request nobody logged
-  is invisible here. `(account)` is what GET /v1/capacity reports for the
-  pool every machine on the account draws on. The two halves are never
-  added, and neither is ever presented as the other.
-- A number the tool does not have renders as unknown, never as 0 and never
-  as a nan.
+- LunaRoute bills *concurrent sessions*. A watch line counts the requests
+  that contended and the requests that were refused. It never mentions
+  tokens, credits or spend.
+- Every number names its owner. `(this machine)` is what the log store of
+  this machine was measured to hold. That number is a lower bound, because a
+  request that nobody logged is invisible here. `(account)` is what
+  GET /v1/capacity reports for the pool that every machine on the account
+  draws on. The tool never adds the two halves. It never presents one as the
+  other.
+- A number that the tool does not have renders as unknown. It never renders
+  as 0 and never as a nan.
 
-`sample_line` and `summary` are ASCII only: both cross a pipe, and a pipe
+`sample_line` and `summary` are ASCII only. Both cross a pipe, and a pipe
 that is not UTF-8 turns a middle dot into a UnicodeEncodeError mid-incident.
-`frame` is written for a terminal the parent is driving, so it separates
+`frame` is written for a terminal that the parent drives, so it separates
 with "·" and with nothing else outside ASCII. No function here emits an ANSI
-escape - the parent owns cursor control - and no call to a dict is made
+escape, because the parent owns cursor control. No call to a dict is made
 without a fixed order, so two runs of one input render one output.
 """
 
@@ -78,8 +81,8 @@ def _int(value) -> Optional[int]:
 
 
 def _count(by_outcome, name: str) -> int:
-    """One outcome's count. A missing outcome is zero requests, not unknown:
-    the store was read and carried none of them."""
+    """One outcome's count. A missing outcome is zero requests. It is not
+    unknown, because the store was read and carried none of them."""
     if not isinstance(by_outcome, dict):
         return 0
     return _int(by_outcome.get(name)) or 0
@@ -88,8 +91,8 @@ def _count(by_outcome, name: str) -> int:
 class _Local(NamedTuple):
     """This machine's half of one sample, reduced to what a watch line says.
 
-    `peak` and `windows` are None when the dict does not carry them, and are
-    rendered unknown - a peak nobody measured is not a peak of 0.
+    `peak` and `windows` are None when the dict does not carry them. A missing
+    value renders as unknown. A peak that nobody measured is not a peak of 0.
     """
 
     blocked: int
@@ -112,10 +115,11 @@ def _local_facts(local) -> _Local:
 class _Account(NamedTuple):
     """The capacity payload's occupancy, reduced to what a watch line says.
 
-    `saturated` is the API's own word for a full priority pool, believed only
-    as a boolean; `in_use >= limit` counts as saturated too, because two
-    fields of the account's own payload agreeing is still the account's
-    report. A null `now` block leaves every field None: unknown, not zero.
+    `saturated` is the word of the API for a full priority pool. The tool
+    reads it only as a boolean. `in_use >= limit` also counts as saturated,
+    because two fields of the payload agree and the report is still the
+    account's. A null `now` block leaves each field None. That value is
+    unknown, not zero.
     """
 
     in_use: Optional[int]
@@ -138,21 +142,23 @@ def _account_facts(capacity) -> _Account:
 
 # ---- timestamps -------------------------------------------------------------
 def _ascii(text) -> str:
-    """`text` with everything outside ASCII replaced, so a pipe cannot choke.
+    """`text` with each character outside ASCII replaced by "?", so a pipe
+    cannot choke.
 
-    Nothing this module builds contains a non-ASCII character, and the one
-    foreign input is the caller's timestamp: this is the belt to that
-    suspender, not a license to emit one.
+    Nothing that this module builds contains a non-ASCII character. The only
+    foreign input is the timestamp of the caller. This function is a guard on
+    that input. It is not a license to emit a non-ASCII character.
     """
     return "".join(ch if ord(ch) < 128 else "?" for ch in str(text))
 
 
 def _clock(ts_iso) -> str:
-    """The HH:MM:SSZ a line starts with, "" when the timestamp is unreadable.
+    """The HH:MM:SSZ that starts a line, or "" when the timestamp is unreadable.
 
-    Tolerant of the shapes an ISO timestamp arrives in: a trailing Z, a
-    numeric offset, fractional seconds, or a bare HH:MM. An unreadable one
-    drops the prefix rather than printing a made-up time.
+    An ISO timestamp arrives in several shapes. This function accepts a
+    trailing Z, a numeric offset, fractional seconds and a bare HH:MM. When a
+    timestamp is unreadable, the line drops the prefix. It does not print a
+    made-up time.
     """
     text = str(ts_iso if ts_iso is not None else "").strip()
     if "T" in text:
@@ -171,7 +177,7 @@ def _clock(ts_iso) -> str:
 
 
 def _hour_minute(ts_iso) -> str:
-    """HH:MMZ, for naming when the account sampled its own numbers."""
+    """HH:MMZ, for naming the time that the account sampled its numbers."""
     clock = _clock(ts_iso)
     return clock[:5] + "Z" if clock else ""
 
@@ -179,9 +185,9 @@ def _hour_minute(ts_iso) -> str:
 def _iso_seconds(ts_iso) -> Optional[int]:
     """A timestamp as seconds on a fixed ordinal scale, or None.
 
-    Written out because `datetime.fromisoformat` cannot read the "Z" the
-    gateway sends on Python 3.9, and a watch duration must not need a newer
-    interpreter than the package claims.
+    This function is written out because `datetime.fromisoformat` cannot read
+    the "Z" that the gateway sends on Python 3.9. A watch duration must not
+    need an interpreter newer than the package claims.
     """
     text = str(ts_iso if ts_iso is not None else "").strip()
     if "T" not in text:
@@ -217,8 +223,8 @@ def _iso_seconds(ts_iso) -> Optional[int]:
 
 
 def _duration(started_iso, ended_iso) -> str:
-    """How long the watch ran, or "unknown" when an end cannot be read or the
-    clock went backwards."""
+    """How long the watch ran. The result is "unknown" when the code cannot
+    read an end or when the clock went backwards."""
     first, last = _iso_seconds(started_iso), _iso_seconds(ended_iso)
     if first is None or last is None or last < first:
         return "unknown"
@@ -234,12 +240,13 @@ def _duration(started_iso, ended_iso) -> str:
 # ---- clauses ----------------------------------------------------------------
 def _refusal_clause(facts: _Local, previous: Optional[_Local], notes: bool,
                     limit: Optional[int] = None) -> str:
-    """The refusal classes this sample carries, each named and in a fixed order.
+    """The refusal classes of this sample, each named and in a fixed order.
 
-    `notes` adds "(was N)" to a class that moved since `previous`, and only
-    to a class that moved: a line printed because the account's occupancy
-    changed does not need "(was 11)" beside a count that did not. `limit`
-    stops after that many classes, for a line that has to stay short.
+    `notes` adds "(was N)" to a class that moved since `previous`. It adds the
+    note only to a class that moved. A line that prints because the account's
+    occupancy changed does not need "(was 11)" beside a count that did not
+    move. `limit` stops after that many classes, for a line that must stay
+    short.
     """
     bits = []
     for field, label in _REFUSALS:
@@ -257,7 +264,11 @@ def _refusal_clause(facts: _Local, previous: Optional[_Local], notes: bool,
 
 def _pressure(facts: _Local, previous: Optional[_Local], notes: bool,
               limit: Optional[int] = None) -> str:
-    """The pressure clause: what was refused, and what it was in the last one."""
+    """The pressure clause, which holds the refusal classes of one sample.
+
+    When this sample refused nothing, the clause states what the previous
+    sample refused.
+    """
     refusals = _refusal_clause(facts, previous, notes, limit)
     if refusals:
         return refusals
@@ -276,12 +287,12 @@ def _peak_clause(facts: _Local) -> str:
 
 
 def _account_clause(acct: _Account, compact: bool = False) -> str:
-    """The account's occupancy, labelled (account), or unknown and why.
+    """The account's occupancy with the (account) label, or unknown and why.
 
-    `compact` is the one-line form: it shares a 100-character budget with two
-    other clauses, so it drops "of" and the command. The frame and the
-    summary have room for the long form, which names the command that
-    fetches the missing half.
+    `compact` selects the one-line form. That form shares a 100-character
+    budget with two other clauses, so it drops "of" and the command. The frame
+    and the summary have room for the long form. The long form names the
+    command that fetches the missing half.
     """
     if acct.in_use is not None and acct.limit is not None:
         text = ("%d/%d in use" if compact else "%d of %d in use") % (
@@ -295,7 +306,7 @@ def _account_clause(acct: _Account, compact: bool = False) -> str:
         return "in use unknown, limit %d (account)" % acct.limit
     if compact:
         return "in use unknown (account)"
-    return "in use unknown (account); run %s" % CAPACITY_COMMAND
+    return "in use unknown (account). Run %s" % CAPACITY_COMMAND
 
 
 def _account_at(acct: _Account) -> str:
@@ -310,10 +321,11 @@ def _account_at(acct: _Account) -> str:
 
 
 def _clip(text: str, limit: int) -> str:
-    """`text` cut to `limit`, ending in "..." when anything was cut.
+    """`text` cut to `limit`, with "..." at the end when the text does not fit.
 
-    A watch never wraps: one sample is one line, so a count of lines is a
-    count of samples and the parent can move the cursor by counting them.
+    A watch never wraps, because one sample is one line. A count of lines is
+    then a count of samples, and the parent can move the cursor by counting
+    them.
     """
     if len(text) <= limit:
         return text
@@ -323,11 +335,11 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _pressure_segment(facts: _Local, width: int) -> str:
-    """The header's pressure clause, shortened until it fits a `width` frame.
+    """The pressure clause of the header, shortened until it fits a `width` frame.
 
-    A header row carries no owner label of its own, so a clause cut mid-list
-    would leave counts with nothing saying whose they are. Whole refusal
-    classes are dropped instead, from the last one backward, and the classes
+    A header row carries no owner label. A clause that is cut mid-list leaves
+    counts with nothing that says whose counts they are. This function drops
+    whole refusal classes instead, from the last one backward. The classes
     that survive keep their names.
     """
     segment = "pressure: %s" % _pressure(facts, None, False, 1)
@@ -340,14 +352,14 @@ def _pressure_segment(facts: _Local, width: int) -> str:
 
 
 def _history_line(line, width: int) -> str:
-    """One sample line fitted to the frame's width.
+    """One sample line fitted to the width of the frame.
 
-    A sample line is allowed 100 characters and a frame may be narrower, so a
-    history line has to give something up. It gives up whole clauses, the
-    middle one first: the pressure number and the account's occupancy are
-    what a watcher is looking at, and a line clipped to its first clause
-    alone would leave every row of the frame looking the same. Only when the
-    outer two clauses still do not fit is the text cut.
+    A sample line is allowed 100 characters. A frame can be narrower, so a
+    history line gives up whole clauses. The middle clause goes first,
+    because the pressure number and the account's occupancy are what a
+    watcher reads. A line that is clipped to its first clause alone leaves
+    every row of the frame looking the same. The text is cut only when the
+    two outer clauses still do not fit.
     """
     text = _ascii(line).strip()
     if len(text) <= width:
@@ -359,10 +371,11 @@ def _history_line(line, width: int) -> str:
 
 
 def _wrap(segments: list, width: int) -> list:
-    """The segments as as few "·"-joined lines as fit `width`.
+    """The segments as a few "·"-joined lines, each inside `width`.
 
-    Whole segments move to the next line before one is broken, so a wrapped
-    header never splits "(this machine)" from the number it labels.
+    Whole segments move to the next line before one is broken. A wrapped
+    header therefore keeps "(this machine)" on the line with the number that
+    it labels.
     """
     lines, current = [], ""
     for segment in segments:
@@ -379,22 +392,23 @@ def _wrap(segments: list, width: int) -> list:
 
 # ---- the surfaces -----------------------------------------------------------
 def sample_line(local, capacity, ts_iso, previous=None) -> str:
-    """One plain line for one sample. No newline, no ANSI, ASCII, <= 100 chars.
+    """One plain line for one sample. No newline, no ANSI, ASCII, 100
+    characters at most.
 
-    `local` is the dict `cli.analyse()` returns, `capacity` the capacity
-    payload (its "now" block carries the account's occupancy), and `previous`
-    the `local` of the sample before, when there is one: it is what makes a
-    count legible as a change - "(was 0)" says a refusal just started. A
-    class that did not move carries no "(was ...)", so a line printed for
-    the account's sake is not decorated with an unchanged refusal count.
+    `local` is the dict that `cli.analyse()` returns. `capacity` is the
+    capacity payload, and its "now" block carries the account's occupancy.
+    `previous` is the `local` dict of the sample before, when there is one.
+    That dict makes a count legible as a change: "(was 0)" says that a refusal
+    just started. A class that did not move carries no "(was ...)" note. A
+    line that prints for the account therefore does not carry an unchanged
+    refusal count.
 
-    The line is composed from four clauses - the pressure, the peak, the
-    account's occupancy - and when they do not fit, the "(was ...)" notes go
-    first, then the trailing refusal classes. The peak and the account clause
-    are the last things dropped: a pressure number with no peak beside it
-    cannot say whose pool was full. If even that does not fit, the line is
-    clipped with "...", because the cap is a promise and every other clause
-    is a detail.
+    The line is composed from the pressure clause, the peak clause and the
+    account clause. When they do not fit, the "(was ...)" notes go first. The
+    trailing refusal classes go next. The function drops the peak and the
+    account clause last. A pressure number with no peak beside it cannot say
+    whose pool was full. If even that does not fit, the line is clipped with
+    "...", because the cap is a promise and every other clause is a detail.
     """
     facts = _local_facts(local)
     last = None if previous is None else _local_facts(previous)
@@ -416,14 +430,14 @@ def sample_line(local, capacity, ts_iso, previous=None) -> str:
 
 def state_changed(previous, current, capacity_previous=None,
                   capacity_current=None) -> bool:
-    """Whether anything `sample_line` reports moved between two samples.
+    """Whether anything that `sample_line` reports moved between two samples.
 
-    A watch prints on change, so this is the loop's only gate. It compares
-    exactly what the line shows: the three refusal counts, the peak, and the
-    account's in_use, limit and saturated flag. The first sample always
-    changed - there is nothing to compare it to - and so does a sample whose
-    account half appeared or disappeared, because "the payload is gone" is
-    news about the pool.
+    A watch prints on change, so this function is the only gate in the loop.
+    It compares exactly what the line shows: the three refusal counts, the
+    peak, and the in_use, limit and saturated fields of the account. The first
+    sample always changed, because there is nothing to compare it to. A sample
+    also changed when the account half appeared or disappeared, because a
+    missing payload is news about the pool.
     """
     if previous is None:
         return True
@@ -444,16 +458,16 @@ def _account_state(capacity) -> tuple:
 
 
 def frame(local, capacity, ts_iso, history, width: int = FRAME_WIDTH) -> list:
-    """The terminal view: a header of current numbers, then the history tail.
+    """The terminal view: a header of the current numbers, then the history tail.
 
     `history` is the last `sample_line()` strings, oldest first. The caller
-    keeps that buffer - this function holds no state between calls - and a
-    caller that keeps N lines gets a frame whose height does not move, which
-    is the whole point of drawing one instead of printing each line.
+    keeps that buffer, and this function holds no state between calls. A
+    caller that keeps N lines gets a frame of fixed height. That fixed height
+    is the reason to draw a frame instead of printing each line.
 
-    Every line fits `width`, none is empty, and no line carries an ANSI
-    escape: the parent moves the cursor, this returns what to put there. "·"
-    separates clauses here and on no other surface.
+    Each line fits `width`, no line is empty, and no line carries an ANSI
+    escape. The parent moves the cursor, and this function returns the text to
+    put there. "·" separates clauses here and on no other surface.
     """
     facts = _local_facts(local)
     acct = _account_facts(capacity)
@@ -469,15 +483,16 @@ def frame(local, capacity, ts_iso, history, width: int = FRAME_WIDTH) -> list:
 
 
 def summary(local, capacity, samples, started_iso, ended_iso) -> list:
-    """The three lines printed when the watch ends: how long, how much, how wide.
+    """The three lines that print when the watch ends: how long, how much, how wide.
 
-    `samples` is how many samples were taken - either the count or the list
-    of `sample_line()` strings whose length is that count, so the caller can
-    hand over its buffer without measuring it first. The duration comes from
-    the two timestamps the caller recorded, never from a clock read here.
+    `samples` is the number of samples taken. It is either the count or the
+    list of `sample_line()` strings whose length is that count. The caller can
+    then hand over its buffer without measuring it first. The duration comes
+    from the two timestamps that the caller recorded. No clock is read here.
 
-    ASCII only, like `sample_line`: this block is pasted into a bug report,
-    and a report that renders as mojibake is a report nobody can read.
+    The block is ASCII only, like `sample_line`, because a user pastes it into
+    a bug report. A report that renders as mojibake is a report that nobody
+    can read.
     """
     facts = _local_facts(local)
     acct = _account_facts(capacity)
