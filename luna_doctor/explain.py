@@ -1,55 +1,56 @@
-"""One request, explained - the 'why was *that* one slow' view.
+"""One request, explained: the answer to "why was that one slow".
 
-The aggregate report answers "what has this machine been doing". This module
-answers the question a user actually asks in the middle of it, holding one bad
-request in their hand: what happened to *this* one, at *this* moment, and whose
-fault was the wait.
+The window report answers "what has this machine been doing". A user with one
+bad request needs a different answer. This module explains that request: what
+it was, how long it waited, what it got, and whose room it was waiting for.
 
-Everything here is a pure function of (the request, the other requests in the
-window, the account's capacity block). No I/O, no clock, no network: the caller
-collects, and the caller renders through the same Report model every other
-command uses, so `--style plain`, `--json` and `--copy` keep working for free.
+Every function here is pure. Input is the request, the other requests in the
+window, and the account capacity block. There is no file access, no clock, and
+no network. The caller collects the requests and renders the result through the
+same Report model that every command uses. So `--style plain`, `--json`, and
+`--copy` work without extra code.
 
-The discipline is the same one the rest of the tool holds itself to:
+Three rules hold throughout.
 
-* Every number carries its owner - `(this machine)` for something measured in
-  these logs, `(account)` for something the capacity API reported, `(declared
-  plan <name>)` for something the user asserted. Nothing is summed across
-  owners, and an unmeasured value renders as `unknown`, never as 0.
-* A cause is only named when the logs support it. The requests in this window
-  are evidence; the gateway's state at the time is not, unless the capacity
-  payload happens to cover that minute.
-* Nothing here implies causation about *why the user changed something*; it
-  describes one request's own timeline.
+Every number carries its owner. `(this machine)` marks a value measured in the
+logs. `(account)` marks a value the capacity API reported. `(declared plan
+<name>)` marks a value the user asserted. This module never adds values from
+two owners. A value that was not measured renders as `unknown`, never as 0.
+
+This module names a cause only when the logs support it. The requests in the
+window are evidence. The state of the gateway at that moment is not evidence,
+unless the capacity payload covers that moment.
+
+This module never claims that a change caused a result. It describes the
+timeline of one request.
 """
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Optional
 
-# What an outcome means, in the words a reader needs. Never "died", never
-# "killed by the gateway" - the gateway blocks at admission, the harness kills
-# idle streams, and the copy has to keep those apart.
+# What an outcome means, in the words a reader needs. This copy never says
+# "died" and never says "killed by the gateway". The gateway blocks a request at
+# admission. The harness stops an idle stream. The two failures stay apart.
 OUTCOME_COPY = {
     "completed": "served",
-    "admission_timeout": "blocked at admission - it waited for room and the gateway refused it",
-    "client_idle_timeout": ("stalled until the harness's own idle budget killed the stream - "
-                            "the silent-overflow signature"),
-    "org_concurrency_limit": ("refused with CONCURRENT_REQUEST_LIMIT_EXCEEDED - the account's "
-                             "whole concurrent-request pool was in use"),
-    "rate_limited": "refused with a 429 - the account's concurrent-request capacity was full",
-    "upstream_unavailable": "the upstream behind the gateway was unavailable",
-    "upstream_error": "the upstream returned an error",
+    "admission_timeout": "blocked at admission. It waited for room and the gateway refused it",
+    "client_idle_timeout": ("stalled until the harness idle budget stopped the stream. "
+                            "This is the silent overflow signature"),
+    "org_concurrency_limit": ("refused with CONCURRENT_REQUEST_LIMIT_EXCEEDED. The whole "
+                             "concurrent-request pool of the account was in use"),
+    "rate_limited": "refused with a 429. The account reached its concurrent-request capacity",
+    "upstream_unavailable": "the upstream service behind the gateway was unavailable",
+    "upstream_error": "the upstream service returned an error",
     "model_not_found": "the model id does not exist on this account",
-    "context_length_exceeded": "the request exceeded the model's context window",
+    "context_length_exceeded": "the request exceeded the context window of the model",
     "payload_too_large": "the request was too large (413)",
-    "message_limit": "the account's message-count limit was reached",
-    "harness_deadline": "the harness's own deadline expired",
+    "message_limit": "the account reached its message-count limit",
+    "harness_deadline": "the harness deadline expired",
     "auth_error": "authentication failed",
-    "aborted": "the caller cancelled it",
+    "aborted": "the caller cancelled the request",
     "connection_error": "the connection failed",
-    "request_timeout": "the client's request timeout expired",
+    "request_timeout": "the client request timeout expired",
 }
 
 # Outcomes where the wait was about room at the gateway, not about the work.
@@ -107,11 +108,11 @@ def _peak_during(reqs, start: float, end: float) -> int:
 
 
 def _peers_served_during(reqs, req) -> int:
-    """Requests to the same model that were *served* inside this request's own span.
+    """Count the requests to the same model that were served inside this span.
 
-    The starved-peer test, one request at a time: if the same model answered
-    somebody else while this one waited, the model was serving and this request
-    was not served. That is the difference between "the model was slow" and "we
+    This is the starved-peer test for one request. If the same model answered
+    another request while this one waited, then the model was serving. This
+    request was not served. That result separates "the model was slow" from "we
     were at our width".
     """
     if req.start is None or req.end is None:
@@ -129,6 +130,14 @@ def _peers_served_during(reqs, req) -> int:
     return n
 
 
+def _sentence(text: str) -> str:
+    """Capitalize the first letter and keep one sentence, for a clause in copy."""
+    text = text.strip()
+    if not text:
+        return text
+    return text[0].upper() + text[1:]
+
+
 def _session_label(req) -> str:
     bits = [req.harness or "unknown harness"]
     if req.session:
@@ -141,12 +150,11 @@ def _session_label(req) -> str:
 
 
 def _why(req, reqs, capacity, priority) -> tuple[str, list]:
-    """The one sentence a reader came for, plus the actions that follow from it.
+    """The one sentence the reader came for, plus the actions that follow it.
 
-    The order is the attribution order: was this machine wide, was the account
-    full, or did the request simply fail on its own terms. A refusal with no
-    local width and no account evidence is described as exactly that, rather
-    than guessed at.
+    The order is the attribution order. Was this machine wide? Was the account
+    full? Did the request fail on its own terms? If a refusal has no local width
+    and no account evidence, this function says so. It does not guess.
     """
     value, source = priority if priority else (None, "unknown")
     peak = _peak_during(reqs, req.start, req.end) if req.start and req.end else None
@@ -160,21 +168,22 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
         # something beside the width it ran at: a 145s answer on a quiet machine
         # is the model, and the same answer inside a 12-wide burst is a queue.
         if isinstance(value, int) and peak is not None and peak > value:
-            head = ("Served, but not quickly: it ran for %s while this machine held %d concurrent "
-                    "requests, past %s. The wait was queueing behind this machine's own "
-                    "concurrent requests, not the model taking that long."
+            head = ("Served, but slowly. It ran for %s while this machine held %d concurrent "
+                    "requests, above %s. The wait came from the concurrent requests on this "
+                    "machine, not from the latency of the model."
                     % (_seconds(req.duration), peak, _width_words(value, source)))
-            actions.append("Narrow this machine's concurrent requests to fit %s and this "
-                           "request's share of the queue goes away." % _width_words(value, source))
+            actions.append("Narrow the concurrent requests on this machine to fit %s. If you do, "
+                           "this request will not queue behind the others."
+                           % _width_words(value, source))
         elif peak is not None and peak > 1:
             head = ("Served in %s while up to %d concurrent requests were open from this machine. "
-                    "Duration on its own says nothing: compare it with the p50 in "
-                    "`luna-doctor analyze` before calling it slow."
+                    "A duration alone does not show a fault. Compare it with the p50 in "
+                    "`luna-doctor analyze` before you call it slow."
                     % (_seconds(req.duration), peak))
         else:
-            head = ("Served in %s on a machine that was barely busy, so the shape of this run was "
-                    "the model's own latency - compare it with the p50 in `luna-doctor analyze`."
-                    % _seconds(req.duration))
+            head = ("Served in %s on a machine with almost no other load. The duration is the "
+                    "latency of the model itself. Compare it with the p50 in "
+                    "`luna-doctor analyze`." % _seconds(req.duration))
         if peers:
             head += (" %d request(s) to %s finished inside this one's span." % (peers, req.model))
         return head, actions
@@ -189,71 +198,71 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
                      if own == "org_concurrency_limit" else "the gateway returned a 429")
             held = ("this machine held %d concurrent requests at that moment"
                     % in_flight if in_flight else
-                    "this machine's own in-flight count at that moment is unknown")
-            head = ("The account's concurrent-request pool was full at %s - %s, and %s. The room "
-                    "this request needed was not this machine's to give."
-                    % (_clock(req.start), named, held))
-            actions.append("The room was not this machine's to give: other sessions on the "
-                           "account held it. Check `luna-doctor capacity` for the account's "
-                           "occupancy, and move wide work to the -background variant.")
+                    "the number of concurrent requests on this machine at that moment is unknown")
+            head = ("The concurrent-request pool of the account was full at %s. %s. At that "
+                    "moment, %s. The room that this request needed was not free on this machine."
+                    % (_clock(req.start), _sentence(named), held))
+            actions.append("Other sessions on the account held the room. Run `luna-doctor "
+                           "capacity` to read the occupancy of the account. Send wide work to "
+                           "the -background variant.")
             if peers:
                 head += (" %d request(s) to %s were served inside this request's span, so the "
                          "model itself was answering." % (peers, req.model or "the same model"))
             return head, actions
         if isinstance(value, int) and peak is not None and peak >= value:
-            head = ("This machine was %d wide at %s against %s, so the wait was our own "
-                    "concurrency: the request was queued behind this machine's own concurrent requests."
+            head = ("This machine held %d concurrent requests at %s. The width is %s. The wait "
+                    "came from the concurrent requests on this machine, because this request "
+                    "queued behind them."
                     % (peak, _clock(req.start), _width_words(value, source)))
-            actions.append("Narrow this machine's concurrent requests to fit %s, or move the wide part "
-                           "to the -background variant of the same model."
+            actions.append("Narrow the concurrent requests on this machine to fit %s. Or send "
+                           "the wide work to the -background variant of the same model."
                            % _width_words(value, source))
         elif capacity and (capacity.get("now") or {}).get("in_use") is not None and (capacity.get("now") or {}).get("limit") is not None:
             now = capacity["now"]
-            head = ("This machine was only %s wide at %s, but the account was holding %s of %s "
-                    "concurrent requests - the pool is shared, so the wait came from outside "
-                    "this machine."
+            head = ("This machine held only %s concurrent requests at %s. The account was "
+                    "holding %s of %s. The pool is shared, so the wait came from outside this "
+                    "machine."
                     % (peak if peak is not None else "unknown", _clock(req.start),
                        now.get("in_use"), now.get("limit")))
-            actions.append("The room this request needed was held elsewhere on the account: "
-                           "check other machines and other agents, or send this work when "
-                           "`luna-doctor capacity` reports lower in_use.")
+            actions.append("Other machines or other agents held the room. Run `luna-doctor "
+                           "capacity` and send this work again when in_use is lower.")
         else:
-            head = ("No local width explains this request: this machine peaked at %s during its "
-                    "span, and the account's own occupancy was not captured for that moment. "
-                    "Run `luna-doctor capacity --online` to see the account's half."
+            head = ("No width on this machine explains this request. This machine peaked at %s "
+                    "during the span, and no capacity sample covers that moment."
                     % (peak if peak is not None else "unknown"))
-            actions.append("Fetch the account's occupancy with `luna-doctor capacity --online`; "
-                           "without it the owner of the wait cannot be named.")
+            actions.append("Run `luna-doctor capacity --online` to read the occupancy of the "
+                           "account. Without that value, this tool cannot name the owner of the "
+                           "wait.")
         if peers:
-            head += (" %d request(s) to %s were served inside this request's own span, so the "
-                     "model was answering - this request was not served."
+            head += (" %d request(s) to %s were served inside the span of this request. The "
+                     "model was answering, but this request was not served."
                      % (peers, req.model or "the same model"))
-            actions.append("Treat the model as healthy here: the same model answered somebody "
-                           "else while this one waited.")
+            actions.append("Treat the model as healthy here. It answered another request while "
+                           "this one waited.")
         return head, actions
 
     if own in ("upstream_unavailable", "upstream_error", "connection_error", "request_timeout"):
-        head = ("The gateway or the transport failed this request rather than queueing it: "
-                "%s." % OUTCOME_COPY.get(own, own))
-        actions.append("Retry once. A failure that repeats across models is worth "
-                       "`luna-doctor capacity` - its ledger row reports the account side.")
+        head = ("The gateway or the transport failed this request. It did not queue the "
+                "request. Reason: %s." % OUTCOME_COPY.get(own, own))
+        actions.append("Retry once. If the failure repeats on more than one model, run "
+                       "`luna-doctor capacity` and read its ledger row.")
         return head, actions
 
     if own in ("model_not_found", "context_length_exceeded", "payload_too_large",
                "message_limit", "auth_error", "harness_deadline", "aborted"):
         head = "%s." % OUTCOME_COPY.get(own, own).rstrip(".")
         if own == "model_not_found":
-            actions.append("Refresh the model list (`luna-doctor fix` reads the catalog) and "
-                           "correct the id in the harness config.")
+            actions.append("Refresh the model list. `luna-doctor fix` reads the catalog. Then "
+                           "correct the id in the harness configuration file.")
         elif own == "context_length_exceeded":
-            actions.append("Check maxTokens against contextWindow for this model: input and "
-                           "output share one window.")
+            actions.append("Make sure that maxTokens fits the contextWindow of this model. The "
+                           "input and the output share one window.")
         elif own == "harness_deadline":
-            actions.append("Raise the harness's own request deadline, or check the client timeout "
-                           "in front of this call.")
+            actions.append("Raise the request deadline of the harness, or make sure that the "
+                           "client timeout in front of this call is long enough.")
         return head, actions
 
-    head = "This request ended as `%s`; the logs do not carry a cause beyond that." % own
+    head = ("This request ended as `%s`. The logs carry no other cause." % own)
     return head, actions
 
 
@@ -279,13 +288,13 @@ def slowest(reqs, limit: int = 1) -> list:
 
 
 def worst(reqs, limit: int = 1) -> list:
-    """The requests that went wrong first, longest-waiting first.
+    """The requests that went wrong, longest wait first.
 
-    This is the default for `explain` with no selector: a user asking "why is my
-    agent slow" means the request that was refused or stalled, not necessarily
-    the longest one that happened to complete. When nothing was refused or
-    stalled, it falls back to the slowest requests, because then duration is the
-    only thing there is.
+    This is the default for `explain` with no selector. A user who asks "why is
+    my agent slow" means the request that was refused or that stalled. The
+    longest request that completed is not the same thing. If nothing was refused
+    or stalled, this function returns the slowest requests instead, because then
+    duration is the only evidence in the window.
     """
     hits = [r for r in reqs if r.outcome in _ROOM]
     if not hits:
@@ -334,9 +343,10 @@ def by_id(reqs, needle: str) -> list:
 def explain(req, reqs, capacity=None, priority=None) -> dict:
     """One request as rows, a reasoned sentence, and the actions it implies.
 
-    Returns {"headline", "rows", "actions", "outcome", "room": bool}. The rows
-    are `(label, value)` pairs in reading order: what ran, when, for how long,
-    what it got, and what the window looked like at that moment.
+    The return value holds a headline, rows, actions, the outcome, and a flag
+    that says whether the request was refused or stalled. The rows are
+    `(label, value)` pairs in reading order. They give what ran, when it ran,
+    how long it took, what it got, and the state of the window at that moment.
     """
     reqs = list(reqs or [])
     duration = req.duration

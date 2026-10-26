@@ -1895,10 +1895,10 @@ def _advice_line(m: dict) -> str:
     if isinstance(value, int) and not isinstance(value, bool):
         return (f"Adjust: keep concurrent requests within {_priority_phrase(value, source)}, "
                 f"and move anything wider to the -background variant of the same model.")
-    return ("Adjust: keep concurrent requests within your priority concurrency allowance - these "
-            "logs cannot tell you what it is. Read it from the account with "
-            "`luna-doctor capacity --online`, or declare it with `--plan <name or number>` - and "
-            "move anything wider to the -background variant of the same model.")
+    return ("Adjust: keep concurrent requests within your priority concurrency allowance. These "
+            "logs cannot give that number. Read it from the account with `luna-doctor capacity "
+            "--online`. If the account cannot be reached, declare it with `--plan <name or "
+            "number>`. Send anything wider to the -background variant of the same model.")
 
 
 def verdict(m: dict) -> tuple[str, list[str], int]:
@@ -1948,7 +1948,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         width = (f"more than {pv} concurrent requests" if isinstance(pv, int) and not isinstance(pv, bool)
                  else "more concurrent requests than the account's priority concurrency admits")
         adj.append(
-            f"{m['pressure_windows']} window(s) held {width} at once; the longest lasted "
+            f"{m['pressure_windows']} window(s) held {width} at once. The longest lasted "
             f"{fmt(w.get('seconds'), 's')} and peaked at "
             f"{fmt(w.get('max_concurrent'))} concurrent. {CAP_COPY[0].upper()}{CAP_COPY[1:]}; "
             f"past that width, requests park or overflow into background scheduling "
@@ -3141,8 +3141,8 @@ def cmd_capacity(args) -> int:
     elif cap is None:
         # A cold cache is not a failure and must not be silent: exit 2 says
         # "no data", so the way to get data has to be on screen.
-        print(f"luna-doctor: no capacity on disk yet ({note}); reported unknown. "
-              f"Fetch it with: luna-doctor capacity --online", file=sys.stderr)
+        print(f"luna-doctor: no capacity on disk yet ({note}), so the report shows unknown. "
+              f"To fetch it, run: luna-doctor capacity --online", file=sys.stderr)
     if args.json:
         payload = ({"capacity": cap.to_dict()} if cap is not None
                    else {"capacity": {"provenance": sources.PROV_UNKNOWN,
@@ -3304,9 +3304,9 @@ def _default_run(ap) -> int:
         # "this run read the last hour of your logs" claim on a machine with
         # no logs is a lie with a timestamp on it.
         print()
-        print("No agent log held a request in the last hour, so no chart was drawn. "
-              "Run `luna-doctor discover` to see which stores exist on this machine, "
-              "or `luna-doctor analyze --since 7d` for a wider window.")
+        print("No agent log held a request in the last hour, so this run drew no chart. "
+              "Run `luna-doctor discover` to list the stores on this machine. For a wider "
+              "window, run `luna-doctor analyze --since 7d`.")
         return code
     chart_args = ap.parse_args(["chart", "--since", "1h"])
     try:
@@ -3340,8 +3340,8 @@ def main(argv: list[str] | None = None) -> int:
     d.set_defaults(func=cmd_discover)
 
     ex = sub.add_parser("explain",
-                        help="explain one request: what it was, how long it waited, whose room "
-                             "it was waiting for")
+                        help="explain one request: what it was, how long it waited, and whose "
+                             "room it waited for")
     ex.add_argument("--since", default=None,
                     help="window, e.g. 24h, 90m, 7d (default 24h)")
     ex.add_argument("--now", action="store_true", help="last 15 minutes")
@@ -3367,7 +3367,7 @@ def main(argv: list[str] | None = None) -> int:
     ex.set_defaults(func=cmd_explain)
 
     w = sub.add_parser("watch",
-                       help="watch the last few minutes live: one line per state change, and a "
+                       help="watch the last few minutes live: one line per state change, plus a "
                             "summary when you stop it")
     w.add_argument("--since", default="15m", help="lookback window per sample (default 15m)")
     w.add_argument("--now", action="store_true", help="last 15 minutes (the default)")
@@ -3718,9 +3718,9 @@ def cmd_watch(args) -> int:
         head, adj, code = verdict(m)
         return line
 
-    print("luna-doctor watch - one line per state change. Ctrl-C stops and prints a summary.",
-          file=sys.stderr if tty else sys.stdout, flush=True)
-    print("(each sample reads the last %s of local logs; nothing is sent anywhere)"
+    print("luna-doctor watch: one line per state change. Press Ctrl-C to stop and to print a "
+          "summary.", file=sys.stderr if tty else sys.stdout, flush=True)
+    print("Each sample reads the last %s of local logs. This command sends nothing anywhere."
           % human_window(window_hours(args.since, args.now)),
           file=sys.stderr if tty else sys.stdout, flush=True)
     try:
@@ -3775,14 +3775,15 @@ def cmd_explain(args) -> int:
     if getattr(args, "id", None):
         picked = explain.by_id(reqs, args.id)
         if not picked:
-            print(f"luna-doctor: no request in the last {human_window(hours)} matches {args.id!r}; "
-                  f"ids are response ids, session ids or run ids", file=sys.stderr)
+            print(f"luna-doctor: no request in the last {human_window(hours)} matches "
+                  f"{args.id!r}. An id is a response id, a session id, or a run id.",
+                  file=sys.stderr)
             return 2
     elif getattr(args, "blocked", False):
         picked = explain.blocked(reqs, limit)
         if not picked:
             print(f"luna-doctor: no request in the last {human_window(hours)} was refused or "
-                  f"stalled, so there is no blocked request to explain", file=sys.stderr)
+                  f"stalled. There is no blocked request to explain.", file=sys.stderr)
             return 0
     elif getattr(args, "slowest", False):
         picked = explain.slowest(reqs, limit)

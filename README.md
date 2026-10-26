@@ -80,13 +80,15 @@ says so, never as an error).
 
 ### The attribution line
 
-The default run and `analyze` open with one line that answers the question an
-error string cannot: the wall you hit — was it **this machine**, **the account**,
-or **the gateway**? Its verdict word is exactly one of `you`, `your org`, `the
-gateway`, `not concurrency` or `unknown`. It leads the report because everything
-after it is being judged against one of those three walls, and mistaking one for
-another is how a concurrency report misleads: a gateway fault read as your own
-traffic sends you off to lower a setting that was never the problem.
+The default run and `analyze` open with one line. That line answers a question
+that an error string cannot answer. Ask: which wall did this traffic hit? The
+wall is this machine, the account, or the gateway. The verdict word is one of
+`you`, `your org`, `the gateway`, `not concurrency`, or `unknown`.
+
+The line leads the report. Every later row is judged against the wall that the
+line names. A report misleads when it confuses one wall with another. If a
+gateway fault looks like your own traffic, you lower a setting that was never
+the problem.
 
 ### `analyze` — what your machine has been doing
 
@@ -117,20 +119,22 @@ half (`luna-doctor capacity`).
 `fix` takes the same `--plan` declaration, so the advice and the analysis are
 judged against the same number.
 
-### `--baseline prev` — this window against the one before it
+### `--baseline prev`: this window against the one before it
 
-`analyze --baseline prev` compares the window with the immediately preceding
-equal-length window from the same logs, and prints a `change:` section of the
-form:
+`analyze --baseline prev` compares the window with the window before it. The
+second window has the same length and comes from the same logs. The report
+prints a `change:` section:
 
 ```
 blocked at admission: 12 -> 3
 ```
 
-Below its sample floor the verdict is `inconclusive`, because a direction built
-on too few requests is a coincidence with a number attached. Nothing in the
-section implies causation — it is two windows of the same logs, side by side —
-and the report does not claim that anything you changed caused the difference.
+If either window holds fewer requests than the sample floor, the verdict is
+`inconclusive`. A direction that rests on a few requests is a coincidence with
+a number attached.
+
+The section never claims a cause. It places two windows of the same logs side
+by side. The report does not say that your change made the difference.
 
 ### `fix` — what to change, with copy-paste you can audit
 
@@ -139,41 +143,50 @@ the file up, validates it, merges the key, and prints `ok`. It never writes
 anything itself. Every key it emits was verified against the installed harness
 bundles or their shipped docs; anything unverifiable is not emitted.
 
-It ends with a verification step: restart the harness, then run
-`analyze --baseline prev`, and read the `change:` section against what success
-looks like there — the blocked-at-admission count coming down over a window wide
-enough to clear the sample floor.
+The `fix` output ends with a check. Restart the harness. Then run `analyze
+--baseline prev` and read the `change:` section. Success looks like a lower
+blocked-at-admission count over a window that is wide enough to clear the
+sample floor.
 
-### `explain` — why was *that* one slow
+### `explain`: why was that one request slow
 
-`analyze` describes the window. `explain` describes one request in it: when it
-ran, how long it waited, what it got, how many requests this machine had in
-flight when it started and at its peak, and whether the same model served
-anybody else inside its own span. The headline names the owner of the wait —
-this machine's own concurrent requests, the account's shared pool, the gateway, or nothing
-at all — and the numbers behind it are labelled by whose they are.
+`analyze` describes the window. `explain` describes one request in that window.
+The report gives the start and the end of the request, the length of the wait,
+and the result. It gives the number of requests that this machine had in flight
+when the request started, and the peak during the request. It also says whether
+the same model served another request inside that span.
 
-No flag explains the request that went wrong (refused or stalled), longest
-first; `--blocked` explains the newest *refused* one; `--slowest` goes strictly
-by duration; and a bare id (response, session or run) explains that one.
+The headline names the owner of the wait. The owner is this machine, the shared
+pool of the account, the gateway, or no wall at all. Each number carries a label
+that gives its owner.
 
-### `watch` — the incident, live
+If you give no flag, `explain` selects the request that went wrong, which is a
+refused request or a stalled request. `--blocked` selects the newest refused
+request. `--slowest` selects by duration only. A bare id selects one request by
+response id, session id, or run id.
 
-`watch` samples a 15-minute lookback on an interval and prints one line per
-state change: which pressure classes moved, the peak this machine held, and the
-account's occupancy when a capacity payload covers the moment. On a terminal it
-redraws a frame; down a pipe it appends ASCII lines only, never cursor control.
-`Ctrl-C` prints a three-line summary and exits with the last sample's verdict —
-`--count N` and `--once` stop on their own, and `--json` emits one object per
-sample for a script.
+### `watch`: the incident, live
 
-### `analyze --for-issue` — a block you can hand over
+`watch` reads the last 15 minutes on a fixed interval. It prints one line for
+each change of state. The line gives the pressure classes that moved, the peak
+that this machine held, and the occupancy of the account when a capacity sample
+covers that moment.
 
-The same evidence as one paste-safe block: tool and version, the UTC window,
-which stores were read, the attribution verdict, the headline and the labelled
-rows. Absolute home paths, emails and long opaque tokens are redacted before
-they reach stdout, so the artefact can go into a support ticket or an issue
-without carrying the shape of the machine it came from.
+On a terminal, `watch` redraws a frame. Through a pipe, it adds ASCII lines and
+never sends cursor control codes. `Ctrl-C` prints a summary of three lines and
+exits with the verdict of the last sample. `--count N` and `--once` stop without
+a key press. `--json` prints one object for each sample, for a script.
+
+### `analyze --for-issue`: a block that you can send to someone
+
+`--for-issue` replaces the report with one block. The block is safe to paste.
+It gives the tool version and the log schema, the window in UTC, and the stores
+that the run read. It gives the attribution verdict, the headline, and the rows
+with their labels.
+
+The tool redacts home paths, email addresses, and long opaque tokens before it
+writes the block. You can put the block in a support ticket or an issue, and the
+block does not carry the layout of your machine.
 
 ### `chart` — one picture
 

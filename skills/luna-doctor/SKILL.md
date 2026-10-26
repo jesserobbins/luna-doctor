@@ -52,35 +52,114 @@ peak, and whether the same model served anyone else inside its own span. Its
 headline names the owner of the wait: this machine's own concurrent requests, the account's
 shared pool, the gateway, or nothing at all.
 
-Selection, and the difference matters when you quote it:
+Selection matters when you quote the result:
 
-- no flag - the request that **went wrong** (refused or stalled), longest first,
-  falling back to duration only when nothing went wrong;
-- `--blocked` - the newest request the gateway **refused** (blocked at admission,
-  or refused at the account's limit). A stall is not a refusal: the gateway said
-  no in one case and the harness gave up in the other, and the two have
-  different fixes. Do not describe one as the other;
-- `--slowest` - strictly by duration.
+- no flag gives the request that went wrong, which is a refused request or a
+  stalled request, with the longest wait first. It uses duration only when no
+  request went wrong.
+- `--blocked` gives the newest request that the gateway refused. A refusal came
+  from the gateway at admission or at the limit of the account.
+- A stall is a different event. In a stall, the harness stopped the stream. The
+  two events have different fixes. Do not describe one as the other.
+- `--slowest` sorts by duration only.
 
-`explain` exits `1` when the request it explained was refused or stalled, `0`
-when it was served, `2` when the window holds nothing to explain.
+`explain` exits `1` if the request that it explained was refused or stalled. It
+exits `0` if the request was served, and `2` if the window holds no request to
+explain.
 
-## Watching an incident, and handing it to someone
+## Watching an incident, and sending the evidence to someone
 
-`watch` samples a short lookback (15 minutes by default) on an interval and
-prints **one line per state change**: the pressure classes that moved, the peak
-this machine held, and the account's occupancy when a capacity payload covers
-the moment. A terminal gets a redrawn frame; a pipe gets append-only ASCII
-lines, because cursor control down a pipe is how a log file fills with escape
-sequences. `Ctrl-C` prints a three-line summary and exits with the verdict of
-the last sample; `--count N` stops on its own and `--once` prints a single
-sample. It reads logs only - nothing is sent anywhere.
+`watch` reads a short window on a fixed interval and prints one line for each
+change of state. The window is 15 minutes by default. The line gives the
+pressure classes that moved, the peak that this machine held, and the occupancy
+of the account when a capacity sample covers that moment.
 
-`analyze --for-issue` replaces the report with one paste-safe block: tool and
-version, the window in UTC, which stores were read, the attribution verdict, the
-headline and the labelled rows. Absolute home paths, emails and long opaque
-tokens are redacted before they reach stdout. Use it when the user is taking
-this to LunaRoute support, a GitHub issue, or a colleague who was not there.
+On a terminal, `watch` redraws a frame. Through a pipe, it adds ASCII lines and
+never sends cursor control codes, because those codes fill a log file with
+escape sequences. `Ctrl-C` prints a summary of three lines and exits with the
+verdict of the last sample. `--count N` stops after N samples. `--once` prints
+one sample. `watch` reads logs only and sends nothing anywhere.
+
+`analyze --for-issue` replaces the report with one block that you can paste. The
+block gives the tool version, the window in UTC, the stores that the run read,
+the attribution verdict, the headline, and the rows with their labels. The tool
+redacts home paths, email addresses, and long opaque tokens before it writes the
+block. Use this block when the user sends the evidence to LunaRoute support, to
+a GitHub issue, or to a colleague.
+
+## Rendering
+
+Every report — `discover`, `analyze`, `capacity` — is one model rendered
+two ways. Rows are `label: value` with no column alignment, which is why output
+survives a narrow terminal, a pipe, or a chat window that wraps at 40 characters.
+`--style plain` prints exactly those rows with no color and no emoji; `pretty`
+adds color, a rule per section and a moon.
+
+`--style auto` (the default) picks `pretty` on a terminal that is not `NO_COLOR`,
+and `plain` otherwise. `NO_COLOR` beats an explicit `--style pretty`;
+`CLICOLOR_FORCE` colors a pipe. `--json` is never styled. When you paste a report
+to the user, use `--style plain`.
+
+`--copy` (on `discover`, `analyze`, `capacity` and `fix`) also puts the
+printed text on the clipboard, as plain text even under `--style pretty`; the
+same text still prints to stdout, so nothing is lost when the machine has no
+clipboard tool. `--json` is copied exactly.
+
+## The attribution line
+
+The default run and `analyze` open with one line. The line answers a question
+that the error string cannot answer. Ask: which wall did this traffic hit? The
+verdict word is one of `you`, `your org`, `the gateway`, `not concurrency`, or
+`unknown`.
+
+Quote the verdict word. Do not turn `unknown` into a diagnosis. Do not describe
+`your org` as a statement about the machine of the user, and do not describe a
+machine verdict as a statement about the account.
+
+## One request: `explain`
+
+`analyze` answers what the window did. When the user is holding one bad
+request - "this call took 95 seconds", "this one came back 429" - `explain`
+answers for that request alone: when it ran, how long it waited, what it got,
+how many requests were in flight from this machine when it started and at its
+peak, and whether the same model served anyone else inside its own span. Its
+headline names the owner of the wait: this machine's own concurrent requests, the account's
+shared pool, the gateway, or nothing at all.
+
+Selection matters when you quote the result:
+
+- no flag gives the request that went wrong, which is a refused request or a
+  stalled request, with the longest wait first. It uses duration only when no
+  request went wrong.
+- `--blocked` gives the newest request that the gateway refused. A refusal came
+  from the gateway at admission or at the limit of the account.
+- A stall is a different event. In a stall, the harness stopped the stream. The
+  two events have different fixes. Do not describe one as the other.
+- `--slowest` sorts by duration only.
+
+`explain` exits `1` if the request that it explained was refused or stalled. It
+exits `0` if the request was served, and `2` if the window holds no request to
+explain.
+
+## Watching an incident, and sending the evidence to someone
+
+`watch` reads a short window on a fixed interval and prints one line for each
+change of state. The window is 15 minutes by default. The line gives the
+pressure classes that moved, the peak that this machine held, and the occupancy
+of the account when a capacity sample covers that moment.
+
+On a terminal, `watch` redraws a frame. Through a pipe, it adds ASCII lines and
+never sends cursor control codes, because those codes fill a log file with
+escape sequences. `Ctrl-C` prints a summary of three lines and exits with the
+verdict of the last sample. `--count N` stops after N samples. `--once` prints
+one sample. `watch` reads logs only and sends nothing anywhere.
+
+`analyze --for-issue` replaces the report with one block that you can paste. The
+block gives the tool version, the window in UTC, the stores that the run read,
+the attribution verdict, the headline, and the rows with their labels. The tool
+redacts home paths, email addresses, and long opaque tokens before it writes the
+block. Use this block when the user sends the evidence to LunaRoute support, to
+a GitHub issue, or to a colleague.
 
 ## Rendering
 

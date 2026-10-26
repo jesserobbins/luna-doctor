@@ -19,27 +19,107 @@ Versioning policy:
 
 ### Added
 
-- **`luna-doctor explain` — why was *that* one slow.** `analyze` describes the window; nothing described the one request the user was holding. `explain` shows that request alone: its span, duration, outcome in words, the concurrent requests this machine held when it started and at its peak, how many requests the same model served inside its own span, and the account's occupancy when a capacity payload covers the moment. Its headline names the owner of the wait — this machine's concurrent requests, the account's shared pool, the gateway, or nothing — and every number carries whose it is. No flag explains the request that went wrong, `--blocked` the newest refusal (deliberately not a stall: the gateway refusing and the harness giving up have different fixes), `--slowest` strictly by duration, and a bare id a response, session or run (`luna_doctor/explain.py`).
-- **`luna-doctor watch` — the incident, live.** Samples a 15-minute lookback on an interval and prints one line per state change: the pressure classes that moved, the peak this machine held, the account's occupancy. A terminal gets a redrawn frame, a pipe gets append-only ASCII (never cursor control), `Ctrl-C` prints a three-line summary and exits with the last sample's verdict, and `--count`/`--once`/`--json` cover the scripted cases (`luna_doctor/watch.py`).
-- **`analyze --for-issue` — a block you can hand over.** The same evidence as one paste-safe artefact: version and log schema, the UTC window, which stores were read, the attribution verdict, the headline and the labelled rows. Home paths, emails and long opaque tokens are redacted before stdout, so it survives a support ticket without carrying the shape of the machine (`luna_doctor/bundle.py`).
-- **The attribution verdict.** `analyze` and the bare default run now open with the question a LunaRoute user actually asks — *was the wall I hit this machine, the account, or the gateway?* — and answer it with one word: `you`, `your org`, `the gateway`, `not concurrency`, or `unknown`. The verdict is computed from the same measured window plus the account's cached capacity, and its rows label whose number each figure is (`this machine`, `account`), because the account's concurrent-request pool is shared and a machine that looks idle from inside its own logs is the single most common shape of the complaint (`luna_doctor/attribution.py`). `analyze --json` carries the verdict, its sentence, its labelled rows and its actions as an additive `attribution` block; the envelope's `schema` stays `4`, since nothing was renamed or removed.
-- **The verification stage: `analyze --baseline prev`.** The loop used to end at advice. It now prints a `change:` section comparing the window with the immediately preceding equal-length window — both read from the same log stores, no network, no store read — in `blocked at admission: 12 -> 3` form, with a sample floor: below it the verdict word is `inconclusive` and the reason names the small count, so a two-sample "win" can never be printed as improvement. Nothing in it implies causation: the words *because*, *caused*, *proves* and *fixed* cannot reach the output (`luna_doctor/baseline.py`). `fix` ends with the step it was missing — run the same comparison after restarting the harness, and what success looks like.
-- `--plan <plan name or number>` on `analyze` and `fix`, the same declaration `chart` already took. The account's own number leads; a declaration is the fallback for when the capacity payload cannot be reached; when neither is known the report says `unknown` and names the command that fetches it. `fix --json` now carries `findings.priority_concurrency` and `findings.priority_concurrency_source` with the resolved value instead of a permanent null.
+- `luna-doctor explain` answers one question: why was that one request slow?
+  `analyze` describes the window. Nothing described the single request that the
+  user held. `explain` shows that request alone. It gives the start and the end,
+  the length, and the result in words. It gives the count of concurrent requests
+  on this machine when the request started, and the peak during the request. It
+  says how many requests the same model served inside the span. It gives the
+  occupancy of the account when a capacity sample covers that moment. The
+  headline names the owner of the wait. The owner is this machine, the shared
+  pool of the account, the gateway, or no wall at all. Every number carries a
+  label that gives its owner. If you give no flag, `explain` selects the request
+  that went wrong. `--blocked` selects the newest refusal, and a refusal is not
+  a stall, because the gateway refuses at admission and the harness stops an
+  idle stream. `--slowest` sorts by duration. A bare id selects a response id, a
+  session id, or a run id. The module is `luna_doctor/explain.py`.
+- `luna-doctor watch` gives a live view of an incident. It reads a 15-minute
+  window on a fixed interval and prints one line for each change of state. The
+  line gives the pressure classes that moved, the peak on this machine, and the
+  occupancy of the account. A terminal gets a redrawn frame. A pipe gets
+  append-only ASCII lines and no cursor control. `Ctrl-C` prints a summary of
+  three lines and exits with the verdict of the last sample. `--count`, `--once`,
+  and `--json` cover the scripted cases. The module is `luna_doctor/watch.py`.
+- `analyze --for-issue` prints one block that you can send to another person.
+  The block gives the tool version, the log schema, the window in UTC, and the
+  stores that the run read. It gives the attribution verdict, the headline, and
+  the rows with their labels. The tool redacts home paths, email addresses, and
+  long opaque tokens before it writes the block. The block is safe for a support
+  ticket, and it does not carry the layout of the machine. The module is
+  `luna_doctor/bundle.py`.
+- The attribution verdict. `analyze` and the default run now open with the
+  question that a user asks: was the wall this machine, the account, or the
+  gateway? The answer is one word: `you`, `your org`, `the gateway`, `not
+  concurrency`, or `unknown`. The tool computes the verdict from the measured
+  window and from the cached capacity payload. Each row gives the owner of its
+  number as `this machine` or as `account`, because the account shares one
+  concurrent-request pool and a machine can look idle from inside its own logs.
+  `analyze --json` carries the verdict, the sentence, the rows, and the actions
+  in a new `attribution` block. The `schema` value stays `4`, because no field
+  was renamed or removed. The module is `luna_doctor/attribution.py`.
+- The verification stage, `analyze --baseline prev`. The loop used to stop at
+  advice. The report now prints a `change:` section that compares this window
+  with the window before it. Both windows come from the same logs. The tool
+  reads no network and no store. The section uses the form `blocked at
+  admission: 12 -> 3`. If either window holds fewer requests than the sample
+  floor, the verdict is `inconclusive` and the reason gives the small count. A
+  result from two requests never prints as an improvement. The section never
+  claims a cause, so the words *because*, *caused*, *proves*, and *fixed* never
+  reach the output. The module is `luna_doctor/baseline.py`. `fix` now ends with
+  this step: run the comparison after you restart the harness, and the output
+  gives the result that means success.
+- `--plan <plan name or number>` on `analyze` and `fix`. The account number
+  leads. A declaration is the fallback when the tool cannot reach the capacity
+  payload. If the tool knows neither value, the report says `unknown` and names
+  the command that fetches the account value. `fix --json` now gives
+  `findings.priority_concurrency` and `findings.priority_concurrency_source`
+  with the resolved value. Earlier, the field was always null.
 
 ### Changed
 
-- **The advice no longer quotes a hardcoded width.** `analyze` and `fix` printed "keep concurrent requests at or under 8" — one plan's default, wearing a ruler, in a project whose own `plan.py` records that 8 exceeds four of the five published plans. The sentence now carries the account's priority concurrency when it is known, the declared plan's when one was given, and otherwise names `luna-doctor capacity --online` and `--plan` instead of inventing a figure.
-- The pressured headline is composed from the outcome classes that actually set the pressure flag (blocked at admission, silent stalls, account-limit rejections, 429s) and omits the classes that did not fire, instead of always naming the first two — a window whose whole story was rejections used to report "0 request(s) were blocked at admission, 0 silent stall(s)" while exiting `1`.
-- `fix`'s preface no longer tells the agent to read a plan from `lunaroute whoami` or a remaining budget from `lunaroute usage`: neither exists (the first is verified in `plan.py`, the second is a retired feature and re-imported the spend framing this project does not use). It points at `luna-doctor capacity` for the account's number instead.
+- The advice no longer quotes a fixed width. `analyze` and `fix` printed "keep
+  concurrent requests at or under 8". That number is the default of one plan,
+  and `plan.py` already records that 8 is above four of the five published
+  plans. The sentence now gives the priority concurrency of the account when the
+  tool knows it. If you declare a plan, the sentence gives the value of that
+  plan. If the tool knows neither value, the sentence names `luna-doctor
+  capacity --online` and `--plan` instead of a number.
+- The pressured headline now uses the outcome classes that set the pressure
+  flag. Those classes are blocked at admission, silent stalls, refusals at the
+  account limit, and 429s. Classes that did not fire are left out. Before, the
+  headline named only the first two classes, so a window with rejections
+  reported "0 request(s) were blocked at admission, 0 silent stall(s)" and
+  exited `1`.
+- The preface of `fix` no longer tells the agent to read a plan from `lunaroute
+  whoami` or a remaining budget from `lunaroute usage`. Neither value exists.
+  `plan.py` checks the first, and the second was a retired feature that brought
+  back the spend framing that this project does not use. The preface now points
+  at `luna-doctor capacity` for the account value.
 
 ### Fixed
 
-- The chart over a short window: tick labels no longer repeat (seconds are added before the tick count is reduced), a band that ended early gets a stub at the edge instead of a diagonal drawn across the plot, and the priority-concurrency rule's label sits on a white plate so it stays readable over a dark band.
-
-- A cold `capacity` cache exited `2` in silence; it now says the cache is empty and prints the command that fills it.
-- The bare default run claimed it had read the last hour of local logs and drew a chart on a machine that had no logs at all. With no requests in the window it says so, names `discover`, and draws nothing.
-- The cap-copy guard in `tests/test_cap_copy.py` was pinned to `10` and could not catch the `8` that shipped; it is now number-agnostic (`at or under <n>`, `cap of <n>`, `keep concurrent requests at or under`).
-- `skills/luna-doctor/SKILL.md` was rewritten to the shipped instrument: the single stacked-area graph (not two panels), no advisory-concurrency rule, per-model admission deadlines with their sample counts (not one universal 120.2s wall), the attribution line, `--plan`, `--baseline prev`, and an explicit rule that an agent must say whose number it quotes and must never repeat a plan's width as a gateway fact. `README.md` lost its two-release-stale version check, its latency-panel promise, and its "codex is not analysed" claim, which `sources.py` had already outgrown.
+- The chart is readable over a short window. Tick labels used to repeat, and
+  they now gain seconds before the tick count goes down. A band that ended early
+  gets a short mark at the edge instead of a diagonal line across the plot. The
+  label of the priority-concurrency rule sits on a white plate, so you can read
+  it over a dark band.
+- `capacity` with a cold cache exited `2` and printed nothing. It now says that
+  the cache is empty and gives the command that fills it.
+- The default run claimed that it read the last hour of local logs, and it drew
+  a chart, on a machine that had no logs. If the window holds no request, the
+  run now says so, names `discover`, and draws nothing.
+- The cap-copy guard in `tests/test_cap_copy.py` was pinned to `10`, so it
+  missed the `8` that shipped. The guard is now independent of any number. It
+  matches `at or under <n>`, `cap of <n>`, and `keep concurrent requests at or
+  under`.
+- `skills/luna-doctor/SKILL.md` now describes the tool that ships. The chart is
+  one stacked-area graph, not two panels, and it draws no advisory-concurrency
+  rule. Admission deadlines are per model and carry their sample counts, and
+  there is no single 120.2s wall. The skill also describes the attribution line,
+  `--plan`, and `--baseline prev`. It tells an agent to say whose number it
+  quotes, and never to repeat the width of one plan as a gateway fact.
+  `README.md` lost its version check from two releases ago, its promise of a
+  latency panel, and its claim that codex is not analysed.
 
 ## [0.2.0-alpha.3] - 2026-10-24
 

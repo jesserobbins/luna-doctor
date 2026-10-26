@@ -79,7 +79,7 @@ class Why(unittest.TestCase):
         victim = req(start=T0, end=T0 + 95, outcome="client_idle_timeout")
         doc = explain.explain(victim, wide_burst() + [victim], None, (6, "plan apex"))
         self.assertIn("this machine", doc["headline"].lower())
-        self.assertIn("11 wide", doc["headline"])
+        self.assertIn("held 11 concurrent requests", doc["headline"])
         self.assertIn("declared plan apex", doc["headline"])
         self.assertTrue(doc["actions"])
 
@@ -87,8 +87,8 @@ class Why(unittest.TestCase):
         """No width, no account half: the owner cannot be named, and the copy says so."""
         victim = req(start=T0, end=T0 + 95, outcome="client_idle_timeout")
         doc = explain.explain(victim, [req(start=T0, end=T0 + 95), victim], None, (None, "unknown"))
-        self.assertIn("no local width explains", doc["headline"].lower())
-        self.assertIn("capacity --online", doc["headline"])
+        self.assertIn("no width on this machine explains", doc["headline"].lower())
+        self.assertIn("capacity --online", doc["actions"][0])
 
     def test_a_named_org_limit_refusal_needs_no_capacity_payload(self):
         """The gateway named the pool; saying less would hide the answer."""
@@ -97,17 +97,17 @@ class Why(unittest.TestCase):
         doc = explain.explain(refused, wide_burst() + [refused], None, (6, "plan apex"))
         self.assertIn("CONCURRENT_REQUEST_LIMIT_EXCEEDED", doc["headline"])
         self.assertIn("11 concurrent requests", doc["headline"])
-        self.assertIn("not this machine's to give", doc["headline"])
+        self.assertIn("was not free on this machine", doc["headline"])
 
     def test_a_served_request_beside_a_wide_burst_is_explained_as_queueing(self):
         slow = req(start=T0, end=T0 + 145)
         doc = explain.explain(slow, wide_burst(12, 200) + [slow], None, (6, "plan apex"))
-        self.assertIn("queueing behind this machine's own concurrent requests", doc["headline"])
+        self.assertIn("not from the latency of the model", doc["headline"])
 
     def test_a_fast_served_request_is_not_dressed_up_as_a_problem(self):
         doc = explain.explain(req(start=T0, end=T0 + 3), [req(start=T0, end=T0 + 3)],
                               None, (6, "plan apex"))
-        self.assertIn("model's own latency", doc["headline"])
+        self.assertIn("latency of the model itself", doc["headline"])
 
     def test_an_upstream_failure_names_the_gateway(self):
         failed = req(start=T0, end=T0 + 2, outcome="upstream_unavailable")
