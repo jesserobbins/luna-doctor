@@ -48,6 +48,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from luna_doctor import attribution
+from luna_doctor import explain
 from luna_doctor import baseline
 from luna_doctor import plan
 from luna_doctor import report
@@ -3336,6 +3337,33 @@ def main(argv: list[str] | None = None) -> int:
     _add_style(d)
     d.set_defaults(func=cmd_discover)
 
+    ex = sub.add_parser("explain",
+                        help="explain one request: what it was, how long it waited, whose room "
+                             "it was waiting for")
+    ex.add_argument("--since", default=None,
+                    help="window, e.g. 24h, 90m, 7d (default 24h)")
+    ex.add_argument("--now", action="store_true", help="last 15 minutes")
+    ex.add_argument("--last", type=int, default=1, metavar="N",
+                    help="explain the N slowest requests instead of one (default 1)")
+    ex.add_argument("--slowest", action="store_true",
+                    help="explain the slowest requests by duration instead of the ones that "
+                         "were refused or stalled")
+    ex.add_argument("--blocked", action="store_true",
+                    help="explain the most recent refused or stalled request instead of the "
+                         "slowest")
+    ex.add_argument("id", nargs="?", default=None, metavar="ID",
+                    help="a response id, session id or run id to explain")
+    ex.add_argument("--harness", default="pi,claude-code")
+    ex.add_argument("--pi-root", action="append", default=None, metavar="DIR",
+                    help="pi-format store to read instead of ~/.pi/agent/sessions (repeatable)")
+    ex.add_argument("--claude-root", action="append", default=None, metavar="DIR",
+                    help="claude-code store to read instead of ~/.claude/projects (repeatable)")
+    ex.add_argument("--json", action="store_true")
+    _add_copy(ex)
+    _add_style(ex)
+    plan.add_plan_arg(ex)
+    ex.set_defaults(func=cmd_explain)
+
     a = sub.add_parser("analyze", help="explain what your traffic is doing to your concurrency")
     a.add_argument("--since", default=None, help="window, e.g. 24h, 90m, 7d (default 24h)")
     a.add_argument("--now", action="store_true", help="last 15 minutes")
@@ -3478,6 +3506,8 @@ def _run(args) -> int:
         return cmd_fix(args)
     if args.cmd == "chart":
         return cmd_chart(args)
+    if args.cmd == "explain":
+        return cmd_explain(args)
     return args.func(args)
 
 
@@ -3590,6 +3620,106 @@ def _capacity_metrics(since: float, until: float, m: dict) -> dict:
     return block
 
 
+def cmd_explain(args) -> int:
+    """One request, explained: what it was, how long it took, what it got, and
+    whose room it was waiting for.
+
+    Selection, in the order the flags imply: an explicit id, then the most
+    recent refusals (`--blocked`), then the slowest requests. Exit codes follow
+    the tool's convention: 1 when the request explained was refused or stalled
+    (there is something to act on), 0 when it was served, 2 when the window
+    holds nothing to explain.
+    """
+    try:
+        hours = window_hours(args.since, args.now)
+    except ValueError as e:
+        print(f"luna-doctor: {e}", file=sys.stderr)
+        return 2
+    harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
+    raw_pi = getattr(args, "pi_root", None)
+    raw_claude = getattr(args, "claude_root", None)
+    pi_roots = _check_roots(raw_pi, "--pi-root") if raw_pi else None
+    claude_roots = _check_roots(raw_claude, "--claude-root") if raw_claude else None
+    now = time.time()
+    reqs = collect(hours, harnesses, pi_roots, claude_roots, now=now)
+    if not reqs:
+        if args.json:
+            print(json.dumps(envelope("explain", {
+                "headline": "No requests found in the window.",
+                "requests": [],
+            }, contract=CONTRACT), indent=2))
+        else:
+            print(f"No requests found in the last {human_window(hours)}.")
+            print("Widen the window with --since, or run `luna-doctor discover`.")
+        return 2
+    limit = max(1, int(getattr(args, "last", 1) or 1))
+    if getattr(args, "id", None):
+        picked = explain.by_id(reqs, args.id)
+        if not picked:
+            print(f"luna-doctor: no request in the last {human_window(hours)} matches {args.id!r}; "
+                  f"ids are response ids, session ids or run ids", file=sys.stderr)
+            return 2
+    elif getattr(args, "blocked", False):
+        picked = explain.blocked(reqs, limit)
+        if not picked:
+            print(f"luna-doctor: no request in the last {human_window(hours)} was refused or "
+                  f"stalled, so there is no blocked request to explain", file=sys.stderr)
+            return 0
+    elif getattr(args, "slowest", False):
+        picked = explain.slowest(reqs, limit)
+    else:
+        # No selector: the request that went wrong, not the longest that happened
+        # to be served. Duration is only the fallback when nothing went wrong.
+        picked = explain.worst(reqs, limit)
+
+    # The account half and the width resolution, the same way analyze does it:
+    # a cache read, never a fetch, and unknown is a fine answer.
+    m = analyse(reqs, hours)
+    m["declared_plan"] = getattr(args, "plan", None)
+    try:
+        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
+    except Exception:
+        m["capacity"] = {"provenance": sources.PROV_UNKNOWN}
+    capm = m.get("capacity") or {}
+    served = capm if capm.get("provenance") == sources.PROV_ACCOUNT else None
+    priority = _priority_for_advice(m)
+
+    docs = []
+    any_room = False
+    for req in picked:
+        doc = explain.explain(req, reqs, served, priority)
+        any_room = any_room or doc["room"]
+        docs.append({
+            "headline": doc["headline"],
+            "rows": [{"label": k, "value": v} for k, v in doc["rows"]],
+            "actions": doc["actions"],
+            "outcome": doc["outcome"],
+        })
+
+    if args.json:
+        print(json.dumps(envelope("explain", {
+            "headline": docs[0]["headline"],
+            "window_hours": hours,
+            "requests": docs,
+            "priority_concurrency": priority[0],
+            "priority_concurrency_source": priority[1],
+            "capacity": capm,
+        }, contract=CONTRACT), indent=2))
+        return 1 if any_room else 0
+
+    for i, (req, doc) in enumerate(zip(picked, docs)):
+        if i:
+            print()
+        rep = report.Report(
+            headline=doc["headline"],
+            sections=[report.Section("request", [report.Row(r["label"], r["value"])
+                                                 for r in doc["rows"]])],
+            adjustments=list(doc["actions"]),
+            footnote="one request, from this machine's logs · `luna-doctor analyze` for the window")
+        print_report(rep, args)
+    return 1 if any_room else 0
+
+
 def cmd_analyze(args) -> int:
     try:
         hours = window_hours(args.since, args.now)
@@ -3643,6 +3773,21 @@ def cmd_analyze(args) -> int:
     except Exception as e:
         m["capacity"] = {"provenance": sources.PROV_UNKNOWN,
                          "reason": f"collection failed: {type(e).__name__}: {e}"[:200]}
+    # The pressure-window count is overlap-based and needs a width. analyse()
+    # computes it with the fallback constant before the account is known, so a
+    # resolved width re-counts the windows here - otherwise the report would
+    # quote one width in prose and measure "wide" against another.
+    pv, _pvsrc = _priority_for_advice(m)
+    if isinstance(pv, int) and not isinstance(pv, bool) and pv > 0 \
+            and pv != ADVISED_CONCURRENCY and m.get("requests"):
+        try:
+            wide = pressure_windows(timed(reqs), pv)
+            m["pressure_windows"] = len(wide)
+            m["longest_pressure_window"] = (max(wide, key=lambda w: w["seconds"])
+                                            if wide else None)
+            m["pressure_window_threshold"] = pv
+        except Exception:
+            pass
     if bool(getattr(args, "online", False)) and (snap is None or snap.catalog is None):
         note = snap.catalog_note if snap is not None else m["snapshot"].get("reason", "")
         print(f"luna-doctor: catalog unavailable ({note}); "

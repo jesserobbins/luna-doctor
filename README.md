@@ -37,6 +37,9 @@ luna-doctor analyze --since 7d --json   # machine-readable, for cron/CI
 luna-doctor analyze --plan <plan name or number>   # declare the account's width
 luna-doctor analyze --baseline prev     # …this window against the one before it
 luna-doctor analyze --style plain       # undecorated text, for a paste or a pipe
+luna-doctor explain           # one request: what it waited for, and whose room it was
+luna-doctor explain --blocked # the newest request the gateway refused
+luna-doctor explain --slowest --last 5  # the five longest by duration
 luna-doctor capacity          # the account's plan and priority concurrency (cached)
 luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # …or one agent at a time (pi | claude-code | codex | swamp)
@@ -44,7 +47,7 @@ luna-doctor chart --since 24h # SVG: one stacked-area graph of concurrent reques
 luna-doctor chart --since 24h --open  # …and open it in your browser
 ```
 
-Exit codes: `0` no pressure, `1` pressure found, `2` no data — usable from a shell prompt, a skill, or cron.
+Exit codes: `0` no pressure, `1` pressure found, `2` no data — usable from a shell prompt, a skill, or cron. `explain` follows the same codes for the one request it explains: `1` when that request was refused or stalled, `0` when it was served.
 
 ## How it works
 
@@ -138,6 +141,19 @@ It ends with a verification step: restart the harness, then run
 `analyze --baseline prev`, and read the `change:` section against what success
 looks like there — the blocked-at-admission count coming down over a window wide
 enough to clear the sample floor.
+
+### `explain` — why was *that* one slow
+
+`analyze` describes the window. `explain` describes one request in it: when it
+ran, how long it waited, what it got, how many requests this machine had in
+flight when it started and at its peak, and whether the same model served
+anybody else inside its own span. The headline names the owner of the wait —
+this machine's own fan-out, the account's shared pool, the gateway, or nothing
+at all — and the numbers behind it are labelled by whose they are.
+
+No flag explains the request that went wrong (refused or stalled), longest
+first; `--blocked` explains the newest *refused* one; `--slowest` goes strictly
+by duration; and a bare id (response, session or run) explains that one.
 
 ### `chart` — one picture
 

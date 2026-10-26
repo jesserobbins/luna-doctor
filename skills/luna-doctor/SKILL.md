@@ -26,6 +26,10 @@ luna-doctor analyze --plan <plan name or number>   # declare the account's width
 luna-doctor analyze --baseline prev               # this window vs the one before it
 luna-doctor analyze --style plain  # undecorated text, for pasting to the user
 luna-doctor analyze --copy         # same text, also on the clipboard, plain
+luna-doctor explain                # one request: what it waited for and whose room it was
+luna-doctor explain --blocked      # the most recent request the gateway refused
+luna-doctor explain --slowest --last 5   # the five longest, by duration
+luna-doctor explain <id>           # a response id, session id or run id
 luna-doctor capacity               # the account's plan and priority concurrency
 luna-doctor fix                    # copy-paste config per agent, justified by the numbers
 luna-doctor fix --agent pi         # one agent at a time
@@ -35,6 +39,29 @@ luna-doctor discover               # when the analysis says "no data"
 
 `analyze` exits `1` when it finds pressure, `0` when it does not, `2` when the
 logs hold nothing in the window.
+
+## One request: `explain`
+
+`analyze` answers what the window did. When the user is holding one bad
+request - "this call took 95 seconds", "this one came back 429" - `explain`
+answers for that request alone: when it ran, how long it waited, what it got,
+how many requests were in flight from this machine when it started and at its
+peak, and whether the same model served anyone else inside its own span. Its
+headline names the owner of the wait: this machine's own fan-out, the account's
+shared pool, the gateway, or nothing at all.
+
+Selection, and the difference matters when you quote it:
+
+- no flag - the request that **went wrong** (refused or stalled), longest first,
+  falling back to duration only when nothing went wrong;
+- `--blocked` - the newest request the gateway **refused** (blocked at admission,
+  or refused at the account's limit). A stall is not a refusal: the gateway said
+  no in one case and the harness gave up in the other, and the two have
+  different fixes. Do not describe one as the other;
+- `--slowest` - strictly by duration.
+
+`explain` exits `1` when the request it explained was refused or stalled, `0`
+when it was served, `2` when the window holds nothing to explain.
 
 ## Rendering
 
