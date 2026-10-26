@@ -17,6 +17,25 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- **The attribution verdict.** `analyze` and the bare default run now open with the question a LunaRoute user actually asks — *was the wall I hit this machine, the account, or the gateway?* — and answer it with one word: `you`, `your org`, `the gateway`, `not concurrency`, or `unknown`. The verdict is computed from the same measured window plus the account's cached capacity, and its rows label whose number each figure is (`this machine`, `account`), because the account's concurrent-request pool is shared and a machine that looks idle from inside its own logs is the single most common shape of the complaint (`luna_doctor/attribution.py`). `analyze --json` carries the verdict, its sentence, its labelled rows and its actions as an additive `attribution` block; the envelope's `schema` stays `4`, since nothing was renamed or removed.
+- **The verification stage: `analyze --baseline prev`.** The loop used to end at advice. It now prints a `change:` section comparing the window with the immediately preceding equal-length window — both read from the same log stores, no network, no store read — in `blocked at admission: 12 -> 3` form, with a sample floor: below it the verdict word is `inconclusive` and the reason names the small count, so a two-sample "win" can never be printed as improvement. Nothing in it implies causation: the words *because*, *caused*, *proves* and *fixed* cannot reach the output (`luna_doctor/baseline.py`). `fix` ends with the step it was missing — run the same comparison after restarting the harness, and what success looks like.
+- `--plan <plan name or number>` on `analyze` and `fix`, the same declaration `chart` already took. The account's own number leads; a declaration is the fallback for when the capacity payload cannot be reached; when neither is known the report says `unknown` and names the command that fetches it. `fix --json` now carries `findings.priority_concurrency` and `findings.priority_concurrency_source` with the resolved value instead of a permanent null.
+
+### Changed
+
+- **The advice no longer quotes a hardcoded width.** `analyze` and `fix` printed "keep concurrent requests at or under 8" — one plan's default, wearing a ruler, in a project whose own `plan.py` records that 8 exceeds four of the five published plans. The sentence now carries the account's priority concurrency when it is known, the declared plan's when one was given, and otherwise names `luna-doctor capacity --online` and `--plan` instead of inventing a figure.
+- The pressured headline is composed from the outcome classes that actually set the pressure flag (blocked at admission, silent stalls, account-limit rejections, 429s) and omits the classes that did not fire, instead of always naming the first two — a window whose whole story was rejections used to report "0 request(s) were blocked at admission, 0 silent stall(s)" while exiting `1`.
+- `fix`'s preface no longer tells the agent to read a plan from `lunaroute whoami` or a remaining budget from `lunaroute usage`: neither exists (the first is verified in `plan.py`, the second is a retired feature and re-imported the spend framing this project does not use). It points at `luna-doctor capacity` for the account's number instead.
+
+### Fixed
+
+- A cold `capacity` cache exited `2` in silence; it now says the cache is empty and prints the command that fills it.
+- The bare default run claimed it had read the last hour of local logs and drew a chart on a machine that had no logs at all. With no requests in the window it says so, names `discover`, and draws nothing.
+- The cap-copy guard in `tests/test_cap_copy.py` was pinned to `10` and could not catch the `8` that shipped; it is now number-agnostic (`at or under <n>`, `cap of <n>`, `keep concurrent requests at or under`).
+- `skills/luna-doctor/SKILL.md` was rewritten to the shipped instrument: the single stacked-area graph (not two panels), no advisory-concurrency rule, per-model admission deadlines with their sample counts (not one universal 120.2s wall), the attribution line, `--plan`, `--baseline prev`, and an explicit rule that an agent must say whose number it quotes and must never repeat a plan's width as a gateway fact. `README.md` lost its two-release-stale version check, its latency-panel promise, and its "codex is not analysed" claim, which `sources.py` had already outgrown.
+
 ## [0.2.0-alpha.3] - 2026-10-24
 
 ### Added
