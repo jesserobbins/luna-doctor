@@ -148,7 +148,7 @@ enough to clear the sample floor.
 ran, how long it waited, what it got, how many requests this machine had in
 flight when it started and at its peak, and whether the same model served
 anybody else inside its own span. The headline names the owner of the wait —
-this machine's own fan-out, the account's shared pool, the gateway, or nothing
+this machine's own concurrent requests, the account's shared pool, the gateway, or nothing
 at all — and the numbers behind it are labelled by whose they are.
 
 No flag explains the request that went wrong (refused or stalled), longest

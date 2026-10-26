@@ -22,7 +22,7 @@ def req(harness="pi", session="s1", model="glm-5.3", start=T0, end=T0 + 10,
                    thinking_chars=thinking_chars, text_chars=text_chars)
 
 
-def fan_out(n=10, span=120.0):
+def wide_burst(n=10, span=120.0):
     """A burst that all opens at once - the shape that produces the symptom."""
     return [req(model="glm-5.3", start=T0, end=T0 + span) for _ in range(n)]
 
@@ -75,9 +75,9 @@ class Selection(unittest.TestCase):
 
 
 class Why(unittest.TestCase):
-    def test_a_stall_inside_a_fan_out_blames_this_machine(self):
+    def test_a_stall_inside_a_wide_burst_blames_this_machine(self):
         victim = req(start=T0, end=T0 + 95, outcome="client_idle_timeout")
-        doc = explain.explain(victim, fan_out() + [victim], None, (6, "plan apex"))
+        doc = explain.explain(victim, wide_burst() + [victim], None, (6, "plan apex"))
         self.assertIn("this machine", doc["headline"].lower())
         self.assertIn("11 wide", doc["headline"])
         self.assertIn("declared plan apex", doc["headline"])
@@ -94,15 +94,15 @@ class Why(unittest.TestCase):
         """The gateway named the pool; saying less would hide the answer."""
         refused = req(start=T0, end=T0 + 0.4, outcome="org_concurrency_limit",
                       error_message='429: {"code":"CONCURRENT_REQUEST_LIMIT_EXCEEDED"}')
-        doc = explain.explain(refused, fan_out() + [refused], None, (6, "plan apex"))
+        doc = explain.explain(refused, wide_burst() + [refused], None, (6, "plan apex"))
         self.assertIn("CONCURRENT_REQUEST_LIMIT_EXCEEDED", doc["headline"])
         self.assertIn("11 concurrent requests", doc["headline"])
         self.assertIn("not this machine's to give", doc["headline"])
 
-    def test_a_served_request_beside_a_full_fan_out_is_explained_as_queueing(self):
+    def test_a_served_request_beside_a_wide_burst_is_explained_as_queueing(self):
         slow = req(start=T0, end=T0 + 145)
-        doc = explain.explain(slow, fan_out(12, 200) + [slow], None, (6, "plan apex"))
-        self.assertIn("queueing behind this machine's own fan-out", doc["headline"])
+        doc = explain.explain(slow, wide_burst(12, 200) + [slow], None, (6, "plan apex"))
+        self.assertIn("queueing behind this machine's own concurrent requests", doc["headline"])
 
     def test_a_fast_served_request_is_not_dressed_up_as_a_problem(self):
         doc = explain.explain(req(start=T0, end=T0 + 3), [req(start=T0, end=T0 + 3)],
@@ -125,7 +125,7 @@ class Rows(unittest.TestCase):
     def test_rows_carry_owner_labels_and_never_a_bare_number(self):
         victim = req(start=T0, end=T0 + 95, outcome="client_idle_timeout",
                      response_id="resp-1", thinking_chars=2400, text_chars=0)
-        doc = explain.explain(victim, fan_out() + [victim], None, (6, "plan apex"))
+        doc = explain.explain(victim, wide_burst() + [victim], None, (6, "plan apex"))
         rows = dict(doc["rows"])
         self.assertIn("(this machine)", rows["peak during its span"])
         self.assertIn("(this machine)", rows["in flight when it started"])
@@ -171,14 +171,14 @@ class Copy(unittest.TestCase):
         for outcome in outcomes:
             with self.subTest(outcome=outcome):
                 r = req(outcome=outcome)
-                text = self._all_text(explain.explain(r, fan_out() + [r], None,
+                text = self._all_text(explain.explain(r, wide_burst() + [r], None,
                                                       (6, "plan apex")))
                 hit = self.FORBIDDEN.search(text)
                 self.assertIsNone(hit, f"{outcome}: {hit.group(0) if hit else ''}")
 
-    def test_a_fan_out_headline_never_calls_the_width_a_gateway_fact(self):
+    def test_a_wide_burst_headline_never_calls_the_width_a_gateway_fact(self):
         victim = req(start=T0, end=T0 + 95, outcome="client_idle_timeout")
-        doc = explain.explain(victim, fan_out() + [victim], None, (6, "plan apex"))
+        doc = explain.explain(victim, wide_burst() + [victim], None, (6, "plan apex"))
         self.assertNotIn("gateway admits", doc["headline"].lower())
         self.assertIn("declared plan apex", doc["headline"])
 

@@ -47,7 +47,7 @@ request - "this call took 95 seconds", "this one came back 429" - `explain`
 answers for that request alone: when it ran, how long it waited, what it got,
 how many requests were in flight from this machine when it started and at its
 peak, and whether the same model served anyone else inside its own span. Its
-headline names the owner of the wait: this machine's own fan-out, the account's
+headline names the owner of the wait: this machine's own concurrent requests, the account's
 shared pool, the gateway, or nothing at all.
 
 Selection, and the difference matters when you quote it:

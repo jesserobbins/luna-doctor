@@ -161,11 +161,11 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
         # is the model, and the same answer inside a 12-wide burst is a queue.
         if isinstance(value, int) and peak is not None and peak > value:
             head = ("Served, but not quickly: it ran for %s while this machine held %d concurrent "
-                    "requests, past %s. The wait was queueing behind this machine's own fan-out, "
-                    "not the model taking that long."
+                    "requests, past %s. The wait was queueing behind this machine's own "
+                    "concurrent requests, not the model taking that long."
                     % (_seconds(req.duration), peak, _width_words(value, source)))
-            actions.append("Narrow the fan-out to fit %s and this request's share of the queue "
-                           "goes away." % _width_words(value, source))
+            actions.append("Narrow this machine's concurrent requests to fit %s and this "
+                           "request's share of the queue goes away." % _width_words(value, source))
         elif peak is not None and peak > 1:
             head = ("Served in %s while up to %d concurrent requests were open from this machine. "
                     "Duration on its own says nothing: compare it with the p50 in "
@@ -202,9 +202,9 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
             return head, actions
         if isinstance(value, int) and peak is not None and peak >= value:
             head = ("This machine was %d wide at %s against %s, so the wait was our own "
-                    "concurrency: the request was queued behind this machine's fan-out."
+                    "concurrency: the request was queued behind this machine's own concurrent requests."
                     % (peak, _clock(req.start), _width_words(value, source)))
-            actions.append("Narrow this machine's fan-out to fit %s, or move the wide part "
+            actions.append("Narrow this machine's concurrent requests to fit %s, or move the wide part "
                            "to the -background variant of the same model."
                            % _width_words(value, source))
         elif capacity and (capacity.get("now") or {}).get("in_use") is not None and (capacity.get("now") or {}).get("limit") is not None:
