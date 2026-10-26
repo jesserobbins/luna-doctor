@@ -395,6 +395,21 @@ def _sizing_changes(sizing_eval, agents) -> dict:
     return out
 
 
+def _advice_width(m: dict):
+    """(value, source) for the width the advice should aim at.
+
+    The account's number leads; a `--plan` declaration is the fallback; with
+    neither, the value is unknown and the advice names the command that
+    fetches it rather than quoting one plan's default as a universal fact.
+    """
+    capm = m.get("capacity") or {}
+    try:
+        served = capm if capm.get("provenance") == sources.PROV_ACCOUNT else None
+        return attribution.resolve_priority_concurrency(served, m.get("declared_plan"))
+    except Exception:
+        return (None, "unknown")
+
+
 def _impact(peak: int) -> str:
     if peak <= ADVISED_CONCURRENCY:
         return (f"no effect at your current peak of {peak} concurrent requests - this is headroom so "
@@ -439,12 +454,14 @@ LUNAROUTE_ROUTING_PREFACE = (
 
 LUNAROUTE_COMMAND_PREFACE = (
     "To inspect your LunaRoute setup, use the `lunaroute` command:\n"
-    "  lunaroute whoami          # who is signed in and on what plan\n"
+    "  lunaroute whoami          # who is signed in and which org (no plan number here)\n"
     "  lunaroute models --json   # what models are available on this account\n"
-    "  lunaroute usage --json    # remaining budget / concurrency headroom\n"
+    "  lunaroute-doctor capacity # the account's own priority concurrency\n"
     "If `lunaroute` is not on your PATH, run it via npx instead:\n"
     "  npx @lunaroute/cli whoami\n"
     "  npx @lunaroute/cli models --json\n"
+    "`lunaroute whoami` does not report a plan, and no `lunaroute` subcommand reports a "
+    "concurrency number: read those from `luna-doctor capacity`, which asks the account.\n"
     "The `fix` instructions below name the exact config key and desired value. "
     "Do not paste generated code — paste the instruction to your agent and let "
     "the agent apply it."
@@ -474,11 +491,15 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
         configs = sources.read_configs()
     cat = list(catalog_ids or [])
     bg = pick_background_model(reqs, cat)
+    # The width the advice aims at: the account's own priority concurrency, a
+    # declared plan's, or - when neither is known - the old conservative
+    # starting point, labelled as advice rather than as a gateway fact.
+    target = _advice_width(m)[0] or ADVISED_CONCURRENCY
     peak = m["peak_concurrency"]
     dead = m["by_outcome"].get("admission_timeout", 0)
     idle_stalls = m["by_outcome"].get("client_idle_timeout", 0)
     bgcount = m["by_tier"].get("background", 0)
-    wide = peak > ADVISED_CONCURRENCY or dead > 0
+    wide = peak > target or dead > 0
     evidence = _why(
         f"peak concurrency {peak},",
         f"{dead} request(s) blocked at admission," if dead else "",
@@ -495,18 +516,18 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
         idle_ms = _declared(pi_cfg.get("httpIdleTimeoutMs"))
         changes = []
 
-        if isinstance(limit, int) and limit > ADVISED_CONCURRENCY:
+        if isinstance(limit, int) and limit > target:
             changes.append({
                 "key": "globalConcurrencyLimit",
                 "file": PI_SUBAGENT_CFG,
                 "from": limit,
-                "to": ADVISED_CONCURRENCY,
+                "to": target,
                 "why": _why(evidence,
                             f"This machine caps children at {limit}, wider than the interactive "
                             f"admission width - {CAP_COPY}. Past that width, the excess concurrent "
                             f"requests park or overflow into background scheduling, where the first "
                             f"token takes about 600s."),
-                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISED_CONCURRENCY} "
+                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {target} "
                                 f"(was {limit}). This caps simultaneous child agents so your concurrent requests stay "
                                 f"within the interactive admission width instead of overflowing into background "
                                 f"scheduling. Restart the harness after the change."),
@@ -517,11 +538,11 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                 "key": "globalConcurrencyLimit",
                 "file": PI_SUBAGENT_CFG,
                 "from": "unset (default 20)",
-                "to": ADVISED_CONCURRENCY,
+                "to": target,
                 "why": _why(evidence,
                             "The default lets one run hold 20 concurrent requests, well past the interactive "
                             f"admission width - {CAP_COPY}."),
-                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {ADVISED_CONCURRENCY}. "
+                "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {target}. "
                                 f"The current default (20) will keep overflowing the interactive tier under load; lower it. "
                                 f"Have the agent read the existing file first, preserve other keys, then apply the change."),
                 "impact": _impact(peak),
@@ -593,16 +614,16 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
             except ValueError:
                 return True
 
-        if too_big(subs, ADVISED_CONCURRENCY):
+        if too_big(subs, target):
             changes.append({
                 "key": "env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
                 "file": CLAUDE_SETTINGS,
                 "from": subs if subs is not None else "unset (default 20)",
-                "to": str(ADVISED_CONCURRENCY),
+                "to": str(target),
                 "why": _why(evidence,
                             f"The default is 20 concurrent subagents, well past the interactive "
                             f"admission width - {CAP_COPY}."),
-                "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {ADVISED_CONCURRENCY}. "
+                "instruction": (f"Ask your agent: in {CLAUDE_SETTINGS} set CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS to {target}. "
                                 f"The default 20 keeps overflowing interactive headroom."),
                 "impact": _impact(peak),
             })
@@ -655,7 +676,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
         cx_cfg = configs.codex
         keys = {}
         if _declared(cx_cfg.get("agents.max_concurrent_threads_per_session")) is None:
-            keys["max_concurrent_threads_per_session"] = str(ADVISED_CONCURRENCY)
+            keys["max_concurrent_threads_per_session"] = str(target)
         if bg and wide and _declared(cx_cfg.get("agents.default_subagent_model")) is None:
             keys["default_subagent_model"] = json.dumps(bg)
         if keys:
@@ -716,9 +737,10 @@ def render_fix(recs, m, as_json: bool) -> None:
                 "silent_stalls": m["by_outcome"].get("client_idle_timeout", 0),
                 "background_requests": m["by_tier"].get("background", 0),
                 # The account's priority concurrency allowance, in concurrent
-                # requests. Null until the plan-derivation pass can read the
-                # account's plan: never 0, never a guessed default.
-                "priority_concurrency": None,
+                # requests. Resolved account-first, then a --plan declaration;
+                # still null when neither is known: never 0, never a guess.
+                "priority_concurrency": _advice_width(m)[0],
+                "priority_concurrency_source": _advice_width(m)[1],
             },
             "agents": recs,
         }, indent=2))
@@ -732,8 +754,23 @@ def render_fix(recs, m, as_json: bool) -> None:
     for line in _wrap(_lunaroute_preface_text(), 72):
         print(line)
     print()
-    print(f"Advice: keep concurrent requests at or under {ADVISED_CONCURRENCY} "
-          f"({CAP_COPY}).")
+    width, source = _advice_width(m)
+    if isinstance(width, int):
+        where = ("account" if source == "account"
+                 else f"declared plan {source[len('plan '):]}" if source.startswith("plan ")
+                 else source)
+        print(f"Advice: keep concurrent requests within {width} ({where}) - the interactive "
+              f"width this account admits, not a gateway-wide constant.")
+    else:
+        print("Advice: keep concurrent requests within your priority concurrency allowance. This "
+              "machine cannot read that number from its logs: get it from the account with "
+              "`luna-doctor capacity --online`, or declare one with `--plan <name or number>`.")
+    if not m.get("requests"):
+        print()
+        print("Nothing was measured in this window: no agent log held a request, so everything "
+              "below is the harness default being audited, not a measurement of your traffic. "
+              "Run `luna-doctor discover` to find a store, then re-run before treating any of "
+              "this as urgent.")
     print()
     for group in recs:
         n = len(group["changes"])
@@ -761,6 +798,22 @@ def render_fix(recs, m, as_json: bool) -> None:
             for line in _wrap(ch["instruction"], 68):
                 print("    " + line)
         print()
+    # The loop does not end at advice: a change nobody verified is a change
+    # whose effect nobody knows. The window before the change is already in
+    # the same logs, so the check costs nothing and needs no network.
+    print("=" * 72)
+    print("verify")
+    print("=" * 72)
+    print()
+    for line in _wrap(
+            "After restarting the harness, run: luna-doctor analyze --baseline prev", 70):
+        print("  " + line)
+    for line in _wrap(
+            "Success looks like: 0 request(s) blocked at admission, 0 silent stall(s), and no "
+            "429s in the new window - with enough traffic in both windows for the comparison to "
+            "mean anything (it says inconclusive when there is not).", 70):
+        print("  " + line)
+    print()
 
 
 def _wrap(text: str, width: int) -> list:
@@ -793,6 +846,11 @@ def cmd_fix(args) -> int:
     reqs = collect(hours, harnesses, getattr(args, "pi_root", None),
                    getattr(args, "claude_root", None), now=now)
     m = analyse(reqs, hours)
+    m["declared_plan"] = getattr(args, "plan", None)
+    try:
+        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
+    except Exception:
+        m["capacity"] = {"provenance": sources.PROV_UNKNOWN}
     # One combined snapshot feeds the advice: the harness configs with
     # provenance, and the catalog (cached by default; fetched only with
     # --online). A collection failure degrades to unset values and an empty

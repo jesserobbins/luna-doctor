@@ -3,12 +3,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class NoCapAsFact(unittest.TestCase):
-    # The gateway's interactive cap is per account and only a load test can
-    # see it, so no scanned file may state 10 as that cap - as a fact, a cap
-    # clause, or a limit the reader is told to stay under.
+    # The gateway's interactive cap is per account and only the account itself
+    # (or a load test) can see it, so no scanned file may state one as that cap
+    # - as a fact, a cap clause, or a limit the reader is told to stay under.
+    # The width is deliberately not pinned to one number: the earlier pass was
+    # too narrow to catch "at or under 10" after it had already shipped "8",
+    # and advice that generalises the mistake would generalise past the guard.
     FORBIDDEN = re.compile(
-        r"(cap is 10|burst cap is 10|cap of 10|hard cap"
-        r"|at or under 10|cap: 10|10-request cap|limit of 10)", re.I)
+        r"(cap is \d+|burst cap is \d+|cap of \d+|hard cap"
+        r"|at or under \d+|cap: \d+|\d+-request cap|limit of \d+"
+        r"|keep concurrent requests at or under)", re.I)
 
     def test_no_file_states_ten_as_a_gateway_fact(self):
         for rel in ("luna_doctor/cli.py", "luna_doctor/_fix_block.py",

@@ -47,6 +47,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from luna_doctor import attribution
+from luna_doctor import baseline
 from luna_doctor import plan
 from luna_doctor import report
 from luna_doctor import sizing
@@ -97,6 +99,16 @@ ADVISED_CONCURRENCY = 8         # our recommendation: below the cap, with headro
 CAP_COPY = ("the gateway admits roughly this many interactive requests at once; "
             "the admitted width is specific to the account and cannot be read "
             "from these logs")
+
+# The attribution verdict, in words a reader can act on. The slug is the stable
+# contract (--json); these strings are what a human sees.
+_VERDICT_WORDS = {
+    "you": "this machine",
+    "your-org": "the account (shared across your org)",
+    "the-gateway": "the gateway",
+    "not-concurrency": "not concurrency",
+    "unknown": "unknown",
+}
 
 # Harness store locations, the gateway host and the swamp knob defaults live
 # in sources.py - the data-collection layer - and are imported above.
@@ -1840,6 +1852,50 @@ def analyse(reqs: list[Request], window_hours: float) -> dict:
 
 
 # ---- verdict ----------------------------------------------------------------
+def _priority_for_advice(m: dict) -> tuple:
+    """(value, source) for the account's interactive width, or (None, 'unknown').
+
+    The account's own number wins; a `--plan` declaration is the fallback for
+    when the capacity payload is unreachable; anything else is unknown. No
+    constant stands in for a missing number: the advice that depends on it
+    changes shape instead of quoting a figure nobody measured.
+    """
+    capm = m.get("capacity") or {}
+    served = (capm if capm.get("provenance") == sources.PROV_ACCOUNT else None)
+    try:
+        return attribution.resolve_priority_concurrency(served, m.get("declared_plan"))
+    except Exception:
+        return (None, "unknown")
+
+
+def _priority_phrase(value, source: str) -> str:
+    """How the width is named in copy: whose number it is, never a gateway fact."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return "your priority concurrency allowance"
+    if source == "account":
+        return f"the account's priority concurrency ({value}, account)"
+    name = source[len("plan "):] if source.startswith("plan ") else source
+    return f"your declared plan's priority concurrency ({value}, declared plan {name})"
+
+
+def _advice_line(m: dict) -> str:
+    """The one sentence every pressured report ends with.
+
+    It used to end with a hardcoded width, which is one plan's default wearing
+    a ruler: the account's own number leads when it is known, and when it is
+    not the sentence names the command that fetches it rather than inventing a
+    figure.
+    """
+    value, source = _priority_for_advice(m)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (f"Adjust: keep concurrent requests within {_priority_phrase(value, source)}, "
+                f"and move anything wider to the -background variant of the same model.")
+    return ("Adjust: keep concurrent requests within your priority concurrency allowance - these "
+            "logs cannot tell you what it is. Read it from the account with "
+            "`luna-doctor capacity --online`, or declare it with `--plan <name or number>` - and "
+            "move anything wider to the -background variant of the same model.")
+
+
 def verdict(m: dict) -> tuple[str, list[str], int]:
     """Return (headline, adjustments, exit_code)."""
     adj: list[str] = []
@@ -1883,9 +1939,12 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     if m["pressure_windows"]:
         pressure = True
         w = m["longest_pressure_window"] or {}
+        pv, _psrc = _priority_for_advice(m)
+        width = (f"more than {pv} concurrent requests" if isinstance(pv, int) and not isinstance(pv, bool)
+                 else "more concurrent requests than the account's priority concurrency admits")
         adj.append(
-            f"{m['pressure_windows']} window(s) held more than {ADVISED_CONCURRENCY} concurrent "
-            f"requests at once; the longest lasted {fmt(w.get('seconds'), 's')} and peaked at "
+            f"{m['pressure_windows']} window(s) held {width} at once; the longest lasted "
+            f"{fmt(w.get('seconds'), 's')} and peaked at "
             f"{fmt(w.get('max_concurrent'))} concurrent. {CAP_COPY[0].upper()}{CAP_COPY[1:]}; "
             f"past that width, requests park or overflow into background scheduling "
             f"rather than fail."
@@ -2072,16 +2131,35 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     if not pressure and not adj:
         return f"No concurrency pressure across {n} requests.", ["Nothing to adjust."], 0
 
-    head = (
-        f"Concurrency pressure across {n} requests: {dead} request(s) were blocked at admission, "
-        f"{idle} silent stall(s), peak concurrency {m['peak_concurrency']}."
-        if pressure
-        else f"{n} requests, none blocked at admission, peak concurrency {m['peak_concurrency']}."
-    )
-    adj.append(
-        f"Adjust: keep concurrent requests at or under {ADVISED_CONCURRENCY}, and move "
-        f"anything wider to the -background variant of the same model."
-    )
+    # The headline is built from the classes that actually set the pressure
+    # flag. It used to name only blocked-at-admission and silent stalls, so a
+    # window whose whole story was 429s read "0 request(s) were blocked at
+    # admission, 0 silent stall(s)" while exiting 1 - the one line a reader
+    # trusts most contradicted the verdict.
+    parts = []
+    if dead:
+        parts.append(f"{dead} request(s) were blocked at admission")
+    if idle:
+        parts.append(f"{idle} silent stall(s)")
+    if ocl:
+        parts.append(f"{ocl} request(s) rejected at the account's concurrent-request limit")
+    if rl:
+        parts.append(f"{rl} request(s) rejected with 429")
+    storms_all = m.get("timeout_storms") or []
+    if storms_all and not parts:
+        parts.append(f"{len(storms_all)} synchronous retry cohort(s)")
+    if m["pressure_windows"] and not parts:
+        parts.append(f"{m['pressure_windows']} window(s) wider than the account's priority concurrency")
+    if pressure:
+        if not parts:
+            parts.append("pressure in the window")
+        head = (f"Concurrency pressure across {n} requests: " + ", ".join(parts)
+                + f", peak concurrency {m['peak_concurrency']}.")
+    else:
+        # Nothing set the pressure flag: never open with the words "concurrency
+        # pressure" on a window that has none.
+        head = f"{n} requests, none blocked at admission, peak concurrency {m['peak_concurrency']}."
+    adj.append(_advice_line(m))
     return head, adj, (1 if pressure else 0)
 
 
@@ -2116,8 +2194,14 @@ def _excluded_rows(m: dict) -> list:
     return [report.Row("excluded", "\n".join(lines))]
 
 
-def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
+def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
     """Turn analyse() metrics into the Report every renderer prints.
+
+    `att` is an attribution.Attribution (optional): when present it becomes the
+    first section, because the question it answers - was the wall this machine,
+    the account, or the gateway - comes before any evidence for it. Its rows
+    keep their own labels, and its actions join the adjustments, so a plain or
+    pretty renderer needs no change to carry them.
 
     The rows keep the analysis order - traffic first, then the admission and
     saturation evidence, then the caveats - so the plain renderer says what
@@ -2238,6 +2322,13 @@ def build_report(m: dict, head: str, adj: list[str]) -> report.Report:
     sections = [report.Section(title, rows)
                 for title, rows in (("traffic", traffic), ("pressure", pressure),
                                     ("notes", notes)) if rows]
+    if att is not None:
+        rows = [report.Row("the wall you hit", _VERDICT_WORDS.get(att.verdict, att.verdict), "bad"
+                           if att.verdict in ("you", "your-org") else "normal"),
+                report.Row("why", att.headline)]
+        rows.extend(report.Row(label, value) for label, value in att.rows)
+        sections.insert(0, report.Section("attribution", rows))
+        adj = list(adj) + list(att.actions)
     return report.Report(headline=head, sections=sections, adjustments=list(adj))
 
 
@@ -2327,7 +2418,7 @@ def print_report(rep: report.Report, args) -> None:
 
 
 def render(m: dict, head: str, adj: list[str], as_json: bool,
-           stored: dict | None = None, args=None) -> None:
+           stored: dict | None = None, args=None, att=None) -> None:
     if as_json:
         # A zero-request window returns from verdict() before the swamp
         # scratch key is consumed, and the envelope must never ship it:
@@ -2338,12 +2429,18 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
             "adjustments": adj,
             "metrics": m,
         }, contract=CONTRACT)
+        if att is not None:
+            # Additive: the verdict, its sentence and its labelled rows. The
+            # envelope's schema stays 4 - nothing was renamed or removed.
+            doc["attribution"] = {"verdict": att.verdict, "headline": att.headline,
+                                  "rows": [{"label": k, "value": v} for k, v in att.rows],
+                                  "actions": list(att.actions)}
         if stored:
             doc["store"] = {"path": stored["path"], "ledger": stored["ledger"],
                             "findings": len(stored["findings"])}
         print(json.dumps(doc, indent=2))
         return
-    print_report(build_report(m, head, adj), args)
+    print_report(build_report(m, head, adj, att=att), args)
 
 
 # ---- live probe -------------------------------------------------------------
@@ -3036,6 +3133,11 @@ def cmd_capacity(args) -> int:
     if cap is None and online:
         print(f"luna-doctor: capacity unavailable ({note}); reported unknown",
               file=sys.stderr)
+    elif cap is None:
+        # A cold cache is not a failure and must not be silent: exit 2 says
+        # "no data", so the way to get data has to be on screen.
+        print(f"luna-doctor: no capacity on disk yet ({note}); reported unknown. "
+              f"Fetch it with: luna-doctor capacity --online", file=sys.stderr)
     if args.json:
         payload = ({"capacity": cap.to_dict()} if cap is not None
                    else {"capacity": {"provenance": sources.PROV_UNKNOWN,
@@ -3192,6 +3294,15 @@ def _default_run(ap) -> int:
     print()
     print(WELCOME)
     code = _run(ap.parse_args(["analyze", "--since", "1h"]))
+    if code == 2:
+        # Nothing was measured, so there is nothing to draw: a picture and a
+        # "this run read the last hour of your logs" claim on a machine with
+        # no logs is a lie with a timestamp on it.
+        print()
+        print("No agent log held a request in the last hour, so no chart was drawn. "
+              "Run `luna-doctor discover` to see which stores exist on this machine, "
+              "or `luna-doctor analyze --since 7d` for a wider window.")
+        return code
     chart_args = ap.parse_args(["chart", "--since", "1h"])
     try:
         _run(chart_args)
@@ -3234,6 +3345,10 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--store-dir", default=None, metavar="DIR",
                    help="where run extractions are written (default ~/.luna-doctor/store)")
     a.add_argument("--no-store", action="store_true", help="do not persist this run")
+    a.add_argument("--baseline", default=None, metavar="prev",
+                   help="compare with the window before this one (only 'prev' is supported) "
+                        "and print a change: section")
+    plan.add_plan_arg(a)
     a.add_argument("--json", action="store_true")
     _add_copy(a)
     _add_network(a)
@@ -3293,6 +3408,7 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--json", action="store_true")
     _add_copy(f)
     _add_network(f)
+    plan.add_plan_arg(f)
     f.set_defaults(func=None)
 
     ch = sub.add_parser("chart", help="write the chart as a standalone SVG, plus a pasteable PNG")
@@ -3489,6 +3605,10 @@ def cmd_analyze(args) -> int:
     now = time.time()
     reqs = collect(hours, harnesses, pi_roots, claude_roots, now=now)
     m = analyse(reqs, hours)
+    # A declared plan is the fallback for the account's own number, never an
+    # override of it: attribution.resolve_priority_concurrency decides which
+    # one leads, and the report says which it used.
+    m["declared_plan"] = getattr(args, "plan", None)
     # swamp enrichment (additive, never fails; installed is not in use, so
     # only a swamp with activity in the window contributes anything)
     try:
@@ -3540,6 +3660,37 @@ def cmd_analyze(args) -> int:
                        "reason": (f"sizing evaluation failed: "
                                   f"{type(e).__name__}: {e}")[:200]}
     head, adj, code = verdict(m)
+    # The attribution verdict: was the wall this machine, the account, or the
+    # gateway. It is computed from the same measured window plus the account's
+    # cached capacity, and it never decides the exit code - the verdict above
+    # does, exactly as before.
+    att = None
+    try:
+        capm = m.get("capacity") or {}
+        served = capm if capm.get("provenance") == sources.PROV_ACCOUNT else None
+        att = attribution.attribute(m, served, _priority_for_advice(m))
+    except Exception as e:
+        print(f"luna-doctor: attribution unavailable: {type(e).__name__}: {e}", file=sys.stderr)
+    # The verification stage: the same analysis over the equal-length window
+    # immediately before this one. Cache and network are untouched - both
+    # windows come out of the same log stores - and a verdict below the
+    # sample floor is reported as inconclusive rather than as a win.
+    change = None
+    if getattr(args, "baseline", None):
+        try:
+            p0, p1 = baseline.previous_window(now, hours)
+            prev_reqs = collect(hours, harnesses, pi_roots, claude_roots, now=p1)
+            prev = analyse(prev_reqs, hours)
+            change = {"rows": baseline.change_rows(m, prev),
+                      "word": baseline.change_verdict(m, prev)}
+        except Exception as e:
+            print(f"luna-doctor: baseline unavailable: {type(e).__name__}: {e}", file=sys.stderr)
+    if change is not None:
+        rows = " · ".join(f"{label}: {value}" for label, value in change["rows"]
+                         if label != "change")
+        adj.append(f"change, against the window before this one: {rows}.")
+        word, reason = change["word"]
+        adj.append(f"change verdict: {word} - {reason}")
     stored = None
     if m["requests"] and not getattr(args, "no_store", False):
         try:
@@ -3549,7 +3700,7 @@ def cmd_analyze(args) -> int:
         except (OSError, ValueError, OverflowError) as e:
             # A read-only or unwritable store must not lose the report.
             print(f"luna-doctor: could not persist run: {e}", file=sys.stderr)
-    render(m, head, adj, args.json, stored=stored, args=args)
+    render(m, head, adj, args.json, stored=stored, args=args, att=att)
     return code
 
 

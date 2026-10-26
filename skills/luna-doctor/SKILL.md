@@ -82,12 +82,13 @@ answer is that concurrency is not the problem.
 
 ## What to recommend
 
-1. **Keep concurrent requests at or under 8.** The gateway admits roughly this many
-   interactive requests at once; the admitted width is specific to the account
-   and cannot be read from these logs. Anything past that width is demoted to
-   background, where the answer can take ten minutes to start. Never state a cap as a
-   gateway fact: the number is per account — `luna-doctor capacity` reports the
-   account's real one.
+1. **Keep concurrent requests within your priority concurrency allowance.** The
+   admitted width is specific to the account and cannot be read from these logs;
+   `luna-doctor capacity` reports the account's own number, and `--plan` declares
+   one when the account cannot be reached. Anything past that width is demoted to
+   background, where the answer can take ten minutes to start. Never state a
+   width as a gateway fact, and never quote one plan's default as if it were
+   yours.
 2. **Move anything wider to the `-background` variant** of the same model. More
    concurrency, much slower SLA. That is the trade, and it is deliberate.
    `luna-doctor fix` emits the exact key for whichever agent the user runs.
