@@ -100,11 +100,13 @@ CAP_COPY = ("the gateway admits roughly this many interactive requests at once; 
             "the admitted width is specific to the account and cannot be read "
             "from these logs")
 
-# The attribution verdict, in words a reader can act on. The slug is the stable
-# contract (--json); these strings are what a human sees.
+# The attribution verdict's words. The slugs are the stable contract (--json);
+# these strings are what a human sees, and they are deliberately the same words
+# the skill documents, so an agent quoting the line and a reader quoting the
+# skill cannot drift apart.
 _VERDICT_WORDS = {
-    "you": "this machine",
-    "your-org": "the account (shared across your org)",
+    "you": "you (this machine)",
+    "your-org": "your org (the account)",
     "the-gateway": "the gateway",
     "not-concurrency": "not concurrency",
     "unknown": "unknown",
