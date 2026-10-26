@@ -1,39 +1,40 @@
 """Before and after: the window just before this one, read beside it.
 
-`luna-doctor fix` ends at advice. A user applies a change and has no way to
-learn whether it helped, though both halves of the answer are already in the
-same local logs: the window they are reading, and the equal-length window
-immediately before it. This module builds that pairing and the honest
-reading of it. It reads no clock, no file and no socket -- every timestamp
-arrives as an argument -- so a test of the arithmetic is deterministic.
+`luna-doctor fix` ends at advice. A user applies a change. Nothing then
+tells that user whether the change helped, although both halves of the answer
+already sit in the same local logs. Those halves are the window the user is
+reading, and the equal-length window immediately before it. This module
+builds that pairing and the honest reading of it. It reads no clock, no file
+and no socket, because every timestamp arrives as an argument. A test of the
+arithmetic is deterministic for that reason.
 
 Three rules shape every string here:
 
-- The floor decides whether the tool may speak. The verdict runs on the
-  smaller of the two windows' request counts; under the floor it is
+- The floor decides whether the tool can speak. The verdict runs on the
+  smaller of the two windows' request counts. Under the floor the verdict is
   `inconclusive`, because two or three samples must never print as an
   improvement.
 - Pressure decides the verdict, in a fixed precedence: blocked at admission,
-  then silent stalls, then 429s; a tie falls through to the next signal.
-  Peak concurrency and admission conversion are reported beside the verdict
-  and never decide it alone.
+  then silent stalls, then 429s. A tie falls through to the next signal.
+  The tool reports peak concurrency and admission conversion beside the
+  verdict, and they never decide it alone.
 - Nothing implies causation. The two windows sit next to each other in the
-  logs, so the counts moving is the whole claim, as of the window edge; no
+  logs, so the counts moving is the whole claim, as of the window edge. No
   string here says `since`, `because` or `fixed`.
 
-A missing denominator is never drawn as a number: no requests reads
-`— (no requests)` and a null conversion reads `unknown`. Cells read
+The tool never draws a missing denominator as a number. No requests reads
+`-- (no requests)`, and a null conversion reads `unknown`. Cells read
 previous -> current with an ASCII arrow, because this text travels through
-pipes and locales that may not carry a pointing glyph.
+pipes and locales that can lack a pointing glyph.
 """
 
 from __future__ import annotations
 
 SECONDS_PER_HOUR = 3600.0
 
-# An em dash, not a zero: 0% is a measurement of a window that had traffic,
-# and a window with no denominator is not one.
-NO_REQUESTS = "\u2014 (no requests)"
+# A dash, not a zero: 0% is a measurement of a window that had traffic, and
+# a window with no denominator is not one.
+NO_REQUESTS = "-- (no requests)"
 UNKNOWN = "unknown"
 ARROW = " -> "
 
@@ -53,10 +54,11 @@ FLOOR = 8
 def previous_window(now_ts, hours):
     """The equal-length window immediately before the current one.
 
-    The current window is [now_ts - hours * 3600, now_ts]; this returns its
-    predecessor as (start_ts, end_ts), which ends exactly where the current
-    one starts -- no gap, no overlap, however many hours are asked for.
-    Fractional hours are ordinary: 0.5 gives a 1800-second window.
+    The current window is [now_ts - hours * 3600, now_ts]. This function
+    returns its predecessor as (start_ts, end_ts). The predecessor ends
+    exactly where the current one starts, with no gap and no overlap, no
+    matter how many hours the caller asks for. Fractional hours are
+    ordinary, and 0.5 gives a 1800-second window.
     """
     span = hours * SECONDS_PER_HOUR
     end = now_ts - span
@@ -64,7 +66,7 @@ def previous_window(now_ts, hours):
 
 
 def _requests(metrics):
-    """A window's request count; an absent one counts as no traffic."""
+    """A window's request count. An absent count is no traffic."""
     return int((metrics or {}).get("requests") or 0)
 
 
@@ -79,10 +81,10 @@ def _peak(metrics):
 def _admitted_cell(metrics):
     """One side's admission conversion, or why there is no percentage.
 
-    A percentage needs a denominator: a window with no requests reads
-    `— (no requests)`, never 0 and never nan. A null percentage in a window
-    that did carry traffic is `unknown` -- the dict said nothing, so the
-    tool says nothing rather than inventing 0%.
+    A percentage needs a denominator. A window with no requests reads
+    `-- (no requests)`, and never 0 and never nan. A null percentage in a
+    window that did carry traffic is `unknown`. The dict said nothing, so
+    the tool says nothing rather than inventing 0%.
     """
     conversion = (metrics or {}).get("admission_conversion") or {}
     conv = conversion.get("interactive") or {}
@@ -101,10 +103,10 @@ def change_rows(current, previous, floor=FLOOR):
     """The comparison as (label, value) rows, in their fixed order.
 
     Every measured cell reads previous -> current. The last row, "change",
-    is the exception by design: its value is the verdict word itself --
-    `better`, `worse`, `unchanged` or `inconclusive` -- because the row is
-    the answer, not a measurement. `floor` is passed through to
-    change_verdict() unchanged.
+    is the exception by design. Its value is the verdict word itself,
+    `better`, `worse`, `unchanged` or `inconclusive`, because the row is the
+    answer and not a measurement. `floor` passes through to change_verdict()
+    unchanged.
     """
     rows = [("requests", _pair(_requests(previous), _requests(current)))]
     for label, outcome in PRESSURES:
@@ -118,16 +120,16 @@ def change_rows(current, previous, floor=FLOOR):
 
 
 def change_verdict(current, previous, floor=FLOOR):
-    """The verdict word and one plain sentence saying how it was reached.
+    """The verdict word and one plain sentence that says how it was reached.
 
-    `current` and `previous` are analyse() dicts. The floor is applied to
-    the smaller of the two request counts: under it the word is
-    `inconclusive` and the reason names the small count, because a window
-    that thin cannot carry a claim either way. At or above it, the first
-    pressure signal that moved decides -- see PRESSURES for the order -- and
-    the counts that moved it are quoted. When none of the three moved, the
-    windows read `unchanged`; peak concurrency and admission conversion
-    appear in the rows and never in this word.
+    `current` and `previous` are analyse() dicts. The floor applies to the
+    smaller of the two request counts. Under the floor the word is
+    `inconclusive`, and the reason names the small count, because a window
+    that thin cannot carry a claim either way. At or above the floor, the
+    first pressure signal that moved decides, in the order that PRESSURES
+    gives. The reason quotes the counts that moved it. When none of the
+    three moved, the windows read `unchanged`. Peak concurrency and
+    admission conversion appear in the rows and never in this word.
     """
     small = min(_requests(previous), _requests(current))
     if small < floor:

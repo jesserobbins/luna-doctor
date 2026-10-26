@@ -4,7 +4,7 @@ The module exists to stop one specific lie: a two-sample "win" printed as an
 improvement. So most of what follows is about what the comparison *refuses*
 to say -- the floor that makes a thin window `inconclusive`, the tie that
 falls through to the next pressure signal, the missing denominator that
-reads `— (no requests)` instead of 0%, and the copy that may not claim
+reads `-- (no requests)` instead of 0%, and the copy that may not claim
 causation or bill the wrong quantity.
 
 Everything is pure: the windows are built here, the clock never is.
@@ -30,7 +30,7 @@ FORBIDDEN = ("credit", "spend", "token", "probe", "load-test", "compare",
              "because", "caused", "proves", "fixed", "since")
 
 COUNT_CELL = re.compile(r"^\d+ -> \d+$")
-PERCENT_SIDE = r"(?:\d+\.\d%|\u2014 \(no requests\)|unknown)"
+PERCENT_SIDE = r"(?:\d+\.\d%|-- \(no requests\)|unknown)"
 CONVERSION_CELL = re.compile(r"^%s -> %s$" % (PERCENT_SIDE, PERCENT_SIDE))
 
 NOW = 1_700_000_000.0
@@ -314,7 +314,7 @@ class Rows(unittest.TestCase):
     def test_a_window_with_no_requests_has_no_percentage(self):
         empty = window(requests=0, peak_concurrency=0, admitted_pct=None)
         rows = rows_by_label(empty, empty)
-        self.assertEqual("— (no requests) -> — (no requests)",
+        self.assertEqual("-- (no requests) -> -- (no requests)",
                          rows["admission conversion"])
         self.assertEqual("0 -> 0", rows["requests"])
 
@@ -323,14 +323,14 @@ class Rows(unittest.TestCase):
         empty = window(requests=0, peak_concurrency=0, admitted_pct=None)
         rows = rows_by_label(current, empty)
         self.assertEqual("0 -> 12", rows["requests"])
-        self.assertEqual("— (no requests) -> 75.0%", rows["admission conversion"])
+        self.assertEqual("-- (no requests) -> 75.0%", rows["admission conversion"])
 
     def test_no_requests_on_the_current_side(self):
         previous = window(requests=12, admitted_pct=75.0)
         empty = window(requests=0, peak_concurrency=0, admitted_pct=None)
         rows = rows_by_label(empty, previous)
         self.assertEqual("12 -> 0", rows["requests"])
-        self.assertEqual("75.0% -> — (no requests)", rows["admission conversion"])
+        self.assertEqual("75.0% -> -- (no requests)", rows["admission conversion"])
 
     def test_the_change_row_carries_the_verdict_word(self):
         for current, previous in ((window(admission_timeout=0),
@@ -368,11 +368,10 @@ class Copy(unittest.TestCase):
         self.assertEqual(sorted(FORBIDDEN), sorted(forbidden_hits(planted)),
                          "the scan must catch every forbidden word it claims")
 
-    def test_text_is_ascii_except_the_no_requests_marker(self):
+    def test_text_is_ascii(self):
         for text in emitted_strings():
-            bare = text.replace(baseline.NO_REQUESTS, "")
-            self.assertTrue(bare.isascii(),
-                            "non-ASCII outside the no-requests marker: %r" % text)
+            self.assertTrue(text.isascii(),
+                            "non-ASCII in an emitted string: %r" % text)
             self.assertNotIn("\u2192", text, "arrow glyph in %r" % text)
 
     def test_no_ansi_and_no_emoji(self):

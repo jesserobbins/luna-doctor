@@ -213,7 +213,8 @@ class YourOrgVerdict(unittest.TestCase):
                         by_outcome={"completed": 2, "rate_limited": 2}),
             account(12, now=busy_now()), (12, "account"))
         self.assertEqual(VERDICT_YOUR_ORG, att.verdict)
-        self.assertIn("this machine was not the width, the account was", att.headline)
+        self.assertIn("This machine was not the width, the account was",
+                      att.headline)
         self.assertIn("2 concurrent requests (this machine)", att.headline)
         self.assertIn("in use 12 of 12 priority concurrent requests (account)",
                       att.headline)
@@ -260,7 +261,8 @@ class YourOrgVerdict(unittest.TestCase):
                         by_outcome={"completed": 1, "org_concurrency_limit": 3}),
             None, (6, "plan apex"))
         self.assertEqual(VERDICT_YOUR_ORG, att.verdict)
-        self.assertIn("this machine was not the width, the account was", att.headline)
+        self.assertIn("This machine was not the width, the account was",
+                      att.headline)
         self.assertIn("refused with CONCURRENT_REQUEST_LIMIT_EXCEEDED",
                       dict(att.rows)["refused at the account limit"])
 
@@ -308,7 +310,7 @@ class NotConcurrencyVerdict(unittest.TestCase):
                                     by_outcome={"completed": 20}),
                         account(12, now=quiet_now()), (12, "account"))
         self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)
-        self.assertIn("concurrency is not what is wrong here", att.headline)
+        self.assertIn("Concurrency is not what is wrong here", att.headline)
 
     def test_refusals_the_account_never_corroborated(self):
         att = attribute(local_store(requests=20, peak=2,
