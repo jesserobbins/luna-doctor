@@ -30,6 +30,8 @@ luna-doctor explain                # one request: what it waited for and whose r
 luna-doctor explain --blocked      # the most recent request the gateway refused
 luna-doctor explain --slowest --last 5   # the five longest, by duration
 luna-doctor explain <id>           # a response id, session id or run id
+luna-doctor watch                  # during an incident: one line per state change
+luna-doctor analyze --for-issue    # one redacted, datable block for a ticket
 luna-doctor capacity               # the account's plan and priority concurrency
 luna-doctor fix                    # copy-paste config per agent, justified by the numbers
 luna-doctor fix --agent pi         # one agent at a time
@@ -62,6 +64,23 @@ Selection, and the difference matters when you quote it:
 
 `explain` exits `1` when the request it explained was refused or stalled, `0`
 when it was served, `2` when the window holds nothing to explain.
+
+## Watching an incident, and handing it to someone
+
+`watch` samples a short lookback (15 minutes by default) on an interval and
+prints **one line per state change**: the pressure classes that moved, the peak
+this machine held, and the account's occupancy when a capacity payload covers
+the moment. A terminal gets a redrawn frame; a pipe gets append-only ASCII
+lines, because cursor control down a pipe is how a log file fills with escape
+sequences. `Ctrl-C` prints a three-line summary and exits with the verdict of
+the last sample; `--count N` stops on its own and `--once` prints a single
+sample. It reads logs only - nothing is sent anywhere.
+
+`analyze --for-issue` replaces the report with one paste-safe block: tool and
+version, the window in UTC, which stores were read, the attribution verdict, the
+headline and the labelled rows. Absolute home paths, emails and long opaque
+tokens are redacted before they reach stdout. Use it when the user is taking
+this to LunaRoute support, a GitHub issue, or a colleague who was not there.
 
 ## Rendering
 

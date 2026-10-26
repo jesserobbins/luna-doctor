@@ -40,6 +40,8 @@ luna-doctor analyze --style plain       # undecorated text, for a paste or a pip
 luna-doctor explain           # one request: what it waited for, and whose room it was
 luna-doctor explain --blocked # the newest request the gateway refused
 luna-doctor explain --slowest --last 5  # the five longest by duration
+luna-doctor watch             # during an incident: one line per state change, summary on Ctrl-C
+luna-doctor analyze --for-issue  # one redacted, datable block for a support ticket
 luna-doctor capacity          # the account's plan and priority concurrency (cached)
 luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # …or one agent at a time (pi | claude-code | codex | swamp)
@@ -154,6 +156,24 @@ at all — and the numbers behind it are labelled by whose they are.
 No flag explains the request that went wrong (refused or stalled), longest
 first; `--blocked` explains the newest *refused* one; `--slowest` goes strictly
 by duration; and a bare id (response, session or run) explains that one.
+
+### `watch` — the incident, live
+
+`watch` samples a 15-minute lookback on an interval and prints one line per
+state change: which pressure classes moved, the peak this machine held, and the
+account's occupancy when a capacity payload covers the moment. On a terminal it
+redraws a frame; down a pipe it appends ASCII lines only, never cursor control.
+`Ctrl-C` prints a three-line summary and exits with the last sample's verdict —
+`--count N` and `--once` stop on their own, and `--json` emits one object per
+sample for a script.
+
+### `analyze --for-issue` — a block you can hand over
+
+The same evidence as one paste-safe block: tool and version, the UTC window,
+which stores were read, the attribution verdict, the headline and the labelled
+rows. Absolute home paths, emails and long opaque tokens are redacted before
+they reach stdout, so the artefact can go into a support ticket or an issue
+without carrying the shape of the machine it came from.
 
 ### `chart` — one picture
 

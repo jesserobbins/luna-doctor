@@ -48,7 +48,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from luna_doctor import attribution
+from luna_doctor import bundle as bundle_mod
 from luna_doctor import explain
+from luna_doctor import watch as watch_mod
 from luna_doctor import baseline
 from luna_doctor import plan
 from luna_doctor import report
@@ -3364,6 +3366,22 @@ def main(argv: list[str] | None = None) -> int:
     plan.add_plan_arg(ex)
     ex.set_defaults(func=cmd_explain)
 
+    w = sub.add_parser("watch",
+                       help="watch the last few minutes live: one line per state change, and a "
+                            "summary when you stop it")
+    w.add_argument("--since", default="15m", help="lookback window per sample (default 15m)")
+    w.add_argument("--now", action="store_true", help="last 15 minutes (the default)")
+    w.add_argument("--interval", type=int, default=10, metavar="SECONDS",
+                   help="seconds between samples (default 10)")
+    w.add_argument("--count", type=int, default=0, metavar="N",
+                   help="stop after N samples (default: until Ctrl-C)")
+    w.add_argument("--once", action="store_true", help="print one sample and stop")
+    w.add_argument("--harness", default="pi,claude-code")
+    w.add_argument("--json", action="store_true", help="print each sample as JSON lines")
+    _add_style(w)
+    plan.add_plan_arg(w)
+    w.set_defaults(func=cmd_watch)
+
     a = sub.add_parser("analyze", help="explain what your traffic is doing to your concurrency")
     a.add_argument("--since", default=None, help="window, e.g. 24h, 90m, 7d (default 24h)")
     a.add_argument("--now", action="store_true", help="last 15 minutes")
@@ -3379,6 +3397,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="compare with the window before this one (only 'prev' is supported) "
                         "and print a change: section")
     plan.add_plan_arg(a)
+    a.add_argument("--for-issue", action="store_true",
+                   help="print one redacted, datable block for a support ticket or an issue "
+                        "instead of the report")
     a.add_argument("--json", action="store_true")
     _add_copy(a)
     _add_network(a)
@@ -3508,6 +3529,8 @@ def _run(args) -> int:
         return cmd_chart(args)
     if args.cmd == "explain":
         return cmd_explain(args)
+    if args.cmd == "watch":
+        return cmd_watch(args)
     return args.func(args)
 
 
@@ -3618,6 +3641,102 @@ def _capacity_metrics(since: float, until: float, m: dict) -> dict:
         block["local_outcomes"] = dict(m.get("by_outcome") or {})
         block["counts_exclude"] = CAPACITY_COUNTS_EXCLUDE
     return block
+
+
+def _watch_sample(args, now_ts=None):
+    """One sample: collect the lookback window, analyse it, attach the account.
+
+    The lookback is short by design - a live view should show the last few
+    minutes, not a day - and it is a plain log read: no network, no store write.
+    """
+    hours = window_hours(args.since, args.now)
+    harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
+    now = now_ts if now_ts is not None else time.time()
+    reqs = collect(hours, harnesses, None, None, now=now)
+    m = analyse(reqs, hours)
+    m["declared_plan"] = getattr(args, "plan", None)
+    try:
+        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
+    except Exception:
+        m["capacity"] = {"provenance": sources.PROV_UNKNOWN}
+    capm = m.get("capacity") or {}
+    served = capm if capm.get("provenance") == sources.PROV_ACCOUNT else None
+    return m, served
+
+
+def cmd_watch(args) -> int:
+    """Live view: one line per state change, until Ctrl-C or --count.
+
+    A terminal gets a redrawn frame; a pipe gets append-only lines, because
+    cursor control down a pipe is how a log file ends up full of escape
+    sequences. Ctrl-C prints the session summary and exits with the verdict of
+    the last sample, so `watch` is usable as a slow poll from a script.
+    """
+    interval = max(1, int(getattr(args, "interval", 10) or 10))
+    count = max(0, int(getattr(args, "count", 0) or 0))
+    if getattr(args, "once", False):
+        # --once is one sample and out: without this the loop would sample once
+        # and then wait forever, which is the opposite of "once".
+        count = 1
+    tty = sys.stdout.isatty()
+    started = datetime.now(timezone.utc).isoformat()
+    samples = 0
+    last_line = None
+    previous = None
+    previous_capacity = None
+    m = None
+    served = None
+    code = 0
+
+    def one(tag):
+        nonlocal samples, last_line, previous, previous_capacity, m, served, code
+        m, served = _watch_sample(args)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        line = watch_mod.sample_line(m, served, now_iso, previous)
+        samples += 1
+        if getattr(args, "json", False):
+            # JSON lines: one object per sample, so a cron job or a chat bridge
+            # can consume the stream without parsing prose.
+            print(json.dumps({"sample": samples, "at": now_iso, "line": line}), flush=True)
+            last_line = line
+            previous, previous_capacity = m, served
+            _h, _a, code = verdict(m)
+            return line
+        if tag == "print":
+            print(line, flush=True)
+            last_line = line
+        elif watch_mod.state_changed(previous, m, previous_capacity, served):
+            if tty and not getattr(args, "once", False):
+                hist = ([last_line] if last_line else []) + [line]
+                frame = watch_mod.frame(m, served, now_iso, hist[-6:])
+                sys.stdout.write("\x1b[H\x1b[2J" + "\n".join(frame) + "\n")
+                sys.stdout.flush()
+            else:
+                print(line, flush=True)
+            last_line = line
+        previous, previous_capacity = m, served
+        head, adj, code = verdict(m)
+        return line
+
+    print("luna-doctor watch - one line per state change. Ctrl-C stops and prints a summary.",
+          file=sys.stderr if tty else sys.stdout, flush=True)
+    print("(each sample reads the last %s of local logs; nothing is sent anywhere)"
+          % human_window(window_hours(args.since, args.now)),
+          file=sys.stderr if tty else sys.stdout, flush=True)
+    try:
+        one("print")
+        while True:
+            if count and samples >= count:
+                break
+            time.sleep(interval)
+            one("append")
+    except KeyboardInterrupt:
+        pass
+    ended = datetime.now(timezone.utc).isoformat()
+    if m is not None:
+        for row in watch_mod.summary(m, served, samples, started, ended):
+            print(row, flush=True)
+    return code
 
 
 def cmd_explain(args) -> int:
@@ -3838,6 +3957,33 @@ def cmd_analyze(args) -> int:
         adj.append(f"change, against the window before this one: {rows}.")
         word, reason = change["word"]
         adj.append(f"change verdict: {word} - {reason}")
+    # `--for-issue`: the same evidence as one redacted, datable block. It goes
+    # out instead of the report, never beside it, so a paste carries one thing.
+    if getattr(args, "for_issue", False) and not args.json:
+        rep = build_report(m, head, adj, att=att)
+        # The verdict already opens the block, so its own rows would repeat it.
+        skip = ("the wall you hit", "why")
+        rows = []
+        for section in rep.sections:
+            for row in section.rows:
+                if row.label in skip:
+                    continue
+                rows.append((row.label, row.value))
+        for line in rep.adjustments[:3]:
+            rows.append(("next", line))
+        provenance = {
+            "version": VERSION,
+            "schema": SCHEMA_VERSION,
+            "window_start": datetime.fromtimestamp(now - hours * 3600, timezone.utc)
+                                    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "window_end": datetime.fromtimestamp(now, timezone.utc)
+                                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "stores": [_source_id(harnesses, pi_roots, claude_roots)],
+        }
+        verdict_pair = (att.verdict, att.headline) if att is not None else None
+        print(bundle_mod.issue_block(head, rows, provenance, verdict_pair), end="")
+        return code
+
     stored = None
     if m["requests"] and not getattr(args, "no_store", False):
         try:
