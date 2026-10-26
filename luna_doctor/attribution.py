@@ -1,37 +1,40 @@
 #!/usr/bin/env python3
 """Attribution: whose concurrency a refusal belongs to.
 
-LunaRoute bills *concurrent sessions*, and the pool those sessions draw on is
-shared at the organization level: every machine signed in to the same account
-contends for one priority concurrency. That is why a machine can look idle -
-three agents, nothing else running - and still collect a 429, and why a 429
-with two jobs in flight is not a contradiction. The local picture and the
-account picture are two halves of one fact, and neither half alone can name
-the owner of a refusal:
+LunaRoute bills *concurrent sessions*. The organization holds one shared
+priority concurrency, and every machine signed in to the same account draws
+on that pool. A machine can therefore look idle from inside its own logs and
+still collect a 429. Three agents can run nothing else and still collect one.
+A 429 with two jobs in flight is not a contradiction either. The local
+picture and the account picture are two halves of one fact. Neither half
+alone can name the owner of a refusal. The two halves are:
 
   local      this machine's peak concurrency, and how many of its requests
              were refused at admission, rate limited, stalled, or failed
-             upstream. Reconstructed from the log store, so it is a lower
-             bound on what the machine held: a request nobody logged is
-             invisible here.
+             upstream. The tool rebuilds this half from the log store, so it
+             is a lower bound on what the machine held. A request that
+             nothing logged is invisible here.
   account    GET /v1/capacity's plan, priority concurrency and live
-             occupancy, served from its disk cache by the `capacity` command.
+             occupancy. The `capacity` command serves this half from its
+             disk cache.
 
-`attribute()` places one half beside the other and names the owner. Three
-rules it never breaks:
+`attribute()` places one half beside the other and names the owner. It never
+breaks these three rules:
 
 - It never adds the halves. A local peak is a lower bound on the account's
-  occupancy, not a term in a sum, and a local measurement added to a
-  configured width is a number nobody measured.
-- It never states a capacity number as a gateway fact. Account numbers are
-  labelled (account), plan-derived ones (declared plan <name>), and a number
-  the tool does not have is unknown - never zero, never a default.
+  occupancy, and it is not a term in a sum. A local measurement added to a
+  configured width gives a number that nobody measured.
+- It never states a capacity number as a gateway fact. An account number
+  carries the label (account). A plan-derived number carries (declared plan
+  <name>). A number the tool does not have is unknown. It is never zero and
+  never a default.
 - It never guesses. With no account half and no declared width the verdict
-  is unknown and points at the command that fetches the missing half.
+  is unknown. The verdict then names the command that fetches the missing
+  half.
 
-Nothing here reads a file, opens a socket or runs a command: these are pure
-functions over the dicts `cli.analyse()` and the capacity command already
-produce.
+Nothing here reads a file, opens a socket or runs a command. These are pure
+functions over the dicts that `cli.analyse()` and the capacity command
+already produce.
 """
 
 from __future__ import annotations
@@ -69,27 +72,28 @@ def resolve_priority_concurrency(capacity: Optional[dict],
 
     Two sources, in this order, and no third:
 
-    - the account: `capacity["priority_lanes"]` when it is a real integer.
-      That is the number GET /v1/capacity reports for this account and it is
-      the first authority on any account fact. A null, a float, a bool or an
-      absent key is unknown, never zero.
+    - the account: `capacity["priority_lanes"]`, when it is a real integer.
+      That number is the one GET /v1/capacity reports for this account. It
+      is the first authority on any account fact. A null, a float, a bool or
+      an absent key is unknown, and it is never zero.
     - the declaration: `plan`, exactly as the user typed it on --plan. A
-      plan name maps to LunaRoute's published default (plan.PLAN_PRIORITY,
-      one table, so the names cannot drift); a plain number is the width the
-      user states. A declaration is consulted only when the account has no
-      number, and it is never a measurement: it is labelled as a declaration
-      wherever it renders.
+      plan name maps to LunaRoute's published default in plan.PLAN_PRIORITY.
+      That table is the only one, so the names cannot drift. A plain number
+      is the width the user states. The tool consults a declaration only
+      when the account reports no number. A declaration is never a
+      measurement, and it carries a declaration label wherever it renders.
 
-    Returns (value, source) with `source` exactly one of "account",
-    "plan <name>", "declared" or "unknown". `value` is None only for
-    "unknown": unknown is never expressed as zero or as any other real
-    number, so no caller can mistake "not established" for a width.
+    The return value is (value, source), and `source` is exactly one of
+    "account", "plan <name>", "declared" or "unknown". `value` is None only
+    for "unknown". An unknown width is never zero, and it is never any other
+    real number, so no caller can mistake "not established" for a width.
 
-    An unusable declaration - a name not in the published table, a number
-    below 1, a non-integer - resolves to (None, "unknown") rather than
-    raising: this function has no error channel, and a width nobody can name
-    is not a width to judge a refusal against. The CLI validates --plan when
-    it parses the flag, so a bad declaration is reported there.
+    An unusable declaration resolves to (None, "unknown"), and it never
+    raises. An unusable declaration is a name outside the published table, a
+    number below 1, or a non-integer. This function has no error channel, and
+    a width that nobody can name is not a width to judge a refusal against.
+    The CLI makes sure that --plan is usable when it parses the flag, so a
+    bad declaration is reported there.
     """
     if isinstance(capacity, dict):
         lanes = _int(capacity.get("priority_lanes"))
@@ -111,10 +115,10 @@ def resolve_priority_concurrency(capacity: Optional[dict],
 class Attribution(NamedTuple):
     """One attribution: the owner, one plain sentence, and the working.
 
-    `rows` are (label, value) pairs, each value naming whose number it is -
-    "this machine" or "account" - so a reader can tell a measurement from a
-    declaration without reading this module. `actions` is what to do about
-    it, and may be empty."""
+    `rows` are (label, value) pairs. Each value names whose number it is,
+    with "this machine" or "account". A reader can then tell a measurement
+    from a declaration without reading this module. `actions` says what to
+    do about it, and it can be empty."""
 
     verdict: str
     headline: str
@@ -159,14 +163,15 @@ def _hours(value) -> str:
 def _local_facts(local) -> _LocalFacts:
     """This machine's half, None-safe.
 
-    Counts are read from analyse()'s by_outcome verbatim: a missing outcome
-    is zero requests, not an error. Only the outcomes the attribution rules
-    name are read - admission_timeout and client_idle_timeout (the two the
-    logs carry for saturation), rate_limited and org_concurrency_limit (the
-    two ways the gateway itself reports that the account's concurrent-request
-    capacity is full; a bare 429 and the named
-    CONCURRENT_REQUEST_LIMIT_EXCEEDED class arrive as different outcomes) and
-    the two upstream failure classes."""
+    The counts come from analyse()'s by_outcome verbatim. A missing outcome
+    is zero requests, and it is not an error. The function reads only the
+    outcomes that the attribution rules name, in two pairs.
+    admission_timeout and client_idle_timeout are the two that the logs
+    carry for saturation. rate_limited and org_concurrency_limit are the two
+    ways the gateway itself reports that the account's concurrent-request
+    capacity is full. A bare 429 and the named
+    CONCURRENT_REQUEST_LIMIT_EXCEEDED class arrive as different outcomes.
+    The two upstream failure classes are the last pair."""
     local = local if isinstance(local, dict) else {}
     by = local.get("by_outcome")
 
@@ -209,10 +214,12 @@ def _local_facts(local) -> _LocalFacts:
 class _AccountFacts(NamedTuple):
     """The capacity dict, reduced to what an attribution needs.
 
-    `present` is the load-bearing field: it says the account half arrived
-    with something to place a local measurement against - a priority
-    concurrency, a live occupancy, or admission days. A degraded payload
-    (config null, now null, no days) is ABSENT, not a quiet account."""
+    `present` is the load-bearing field. It says that the account half
+    arrived with something to place a local measurement against. That
+    something is a priority concurrency, a live occupancy, or admission
+    days. A degraded payload is ABSENT, and it is not a quiet account. A
+    degraded payload has a null configuration, a null now block, and no
+    days."""
 
     present: bool
     in_use: Optional[int]
@@ -227,12 +234,11 @@ class _AccountFacts(NamedTuple):
 def _account_facts(capacity) -> _AccountFacts:
     """The account's half, None-safe.
 
-    `saturated` is the API's own word for a full priority pool and is
-    believed only as a boolean; `in_use >= limit` counts as saturated too,
-    because two fields of the account's own payload agreeing is still the
-    account's report. An
+    `saturated` is the API's own word for a full priority pool, and the tool
+    believes it only as a boolean. `in_use >= limit` counts as saturated
+    too, because two fields of the account's own payload agree. An
     admission day corroborates occupancy only where denied + denied_after_wait
-    > 0: a day of accepted traffic says nothing about a refusal."""
+    > 0. A day of accepted traffic says nothing about a refusal."""
     capacity = capacity if isinstance(capacity, dict) else {}
     now = capacity.get("now")
     now = now if isinstance(now, dict) else {}
@@ -281,18 +287,14 @@ def _width_value(value, source: str) -> str:
 
 
 def _width_sentence(value, source: str) -> str:
-    if source == "account":
-        return "the account's priority concurrency is %s" % _width_value(value, source)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return "the declared width is %s" % _width_value(value, source)
-    return "the resolved width is %s" % _width_value(value, source)
+    """The resolved width as a sentence of its own. Always says whose."""
+    return "The width is %s." % _width_value(value, source)
 
 
 def _inside_phrase(value, source: str) -> str:
-    """A clause to follow a local peak, saying what the peak sat inside."""
+    """A phrase that follows a local peak and names the width around it."""
     if not isinstance(value, int) or isinstance(value, bool):
-        return ("with the width unknown (no priority concurrency from the "
-                "account and no --plan declaration)")
+        return "with the width unknown"
     if source == "account":
         return "inside the account's %s" % _width_value(value, source)
     return "inside the declared width of %s" % _width_value(value, source)
@@ -330,9 +332,16 @@ def _occupancy_clause(acct: _AccountFacts) -> str:
 
 
 def _account_clause(acct: _AccountFacts) -> str:
+    """The account half as a clause for the middle of a sentence."""
     if not acct.present:
         return "the account half is absent (no capacity payload)"
     return "the account reported %s" % _occupancy_clause(acct)
+
+
+def _account_sentence(acct: _AccountFacts) -> str:
+    """The account clause as a sentence: first letter up, full stop on."""
+    clause = _account_clause(acct)
+    return clause[:1].upper() + clause[1:] + "."
 
 
 def _requests(n: int, one: str, many: Optional[str] = None) -> str:
@@ -392,7 +401,7 @@ def _local_evidence_rows(facts: _LocalFacts) -> list:
         rows.append((
             "upstream failures",
             _requests(facts.upstream,
-                      "failed upstream (this machine); the error text was "
+                      "failed upstream (this machine). The error text was "
                       "classed upstream_unavailable or upstream_error")))
     if facts.starved_peers:
         rows.append((
@@ -433,13 +442,13 @@ def _rows(facts: _LocalFacts, value, source: str, acct: _AccountFacts) -> list:
     if acct.stale:
         rows.append((
             "account sample age",
-            "past the 5-minute cache TTL, so it may lag what the account is "
-            "holding now; run %s to refresh (account)" % CAPACITY_COMMAND))
+            "past the 5-minute cache TTL, so it can lag what the account "
+            "holds now. Run %s to refresh (account)" % CAPACITY_COMMAND))
     if acct.denial_days:
         rows.append((
             "account admission log",
-            "%s (account; a different vantage point from this machine's own "
-            "counts)" % _day_summary(acct)))
+            "%s (account, and a different vantage point from this machine's "
+            "own counts)" % _day_summary(acct)))
     rows.extend(_local_evidence_rows(facts))
     return rows
 
@@ -448,41 +457,41 @@ def _rows(facts: _LocalFacts, value, source: str, acct: _AccountFacts) -> list:
 def attribute(local, capacity, priority) -> Attribution:
     """Place this machine's measurement beside the account's occupancy.
 
-    `local` is the dict analyse() returns. `capacity` is the additive
-    metrics.capacity dict (plan, priority_lanes, background_lanes,
-    overflow_routing, provenance, stale, reason) with, when a live sample is
-    attached, its "now" block and its per-UTC-day "window_days". `priority`
-    is resolve_priority_concurrency's (value, source); this function renders
-    that resolution and never re-resolves it.
+    `local` is the dict that analyse() returns. `capacity` is the additive
+    metrics.capacity dict. Its keys are plan, priority_lanes,
+    background_lanes, provenance, stale, reason and overflow_routing. When a
+    live sample is attached, the dict also carries its "now" block and its
+    per-UTC-day "window_days". `priority` is resolve_priority_concurrency's
+    (value, source). This function renders that resolution and never
+    resolves it again.
 
-    The five verdicts, in the precedence they are applied:
+    The five verdicts, in the precedence that the function applies them:
 
-    1. "unknown" - the resolved width is unknown AND the account half is
-       absent (no priority concurrency, no live occupancy, no admission
-       days). Neither half can name the owner, so the headline says both are
-       unestablished and names the command that fetches the account half.
-       A local peak alone is never turned into a verdict: with no width to
-       place it beside, a busy machine is unknown, never "you".
-    2. "you" - this machine's peak concurrency reached or passed the
-       resolved width. The local peak and the width are both labelled in the
-       headline. (The rule's second clause, blocked at admission > 0
-       AND peak >= width, is a subset of the first: the threshold alone
-       decides, and the refusals are counted in the rows.)
-    3. "your-org" - the local traffic stayed inside the width (peak < the
-       resolved width, or no width to exceed), there IS local refusal or
-       stall evidence (admission_timeout + client_idle_timeout +
-       rate_limited + org_concurrency_limit > 0), AND the account
-       corroborates the pool being full (now.in_use >= now.limit,
-       now.saturated, an admission day with denied + denied_after_wait > 0,
-       or a request the gateway itself refused with
-       CONCURRENT_REQUEST_LIMIT_EXCEEDED - a named account-level rejection
-       needs no fetched payload to corroborate itself). The headline says plainly that this machine
-       was not the width and the account was.
-    4. "the-gateway" - upstream failures locally (upstream_unavailable or
-       upstream_error) with no refusal at admission and no account
-       occupancy evidence. The failures were the gateway's, not this
-       machine's concurrency.
-    5. "not-concurrency" - none of the above. Concurrency is not what is
+    1. "unknown". The resolved width is unknown AND the account half is
+       absent, with no priority concurrency, no live occupancy and no
+       admission days. Neither half can name the owner, so the headline says
+       that both are unestablished. It also names the command that fetches
+       the account half. A local peak alone never becomes a verdict. With no
+       width to place it beside, a busy machine is unknown and never "you".
+    2. "you". This machine's peak concurrency reached or passed the resolved
+       width. The headline labels the local peak and the width. The rule's
+       second clause is blocked at admission > 0 AND peak >= width. That
+       clause is a subset of the first. The threshold alone decides, and the
+       rows count the refusals.
+    3. "your-org". The local traffic stayed inside the width, and there IS
+       local refusal or stall evidence. That evidence is admission_timeout +
+       client_idle_timeout + rate_limited + org_concurrency_limit > 0. The
+       account also corroborates a full pool. Corroboration is
+       now.in_use >= now.limit, now.saturated, an admission day with
+       denied + denied_after_wait > 0, or a request that the gateway itself
+       refused with CONCURRENT_REQUEST_LIMIT_EXCEEDED. A named account-level
+       rejection needs no fetched payload to corroborate itself. The
+       headline says plainly that this machine was not the width and the
+       account was.
+    4. "the-gateway". Upstream failures are present locally, with no refusal
+       at admission and no account occupancy evidence. The failures were the
+       gateway's, not this machine's concurrency.
+    5. "not-concurrency". None of the above holds. Concurrency is not what is
        wrong here, and the headline says so plainly.
     """
     facts = _local_facts(local)
@@ -508,24 +517,24 @@ def attribute(local, capacity, priority) -> Attribution:
                       if not facts.requests else
                       "a peak of " + _concurrent(facts.peak))
         headline = (
-            "Attribution unknown: the local half is %s and there is no account "
-            "width to sit beside it, while the account half is unknown (no "
-            "priority concurrency and no occupancy reported), so run %s to "
-            "fetch the account's half." % (local_half, CAPACITY_COMMAND))
+            "Attribution unknown: the local half is %s. There is no account "
+            "width to sit beside it, and the account half is unknown, with no "
+            "priority concurrency and no occupancy reported. Run %s to fetch "
+            "the account's half." % (local_half, CAPACITY_COMMAND))
         actions = [
             "Run %s to fetch the account's priority concurrency and its live "
-            "occupancy; without that half no local measurement can name the "
+            "occupancy. Without that half no local measurement can name the "
             "owner of a refusal." % CAPACITY_COMMAND,
-            "If the capacity API cannot be reached, --plan with a plan name "
-            "or a plain number declares the width you expect; a declaration "
-            "is labelled as a declaration and is never a measurement.",
+            "If the capacity API cannot be reached, --plan declares the "
+            "width. Give it a plan name or a plain number. It carries a "
+            "declaration label, and it is never a measurement.",
         ]
         return Attribution(VERDICT_UNKNOWN, headline, rows, actions)
 
     # ---- 2. this machine's own peak reached the width -------------------
     if width is not None and facts.peak >= width:
         if evidence:
-            tail = ("so the %s"
+            tail = ("So the %s"
                     % _requests(
                         evidence,
                         "that was refused or stalled in this window belongs "
@@ -533,47 +542,48 @@ def attribute(local, capacity, priority) -> Attribution:
                         "that were refused or stalled in this window belong to "
                         "this machine's own traffic."))
         else:
-            tail = ("so nothing was refused, but the next burst at this "
-                    "machine has no headroom.")
+            tail = ("Nothing was refused, but the next burst at this machine "
+                    "has no headroom.")
         headline = (
-            "You: this machine's peak concurrency was %s and %s, %s"
+            "You: this machine's peak concurrency was %s. %s %s"
             % (_concurrent(facts.peak), _width_sentence(width, source), tail))
         actions = [
-            "Keep this machine's concurrent requests below %s: the peak "
+            "Keep this machine's concurrent requests below %s. The peak "
             "already reached it." % _width_value(width, source),
             "Move the wide part of the work to the -background variant of the "
-            "same model, which parks for room instead of sharing the priority "
-            "pool.",
+            "same model. That variant parks for room and does not share the "
+            "priority pool.",
         ]
         return Attribution(VERDICT_YOU, headline, rows, actions)
 
     # ---- 3. the account was the width, not this machine -----------------
     if evidence and corroborated and (width is None or facts.peak < width):
         headline = (
-            "Your organization: this machine's peak concurrency was %s, %s, "
-            "and %s; this machine was not the width, the account was."
+            "Your organization: this machine's peak concurrency was %s. That "
+            "peak sat %s. %s This machine was not the width, the account was."
             % (_concurrent(facts.peak), _inside_phrase(width, source),
-               _account_clause(acct)))
+               _account_sentence(acct)))
         actions = [
-            "Nothing on this machine buys room: the width is the account's, "
+            "Nothing on this machine buys room. The width is the account's, "
             "and other sessions were holding it.",
-            "Check what else runs on this account - other machines, other "
-            "people's agents, background work - and send this work when the "
-            "account's in_use is lower; luna-doctor capacity shows it.",
+            "Make sure that no other work on this account holds the pool. "
+            "That work can be another machine, another agent or background "
+            "work. Send this work when the account's in_use is lower. "
+            "luna-doctor capacity shows it.",
         ]
         return Attribution(VERDICT_YOUR_ORG, headline, rows, actions)
 
     # ---- 4. upstream failures, no refusal, no occupancy -----------------
     if facts.upstream and rejected == 0 and facts.account_limit == 0 and not corroborated:
         headline = (
-            "The gateway: %s with no refusal at admission, the peak "
-            "concurrency beside them was %s, and %s; the failure was the "
+            "The gateway: %s, with no refusal at admission. The peak "
+            "concurrency beside them was %s. %s The failure was the "
             "gateway's, not this machine's concurrency."
             % (_requests(facts.upstream, "failed upstream (this machine)"),
-               _concurrent(facts.peak), _account_clause(acct)))
+               _concurrent(facts.peak), _account_sentence(acct)))
         actions = [
-            "Retry the failed work: upstream failures with no refusal at "
-            "admission are the gateway's, and a retry is the cheap move.",
+            "Retry the failed work. An upstream failure with no refusal at "
+            "admission belongs to the gateway, so a retry is the cheap move.",
             "luna-doctor analyze lists the upstream error signatures and when "
             "each one started.",
         ]
@@ -581,26 +591,26 @@ def attribute(local, capacity, priority) -> Attribution:
 
     # ---- 5. none of the above -------------------------------------------
     if evidence:
-        middle = "%s refused or stalled, while %s" % (
-            _requests(evidence, "was", "were"), _account_clause(acct))
+        middle = "%s refused or stalled. %s" % (
+            _requests(evidence, "was", "were"), _account_sentence(acct))
     else:
-        middle = "nothing in the window was refused, stalled or failed"
+        middle = "Nothing in the window was refused, stalled or failed."
     headline = (
-        "Not concurrency: this machine's peak concurrency was %s, %s, and %s; "
-        "concurrency is not what is wrong here."
+        "Not concurrency: this machine's peak concurrency was %s. That peak "
+        "sat %s. %s Concurrency is not what is wrong here."
         % (_concurrent(facts.peak), _inside_phrase(width, source), middle))
     if evidence:
         actions = [
-            "Refresh the account sample with %s before concluding anything "
-            "about the pool: the refusal is not matched by account "
+            "Refresh the account sample with %s before you conclude anything "
+            "about the pool. The refusal is not matched by account "
             "occupancy." % CAPACITY_COMMAND,
             "luna-doctor analyze shows the per-model errors and the park "
             "deadlines this machine observed.",
         ]
     else:
         actions = [
-            "Nothing to adjust: no refusal, stall or upstream failure, and the "
-            "peak stayed inside the width.",
+            "Nothing to adjust. The window had no refusal, stall or upstream "
+            "failure, and the peak stayed inside the width.",
             "luna-doctor capacity shows the account's occupancy if you want to "
             "watch it move.",
         ]
