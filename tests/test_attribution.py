@@ -59,6 +59,9 @@ def account(priority_lanes=12, plan="apex", now=None, days=None, stale=False):
     }
     if now is not None:
         cap["now"] = now
+        # cli._capacity_metrics decides freshness against the window it will be
+        # read against; these fixtures are describing a sample that covers it.
+        cap.setdefault("now_fresh", True)
     if days is not None:
         cap["window_days"] = days
     return cap
@@ -242,12 +245,16 @@ class YourOrgVerdict(unittest.TestCase):
         self.assertIn("denied_after_wait", dict(att.rows)["account admission log"])
 
     def test_admission_days_without_denials_are_not_occupancy_evidence(self):
+        """A day of accepted traffic says nothing about a refusal. The refusal
+        itself is still the account's own evidence, so the verdict is the
+        account's, not a claim that the day corroborated it."""
         day = {"day": "2026-10-20", "accepted": 4570, "deferred": 12,
                "denied": 0, "denied_after_wait": 0, "avg_queue_wait_ms": None}
         att = attribute(local_store(requests=20, peak=3,
-                                    by_outcome={"rate_limited": 1}),
+                                    by_outcome={"client_idle_timeout": 1}),
                         account(12, days=[day]), (12, "account"))
-        self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)
+        self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict,
+                         "a stall with no denial day and no full pool stays unresolved")
 
     def test_a_named_org_limit_rejection_corroborates_without_any_payload(self):
         """The real complaint: background work filled the pool and the next
@@ -333,9 +340,20 @@ class NotConcurrencyVerdict(unittest.TestCase):
         self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)
         self.assertIn("Concurrency is not what is wrong here", att.headline)
 
-    def test_refusals_the_account_never_corroborated(self):
+    def test_a_429_is_never_ruled_out_of_concurrency(self):
+        """A 429 is the account's capacity being exceeded, so a quiet sample
+        cannot turn it into "concurrency is not what is wrong here"."""
         att = attribute(local_store(requests=20, peak=2,
                                     by_outcome={"rate_limited": 2,
+                                                "completed": 18}),
+                        account(12, now=quiet_now()), (12, "account"))
+        self.assertEqual(VERDICT_YOUR_ORG, att.verdict)
+
+    def test_a_stall_with_no_account_agreement_stays_unresolved(self):
+        """A stall is not the account's own word, so without a full pool the
+        owner stays unnamed instead of being called the account's."""
+        att = attribute(local_store(requests=20, peak=2,
+                                    by_outcome={"client_idle_timeout": 2,
                                                 "completed": 18}),
                         account(12, now=quiet_now()), (12, "account"))
         self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)

@@ -148,6 +148,33 @@ class WatchStalls(unittest.TestCase):
         self.assertIn("stall", out.lower(), out)
 
 
+class RedactionOrdering(unittest.TestCase):
+    def test_a_normalized_error_signature_cannot_smuggle_an_email(self):
+        """`error_signature()` masks digits with `#`, so an address inside an
+        error string arrives as `jesse#@example.com`. The block still must not
+        carry it."""
+        home = tempfile.mkdtemp(prefix="luna-doctor-norm-")
+        d = os.path.join(home, ".pi", "agent", "sessions", "s")
+        os.makedirs(d)
+        now = time.time()
+        msg = {"role": "assistant", "model": "glm-5.3", "provider": "lunaroute",
+               "usage": {"input": 5, "output": 5}, "stopReason": "error",
+               "errorMessage": "upstream said: contact jesse2@example.com then retry",
+               "timestamp": int((now - 30) * 1000)}
+        path = os.path.join(d, "s.jsonl")
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"type": "message",
+                                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                                            time.gmtime(now - 20)),
+                                 "message": msg}) + "\n")
+        os.utime(path, (now, now))
+        code, out, err = run(home, "analyze", "--since", "1h", "--style", "plain",
+                             "--for-issue")
+        self.assertIn(code, (0, 1), err)
+        self.assertNotIn("example.com", out, out)
+        self.assertNotIn("@", out.replace("<redacted:email>", ""), out)
+
+
 class ForIssue(unittest.TestCase):
     def test_issue_block_is_datable_and_redacted(self):
         home = _store()

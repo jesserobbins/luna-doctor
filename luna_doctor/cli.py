@@ -1496,6 +1496,19 @@ def timed(reqs: list[Request]) -> list[Request]:
             and 0 < (r.end - r.start) <= SANITY_MAX_DURATION_S]
 
 
+def _priority_tier(reqs: list[Request]) -> list[Request]:
+    """The requests that ride the priority pool, which is the pool a width bills.
+
+    Comparing a priority width against concurrency across both tiers calls ten
+    entitled background requests a breach of a two-request width. Every
+    priority-width comparison goes through this filter. When no request carries
+    an interactive tier the filter steps aside rather than inventing an empty
+    window.
+    """
+    tiered = [r for r in timed(reqs) if getattr(r, "tier", "") == "interactive"]
+    return tiered if tiered else timed(reqs)
+
+
 def _by_run(reqs: list[Request]) -> list[dict]:
     """Per-run breakdown.
 
@@ -3613,6 +3626,13 @@ def _utc_days(since: float, until: float) -> list:
     return out
 
 
+# How close an account sample must be to the window it corroborates. The server
+# answers in 4-17s and the cache lives 5 minutes, so a quarter of an hour is
+# generous for "this sample describes roughly now" and tight enough to refuse a
+# sample from yesterday.
+CAPACITY_FRESH_S = 15 * 60
+
+
 def _capacity_metrics(since: float, until: float, m: dict) -> dict:
     """The additive metrics.capacity block: the account's plan, concurrency
     and overflow routing, plus - when the window overlaps the API's complete
@@ -3652,6 +3672,19 @@ def _capacity_metrics(since: float, until: float, m: dict) -> dict:
     # even when the cache holds a fresh sample. A null stays null: the API's own
     # story, never zero.
     if cap.now is not None:
+        # `fresh` is decided here, once, because only this layer knows both the
+        # sample time and the window it will be read against. A saturated sample
+        # from yesterday cannot corroborate a stall from today.
+        sampled = getattr(cap.now, "sampled_at", None)
+        fresh = False
+        if isinstance(sampled, str):
+            try:
+                stamp = datetime.strptime(sampled[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                    tzinfo=timezone.utc).timestamp()
+                fresh = abs(until - stamp) <= CAPACITY_FRESH_S
+            except (ValueError, TypeError):
+                fresh = False
+        block["now_fresh"] = fresh
         block["now"] = {
             "in_use": getattr(cap.now, "in_use", None),
             "limit": getattr(cap.now, "limit", None),
@@ -3697,7 +3730,7 @@ def _watch_sample(args, now_ts=None):
     pv, _src = _priority_for_advice(m)
     if isinstance(pv, int) and not isinstance(pv, bool) and pv > 0 and m.get("requests"):
         try:
-            wide = pressure_windows(timed(reqs), pv)
+            wide = pressure_windows(_priority_tier(reqs), pv)
             m["pressure_windows"] = len(wide)
             m["longest_pressure_window"] = (max(wide, key=lambda w: w["seconds"])
                                             if wide else None)
@@ -3974,7 +4007,7 @@ def cmd_analyze(args) -> int:
     if isinstance(pv, int) and not isinstance(pv, bool) and pv > 0 \
             and pv != ADVISED_CONCURRENCY and m.get("requests"):
         try:
-            wide = pressure_windows(timed(reqs), pv)
+            wide = pressure_windows(_priority_tier(reqs), pv)
             m["pressure_windows"] = len(wide)
             m["longest_pressure_window"] = (max(wide, key=lambda w: w["seconds"])
                                             if wide else None)

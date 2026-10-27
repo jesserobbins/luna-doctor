@@ -84,8 +84,14 @@ def _swamp_split() -> tuple[int, int, int]:
     return pi_rec, sw_extract, sw_llm
 
 
-def recommendations_swamp(m: dict, agents: list[str]) -> list:
-    """Swamp advice — only when agents includes swamp and swamp is in use."""
+def recommendations_swamp(m: dict, agents: list[str], width=None) -> list:
+    """Swamp advice, only when agents includes swamp and swamp is in use.
+
+    `width` is the resolved priority concurrency when one is known. Swamp's own
+    concurrency is a setting, but the budget it has to fit inside belongs to the
+    account, so a split that cannot fit the declared width must not be presented
+    as fitting it.
+    """
     if "swamp" not in agents:
         return []
     present, repo_dir = _swamp_present(float(m.get("window_hours") or 24.0))
@@ -100,10 +106,15 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
     except (TypeError, ValueError):
         extract_n = SWAMP_DEFAULT_EXTRACT
         llm_n = SWAMP_DEFAULT_LLM
-    pi_budget = ADVISED_CONCURRENCY
+    width_known = isinstance(width, int) and not isinstance(width, bool) and width > 0
+    # The budget for interactive work: the account's width when it is known, and
+    # the tool's starting point when it is not. Swamp's configured concurrency is
+    # added only to judge whether the split is small enough, never to state a
+    # limit. The two numbers are labelled differently in the copy for that reason.
+    pi_budget = width if width_known else ADVISED_CONCURRENCY
     swamp_total = extract_n + llm_n
     combined = pi_budget + swamp_total
-    cap = INTERACTIVE_BURST_CAP
+    cap = width if width_known else INTERACTIVE_BURST_CAP
     extract_src = knobs["extractConcurrency"]["source"]
     llm_src = knobs["llmConcurrency"]["source"]
     def _citation(source: str) -> str:
@@ -186,7 +197,13 @@ def recommendations_swamp(m: dict, agents: list[str]) -> list:
 # logs actually saw - the same degraded answer as before, never a guess.
 
 
-def pick_background_model(reqs, cat) -> list | None:
+def pick_background_model(reqs, cat):
+    """The background model to recommend, as one model id (or None).
+
+    One scalar, never a list: every caller writes this value into a config key,
+    and a list reached the pi config as `lunaroute/['glm-5.3-background']`. That
+    is a config file that fails to load, which is worse than no advice.
+    """
     counts = {}
     for r in reqs:
         if r.tier == "interactive" and r.model:
@@ -196,7 +213,7 @@ def pick_background_model(reqs, cat) -> list | None:
         top = max(counts, key=counts.get)
         twin = top if top.endswith("-background") else top + "-background"
         if twin in known:
-            return [twin]
+            return twin
     for cand in sorted(known):
         if cand.endswith("-background"):
             return [cand]
@@ -661,7 +678,17 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
             })
 
         idle_env = _declared(cc_cfg.get("env.CLAUDE_STREAM_IDLE_TIMEOUT_MS"))
-        if too_big(idle_env, 300000) or idle_env is None:
+        # Only raise a budget that is too short. A value already longer than the
+        # target is permissive, and telling a user to lower it would make a
+        # background request fail earlier than it does today. `too_big` was the
+        # wrong direction for a timeout and shipped that advice.
+        def _too_short(v, floor):
+            try:
+                return v is None or int(str(v)) < floor
+            except ValueError:
+                return True
+
+        if _too_short(idle_env, RAISE_TIMEOUT_MS):
             changes.append({
                 "key": "env.CLAUDE_STREAM_IDLE_TIMEOUT_MS + env.API_TIMEOUT_MS",
                 "file": CLAUDE_SETTINGS,
@@ -699,7 +726,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
 
     # ---------------- swamp ----------------
     if "swamp" in agents:
-        swamp_recs = recommendations_swamp(m, agents)
+        swamp_recs = recommendations_swamp(m, agents, width=target)
         for grp in swamp_recs:
             out.append(grp)
 

@@ -53,7 +53,11 @@ MARK_TOKEN = "<redacted:token>"
 # letter or a dot is a URL path ("example.com/home/x"), not a home directory, and
 # rewriting it would corrupt a link without redacting anything.
 _BOUNDARY = r"(?<![A-Za-z0-9_.\-])"
-_EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+"
+# `error_signature()` in cli.py replaces digits with `#` before a signature
+# reaches this module, so `jesse2@example.com` arrives as `jesse#@example.com`.
+# The local part accepts the mask characters, or the redactor would miss every
+# address inside an error string, which is exactly where addresses appear.
+_EMAIL = r"[A-Za-z0-9._%+\-#]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+"
 # /Users/<name> and /home/<name>, up to the next slash: the rest of the path is
 # left as it was, so ~/GitHub/repo keeps its shape and its readability.
 _HOME_PATH = r"(?i:/(?:Users|home))/[A-Za-z0-9._\-]+"

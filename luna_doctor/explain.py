@@ -230,23 +230,26 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
         # Served, but the question was "why was this slow". Duration only means
         # something beside the width it ran at: a 145s answer on a quiet machine
         # is the model, and the same answer inside a 12-wide burst is a queue.
-        if isinstance(value, int) and peak is not None and peak > value:
-            head = ("Served, but slowly. It ran for %s while this machine held %d concurrent "
-                    "requests, above %s. The wait came from the concurrent requests on this "
-                    "machine, not from the latency of the model."
-                    % (_seconds(req.duration), peak, _width_words(value, source)))
+        if isinstance(value, int) and in_flight is not None and in_flight > value:
+            # The queueing moment is when the request started, not any peak
+            # later in its span: a 144-second generation that met a burst in its
+            # last second did not wait for that burst.
+            head = ("Served, but slowly. This machine already held %d concurrent requests when it "
+                    "started, above %s, so the request queued behind them. That queue is a likelier "
+                    "cause of the %s than the latency of the model."
+                    % (in_flight, _width_words(value, source), _seconds(req.duration)))
             actions.append("Narrow the concurrent requests on this machine to fit %s. If you do, "
                            "this request will not queue behind the others."
                            % _width_words(value, source))
-        elif peak is not None and peak > 1:
-            head = ("Served in %s while up to %d concurrent requests were open from this machine. "
-                    "A duration alone does not show a fault. Compare it with the p50 in "
+        elif in_flight is not None and in_flight > 1:
+            head = ("Served in %s while %d concurrent requests were open from this machine when it "
+                    "started. A duration alone does not show a fault. Compare it with the p50 in "
                     "`luna-doctor analyze` before you call it slow."
-                    % (_seconds(req.duration), peak))
+                    % (_seconds(req.duration), in_flight))
         else:
-            head = ("Served in %s on a machine with almost no other load. The duration is the "
-                    "latency of the model itself. Compare it with the p50 in "
-                    "`luna-doctor analyze`." % _seconds(req.duration))
+            head = ("Served in %s on a machine with almost no other load. These logs measure this "
+                    "machine only, so other account traffic cannot be ruled out. Compare the "
+                    "duration with the p50 in `luna-doctor analyze`." % _seconds(req.duration))
         if peers:
             head += (" %d request(s) to %s finished inside this one's span." % (peers, req.model))
         return head, actions

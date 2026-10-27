@@ -102,12 +102,13 @@ class Why(unittest.TestCase):
     def test_a_served_request_beside_a_wide_burst_is_explained_as_queueing(self):
         slow = req(start=T0, end=T0 + 145)
         doc = explain.explain(slow, wide_burst(12, 200) + [slow], None, (6, "plan apex"))
-        self.assertIn("not from the latency of the model", doc["headline"])
+        self.assertIn("a likelier cause of the 145.0s than the latency of the model",
+                      doc["headline"])
 
     def test_a_fast_served_request_is_not_dressed_up_as_a_problem(self):
         doc = explain.explain(req(start=T0, end=T0 + 3), [req(start=T0, end=T0 + 3)],
                               None, (6, "plan apex"))
-        self.assertIn("latency of the model itself", doc["headline"])
+        self.assertIn("other account traffic cannot be ruled out", doc["headline"])
 
     def test_an_upstream_failure_names_the_gateway(self):
         failed = req(start=T0, end=T0 + 2, outcome="upstream_unavailable")

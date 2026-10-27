@@ -227,6 +227,7 @@ class _AccountFacts(NamedTuple):
 
     present: bool
     in_use: Optional[int]
+    fresh: bool
     limit: Optional[int]
     available: Optional[int]
     saturated: bool
@@ -249,8 +250,12 @@ def _account_facts(capacity) -> _AccountFacts:
     in_use = _int(now.get("in_use"))
     limit = _int(now.get("limit"))
     available = _int(now.get("available"))
-    saturated = now.get("saturated") is True or (
-        in_use is not None and limit is not None and in_use >= limit)
+    # `fresh` comes from the layer that knows the window (cli sets it when it
+    # builds the block). An absent flag is treated as not fresh: an unverified
+    # sample is not a licence to name the account as the owner of a wait.
+    fresh = capacity.get("now_fresh") is True
+    saturated = fresh and (now.get("saturated") is True or (
+        in_use is not None and limit is not None and in_use >= limit))
 
     denial_days = []
     raw_days = capacity.get("window_days")
@@ -270,7 +275,7 @@ def _account_facts(capacity) -> _AccountFacts:
         or now.get("saturated") is not None or now.get("sampled_at") is not None
         or denial_days)
     return _AccountFacts(present=present, in_use=in_use, limit=limit,
-                         available=available, saturated=saturated,
+                         available=available, saturated=saturated, fresh=fresh,
                          sampled_at=now.get("sampled_at"),
                          denial_days=denial_days,
                          stale=capacity.get("stale") is True)
@@ -511,8 +516,14 @@ def attribute(local, capacity, priority) -> Attribution:
     # the account half by itself, with no capacity payload required. Reading it
     # as "nothing was refused" (the pre-fix behaviour) let a window of named
     # org-limit rejections be attributed to "not concurrency".
+    # A refusal the gateway attributed to the account's pool corroborates the
+    # account half by itself, whether it arrived as the named class or as a bare
+    # 429: `classify()` documents that a 429 here means the concurrent-request
+    # capacity of the account was exceeded, and nothing else. Requiring a fetched
+    # sample on top of that let a window of real refusals land on
+    # "concurrency is not what is wrong here".
     corroborated = (acct.saturated or bool(acct.denial_days)
-                    or facts.account_limit > 0)
+                    or facts.account_limit > 0 or facts.rate_limited > 0)
     rows = _rows(facts, width, source, acct)
 
     # ---- 0. nothing was measured --------------------------------------
