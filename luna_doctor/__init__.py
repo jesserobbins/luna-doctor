@@ -1,4 +1,4 @@
-"""luna-doctor — explain what your local agent traffic is doing to your
+"""luna-doctor: explain what your local agent traffic does to your
 LunaRoute concurrency, and what to adjust.
 
 `cli` holds everything shared: the dataclasses, log readers, the analyser and

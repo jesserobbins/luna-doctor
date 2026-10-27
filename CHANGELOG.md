@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.1] - 2026-10-27
+
 ### Added
 
 - `luna-doctor explain` answers one question: why was that one request slow?
@@ -29,9 +31,9 @@ Versioning policy:
   headline names the owner of the wait. The owner is this machine, the shared
   pool of the account, the gateway, or no wall at all. Every number carries a
   label that gives its owner. If you give no flag, `explain` selects the request
-  that went wrong. `--blocked` selects the newest refusal, and a refusal is not
-  a stall, because the gateway refuses at admission and the harness stops an
-  idle stream. `--slowest` sorts by duration. A bare id selects a response id, a
+  that went wrong. `--blocked` selects the newest refusal. A refusal is not a
+  stall, because the gateway refuses at admission and the harness stops an idle
+  stream. `--slowest` sorts by duration. A bare id selects a response id, a
   session id, or a run id. The module is `luna_doctor/explain.py`.
 - `luna-doctor watch` gives a live view of an incident. It reads a 15-minute
   window on a fixed interval and prints one line for each change of state. The
@@ -52,8 +54,8 @@ Versioning policy:
   gateway? The answer is one word: `you`, `your org`, `the gateway`, `not
   concurrency`, or `unknown`. The tool computes the verdict from the measured
   window and from the cached capacity payload. Each row gives the owner of its
-  number as `this machine` or as `account`, because the account shares one
-  concurrent-request pool and a machine can look idle from inside its own logs.
+  number as `this machine` or as `account`. The account shares one
+  concurrent-request pool, so a machine can look idle from inside its own logs.
   `analyze --json` carries the verdict, the sentence, the rows, and the actions
   in a new `attribution` block. The `schema` value stays `4`, because no field
   was renamed or removed. The module is `luna_doctor/attribution.py`.
@@ -66,38 +68,63 @@ Versioning policy:
   result from two requests never prints as an improvement. The section never
   claims a cause, so the words *because*, *caused*, *proves*, and *fixed* never
   reach the output. The module is `luna_doctor/baseline.py`. `fix` now ends with
-  this step: run the comparison after you restart the harness, and the output
-  gives the result that means success.
-- `--plan <plan name or number>` on `analyze` and `fix`. The account number
-  leads. A declaration is the fallback when the tool cannot reach the capacity
-  payload. If the tool knows neither value, the report says `unknown` and names
-  the command that fetches the account value. `fix --json` now gives
+  this step: run the comparison after you restart the harness. The output gives
+  the result that means success.
+- `--plan <plan name or number>` on `analyze`, `explain`, `watch` and `fix`.
+  `chart` already had the flag. Every command that reads the account's capacity
+  can now be given a number to use when that read returns none. The account
+  value leads. A declaration is the fallback when the tool cannot reach the
+  capacity payload. If the tool knows neither value, the report says `unknown`
+  and names the command that fetches the account value. `fix --json` now gives
   `findings.priority_concurrency` and `findings.priority_concurrency_source`
   with the resolved value. Earlier, the field was always null.
 
+- The agent skill is a package, not one file. `skills/luna-doctor/SKILL.md` is
+  now a 76-line router: the invariants, a symptom table, the command index and
+  the exit codes. The depth lives in `skills/luna-doctor/references/`. It holds
+  five playbooks that each end in a verdict (slow right now, one bad request,
+  too wide, after the fix, share the evidence). It also holds four catalogs
+  (outcome ids and verdict words, the measured gateway contract, the `fix`
+  families including the sizing rules, the chart anatomy). An agent loads one
+  branch of that instead of 280 lines of everything. Three gaps closed on the
+  way. The sizing family had no words at all, so a `400 maximum context length`
+  had nothing to connect it to `fix`. `explain`, `watch`, `analyze --for-issue`,
+  `--baseline prev` and `--plan` were undocumented. Nothing compared the prose
+  against the parser.
+
 ### Changed
 
-- The advice no longer quotes a fixed width. `analyze` and `fix` printed "keep
-  concurrent requests at or under 8". That number is the default of one plan,
-  and `plan.py` already records that 8 is above four of the five published
-  plans. The sentence now gives the priority concurrency of the account when the
-  tool knows it. If you declare a plan, the sentence gives the value of that
-  plan. If the tool knows neither value, the sentence names `luna-doctor
-  capacity --online` and `--plan` instead of a number.
+- The advice no longer quotes a fixed width. `analyze` and `fix` printed an
+  instruction to keep concurrent requests to 8. That number is the default of
+  one plan, and `plan.py` already records that 8 is above four of the five
+  published plans. The sentence now gives the priority concurrency of the
+  account when the tool knows it. If you declare a plan, the sentence gives the
+  value of that plan. If the tool knows neither value, the sentence names
+  `luna-doctor capacity --online` and `--plan` instead of a number.
 - The pressured headline now uses the outcome classes that set the pressure
   flag. Those classes are blocked at admission, silent stalls, refusals at the
   account limit, and 429s. Classes that did not fire are left out. Before, the
-  headline named only the first two classes, so a window with rejections
+  headline named only the first two classes. A window with rejections then
   reported "0 request(s) were blocked at admission, 0 silent stall(s)" and
   exited `1`.
 - The preface of `fix` no longer tells the agent to read a plan from `lunaroute
   whoami` or a remaining budget from `lunaroute usage`. Neither value exists.
-  `plan.py` checks the first, and the second was a retired feature that brought
-  back the spend framing that this project does not use. The preface now points
-  at `luna-doctor capacity` for the account value.
+  `plan.py` makes sure that the first value exists. The second was a retired
+  feature that brought back cost framing which this project does not use. The
+  preface now points at `luna-doctor capacity` for the account value.
 
 ### Fixed
 
+- Skill drift is a test failure now, not a review note. `tests/test_cap_copy.py`
+  and `tests/test_terminology.py` walked one hardcoded `SKILL.md` path, so every
+  new reference file stayed outside the scan. Both now walk every markdown file
+  under `skills/luna-doctor` and fail if the walk finds nothing, with their
+  patterns unchanged. A new `tests/test_skill_package.py` parses every
+  subcommand's `--help`. It fails on a documented flag that the parser does not
+  carry. It fails on a relative link that resolves to nothing from the file it
+  is written in. It fails on a reference the router never links. It fails on a
+  command name that does not exist (the retired `probe` was in the invariant).
+  It fails on a router past its 150-line, 1500-word budget.
 - The chart is readable over a short window. Tick labels used to repeat, and
   they now gain seconds before the tick count goes down. A band that ended early
   gets a short mark at the edge instead of a diagonal line across the plot. The
@@ -108,10 +135,9 @@ Versioning policy:
 - The default run claimed that it read the last hour of local logs, and it drew
   a chart, on a machine that had no logs. If the window holds no request, the
   run now says so, names `discover`, and draws nothing.
-- The cap-copy guard in `tests/test_cap_copy.py` was pinned to `10`, so it
-  missed the `8` that shipped. The guard is now independent of any number. It
-  matches `at or under <n>`, `cap of <n>`, and `keep concurrent requests at or
-  under`.
+- The guard in `tests/test_cap_copy.py` was pinned to `10`, so it missed the `8`
+  that shipped. The guard is now independent of any number. It matches `at or
+  under <n>`, `cap of <n>`, and `keep concurrent requests at or under`.
 - `skills/luna-doctor/SKILL.md` now describes the tool that ships. The chart is
   one stacked-area graph, not two panels, and it draws no advisory-concurrency
   rule. Admission deadlines are per model and carry their sample counts, and
@@ -119,7 +145,7 @@ Versioning policy:
   `--plan`, and `--baseline prev`. It tells an agent to say whose number it
   quotes, and never to repeat the width of one plan as a gateway fact.
   `README.md` lost its version check from two releases ago, its promise of a
-  latency panel, and its claim that codex is not analysed.
+  latency panel, and its claim that codex is not analyzed.
 
 ## [0.2.0-alpha.3] - 2026-10-24
 
@@ -138,7 +164,7 @@ Versioning policy:
 
 ### Added
 
-- The account's real capacity, from LunaRoute's `GET /v1/capacity`. One data-collection layer in `luna_doctor/sources.py`: `fetch_capacity()` beside the existing fetchers, cached to disk for 5 minutes (the endpoint answers in 4–17s and rate-limits at 60/min, so nothing fetches per-render), provenance-carrying (`account` — a new sixth provenance word for fetched-account values, beside measured/declared/catalog/configured/unknown), degrading to unknown — never zero, never a default, every null preserved as the API's own story. `luna-doctor capacity` renders the API's four pages as a first-class report — now (live occupancy, ledger health, saturation), config (plan, priority and background concurrency, overflow routing), history (7d/30d occupancy rollups), and admission (per complete UTC day: accepted / deferred / denied / denied_after_wait, with a null `avg_queue_wait_ms` rendered as no waiting that day, not 0) — and `capacity --online` is the one command that refreshes the cache; every other consumer reads the cache and never touches the network. `analyze` gains an additive `metrics.capacity` block: plan, concurrency and overflow routing, plus the server's admission counts for the window's complete UTC days placed beside the local outcome counts, with `denied_after_wait` rendered as corroboration for the park-deadline rejection class — the paired “local peak 17 · account limit 12” line included. The doc page's semantics are stated wherever server counts sit beside local ones: `days_active` is not `days_covered` (idle days are covered but not active), the overflow-routing caveat says overflow is a capacity allowance, not a promise, and shared-pool exclusions (requests on your own provider keys, embeddings, dedicated capacity) mean the two counts are never reconciled. The chart's priority-concurrency rule now resolves from the account's cached `priority_lanes`, labelled “(account, plan apex)”. A canned live payload — captured once, 2026-10-23, with its null and degraded fields intact — is committed under `tests/fixtures/` so the offline suite tests against the API's real shape.
+- The account's real capacity, from LunaRoute's `GET /v1/capacity`. One data-collection layer in `luna_doctor/sources.py`: `fetch_capacity()` beside the existing fetchers, cached to disk for 5 minutes (the endpoint answers in 4–17s and rate-limits at 60/min, so nothing fetches per-render), provenance-carrying (`account` — a new sixth provenance word for fetched-account values, beside measured/declared/catalog/configured/unknown), degrading to unknown — never zero, never a default, every null preserved as the API's own story. `luna-doctor capacity` renders the API's four pages as a first-class report — now (live occupancy, ledger health, saturation), config (plan, priority and background concurrency, overflow routing), history (7d/30d occupancy rollups), and admission (per complete UTC day: accepted / deferred / denied / denied_after_wait, with a null `avg_queue_wait_ms` rendered as no waiting that day, not 0) — and `capacity --online` is the one command that refreshes the cache; every other consumer reads the cache and never touches the network. `analyze` gains an additive `metrics.capacity` block: plan, concurrency and overflow routing, plus the server's admission counts for the window's complete UTC days placed beside the local outcome counts, with `denied_after_wait` rendered as corroboration for the park-deadline rejection class — the paired “local peak · account limit” line included. The doc page's semantics are stated wherever server counts sit beside local ones: `days_active` is not `days_covered` (idle days are covered but not active), the overflow-routing caveat says overflow is a capacity allowance, not a promise, and shared-pool exclusions (requests on your own provider keys, embeddings, dedicated capacity) mean the two counts are never reconciled. The chart's priority-concurrency rule now resolves from the account's cached `priority_lanes`, labelled “(account, plan <name>)”. A canned live payload — captured once, 2026-10-23, with its null and degraded fields intact — is committed under `tests/fixtures/` so the offline suite tests against the API's real shape.
 - Bare `luna-doctor` is a friendly default run. It opens with the account line from the capacity cache — plan, priority concurrency, background concurrency, overflow routing, or `account: unknown (fetch with: luna-doctor capacity)` when the cache is cold — then a short plain-language welcome: what LunaRoute is (a gateway in front of your models; capacity measured in concurrent requests, not tokens), what this run did (read the last hour of your local agent logs; nothing was sent anywhere), and where the rest of the picture lives, one line per command (`analyze`, `chart`, `fix`, `capacity`). Then it runs the one-hour analysis and draws the chart beside it. The exit code is the analysis verdict; a chart that cannot be drawn says so and steps aside.
 - `chart` (and the default run) writes a PNG beside the SVG — the same scene rasterised by the package's own renderer, zero new dependencies — so the picture can be pasted into a chat, a note or a doc with no font-substitution worries. Both paths print in the summary; `--out` names the SVG and the PNG takes the same stem; `--no-image` suppresses the PNG; `chart --json` carries `png_path` and `png_bytes`.
 

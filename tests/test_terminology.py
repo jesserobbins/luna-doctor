@@ -8,10 +8,10 @@ FORBIDDEN below, as the strings the scan hunts for.
 The scan is over rendered surfaces, not source text, because what a user
 sees is the contract: the plain and pretty renderers, the WhatsApp share
 message and its card, the fix block and its --json envelope, the chart SVG,
-the load-test and compare reports, and the README and skill a reader is pointed
-at. The in-process surfaces are driven with synthetic data that forces every
-advice branch to render; the fix and chart surfaces run the real commands the
-way a user would.
+the load-test and compare reports, and the README and every markdown file of
+the skill package a reader is pointed at. The in-process surfaces are driven
+with synthetic data that forces every advice branch to render; the fix and
+chart surfaces run the real commands the way a user would.
 """
 
 import json
@@ -24,6 +24,21 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "bin", "luna-doctor")
+SKILL_DIR = os.path.join(ROOT, "skills", "luna-doctor")
+
+
+def skill_markdown():
+    """Every markdown file the skill package ships, in a stable order.
+
+    The skill routes an agent to its reference files, and those files carry
+    the numbers; scanning only SKILL.md would let a retired term ship in the
+    file the agent is actually told to open.
+    """
+    found = []
+    for base, _dirs, names in os.walk(SKILL_DIR):
+        found.extend(os.path.join(base, n) for n in sorted(names) if n.endswith(".md"))
+    return sorted(found)
+
 
 # The retired terms. Lowercase: the scan is case-insensitive so "Fan-out"
 # at the start of a rendered line cannot slip through.
@@ -210,9 +225,12 @@ class NoRetiredVocabulary(unittest.TestCase):
         self.assertIn("plan apex", out)
         self._assert_clean("capacity report", out)
 
-    def test_readme_and_skill_are_clean(self):
-        for rel in ("README.md", os.path.join("skills", "luna-doctor", "SKILL.md")):
-            with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+    def test_readme_and_skill_package_are_clean(self):
+        skill = skill_markdown()
+        self.assertTrue(skill, f"no markdown found under {SKILL_DIR}: the scan proves nothing")
+        for path in [os.path.join(ROOT, "README.md")] + skill:
+            rel = os.path.relpath(path, ROOT)
+            with open(path, encoding="utf-8") as fh:
                 self._assert_clean(rel, fh.read())
 
 

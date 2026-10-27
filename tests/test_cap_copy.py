@@ -1,5 +1,19 @@
 import os, re, unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SKILL_DIR = os.path.join(ROOT, "skills", "luna-doctor")
+
+
+def skill_markdown():
+    """Every markdown file the skill package ships, in a stable order.
+
+    The skill is prose an agent loads cold, so it is copy a user ends up
+    reading; narrowing the scan back to SKILL.md would leave the reference
+    files - the ones that carry the numbers - unscanned.
+    """
+    found = []
+    for base, _dirs, names in os.walk(SKILL_DIR):
+        found.extend(os.path.join(base, n) for n in sorted(names) if n.endswith(".md"))
+    return sorted(found)
 
 
 class NoCapAsFact(unittest.TestCase):
@@ -15,10 +29,15 @@ class NoCapAsFact(unittest.TestCase):
         r"|keep concurrent requests at or under)", re.I)
 
     def test_no_file_states_ten_as_a_gateway_fact(self):
-        for rel in ("luna_doctor/cli.py", "luna_doctor/_fix_block.py",
-                    "luna_doctor/_chart_block.py", "README.md",
-                    "skills/luna-doctor/SKILL.md"):
-            with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+        paths = [os.path.join(ROOT, rel) for rel in
+                 ("luna_doctor/cli.py", "luna_doctor/_fix_block.py",
+                  "luna_doctor/_chart_block.py", "README.md")]
+        skill = skill_markdown()
+        self.assertTrue(skill, f"no markdown found under {SKILL_DIR}: the scan proves nothing")
+        paths.extend(skill)
+        for path in paths:
+            rel = os.path.relpath(path, ROOT)
+            with open(path, encoding="utf-8") as fh:
                 text = fh.read()
             self.assertIsNone(self.FORBIDDEN.search(text), f"{rel} still states the cap as fact")
 

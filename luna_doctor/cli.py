@@ -61,7 +61,7 @@ from luna_doctor.sources import (CLAUDE_STORE, CODEX_STORE, GATEWAY_HOST,
                                  PI_STORE, SWAMP_EXTRACT_CONCURRENCY_DEFAULT,
                                  SWAMP_LLM_CONCURRENCY_DEFAULT)
 
-VERSION = "0.2.0-alpha.3"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+VERSION = "0.3.0-alpha.1"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 4         # 4: capacity fields renamed to the LunaRoute
                            #     vocabulary (contract.advised_concurrency,
                            #     findings.priority_concurrency: null until
@@ -3189,7 +3189,7 @@ def cmd_capacity(args) -> int:
     return 0 if cap is not None else 2
 
 
-PRERELEASE_NOTE = "alpha — not for production" if "-" in VERSION else ""
+PRERELEASE_NOTE = "alpha, not for production" if "-" in VERSION else ""
 
 def _version_string() -> str:
     return f"luna-doctor {VERSION}" + (f" ({PRERELEASE_NOTE})" if PRERELEASE_NOTE else "")
@@ -3360,7 +3360,7 @@ def main(argv: list[str] | None = None) -> int:
     # stdout is not a terminal someone is reading.
     desc = DESCRIPTION
     if PRERELEASE_NOTE and not os.environ.get("NO_COLOR", "") and sys.stdout.isatty():
-        desc += f"\n\n\033[33m⚠ This is a prerelease ({PRERELEASE_NOTE}) — not recommended for production.\033[0m"
+        desc += f"\n\n\033[33m⚠ This is a prerelease ({PRERELEASE_NOTE}). Not recommended for production.\033[0m"
     ap = argparse.ArgumentParser(prog="luna-doctor", description=desc,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=_version_string())

@@ -143,7 +143,7 @@ def recommendations_swamp(m: dict, agents: list[str], width=None) -> list:
                 "why": (f"Combined budget pi {pi_budget} + extract {extract_n} + llm {llm_n} = {combined} "
                         f"fits the conservative combined budget. Keep the combined total within it when tuning. "
                         f"Defaults: {SWAMP_CITATION_DEFAULT} extract={SWAMP_DEFAULT_EXTRACT}, llm={SWAMP_DEFAULT_LLM}."),
-                "instruction": (f"Your swamp setup already fits the combined budget. No change needed — tell your agent: keep swamp at extract {extract_n} / verify {llm_n}. "
+                "instruction": (f"Your swamp setup already fits the combined budget. No change needed. Tell your agent: keep swamp at extract {extract_n} / verify {llm_n}. "
                                 f"If you retune, keep pi + swamp ≤ {cap}."),
                 "impact": "no change needed; swamp is already within the combined budget.",
             }],
@@ -472,12 +472,12 @@ LUNAROUTE_PREFACE = (
 
 LUNAROUTE_ROUTING_PREFACE = (
     "Routing: by default, non-interactive work (subagents, background tasks) "
-    "should ride the background tier — it is slower but admits more concurrent requests. "
+    "belongs on the background tier. It is slower but admits more concurrent requests. "
     "Interactive work (the session you are watching) rides the priority tier. "
     "Every non-interactive call should use the background variant of your model (e.g. "
     "`glm-5.3-background` rather than `glm-5.3`). If your account has no background "
     "entitlement, background requests are downgraded into the priority pool and still "
-    "count against the same budget — a load test shows the served tier either way."
+    "count against the same budget. A load test shows the served tier either way."
 )
 
 LUNAROUTE_COMMAND_PREFACE = (
@@ -491,7 +491,7 @@ LUNAROUTE_COMMAND_PREFACE = (
     "`lunaroute whoami` does not report a plan, and no `lunaroute` subcommand reports a "
     "concurrency number: read those from `luna-doctor capacity`, which asks the account.\n"
     "The `fix` instructions below name the exact config key and desired value. "
-    "Do not paste generated code — paste the instruction to your agent and let "
+    "Do not paste generated code. Paste the instruction to your agent and let "
     "the agent apply it."
 )
 
@@ -635,7 +635,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                 "why": _why(evidence,
                             "Already `0`, which means the idle budget is disabled - as permissive as this"
                             " setting gets. No change needed."),
-                "instruction": "No change needed — httpIdleTimeoutMs is already disabled (0), which is the correct posture for background-heavy traffic.",
+                "instruction": "No change needed. httpIdleTimeoutMs is already disabled (0), and that is the correct posture for background-heavy traffic.",
                 "impact": "nothing to do; recorded so the verdict is not silent about it.",
             })
 
@@ -790,9 +790,9 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                                 " advised width instead.",
                                 bg_note),
                     "instruction": (f"Ask your agent: in {CODEX_CONFIG} set {pretty_keys} to {desired}. "
-                                    f"Existing keys in that file must be preserved. No shell is needed — let the agent edit the TOML directly. "
+                                    f"Existing keys in that file must be preserved. No shell is needed. Let the agent edit the TOML directly. "
                                     f"Remember codex reads [agents] from config.toml, but a LunaRoute profile in "
-                                    f"~/.codex/lunaroute.config.toml can override tier — keep tier there, limits here."),
+                                    f"~/.codex/lunaroute.config.toml can override tier. Keep tier there, and set limits here."),
                     "impact": _impact(peak, target, width_known),
                 }],
                 "note": ("Codex reads `[agents]` from config.toml, but a LunaRoute profile lives in"
@@ -843,8 +843,8 @@ def render_fix(recs, m, as_json: bool) -> None:
     if not recs:
         print("Nothing to change: no agent is configured in a way that can overflow the gateway.")
         return
-    print("These are instructions for your agent. luna-doctor does not edit files itself —"
-          " copy the relevant block and paste it to the agent that owns the harness.")
+    print("These are instructions for your agent. luna-doctor does not edit files itself."
+          " Copy the relevant block and paste it to the agent that owns the harness.")
     print()
     for line in _wrap(_lunaroute_preface_text(), 72):
         print(line)
