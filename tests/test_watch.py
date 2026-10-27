@@ -391,6 +391,22 @@ class EveryEmittedString(unittest.TestCase):
             self.assertLessEqual(outside_ascii, {"·"}, line)
 
 
+class TheNewEventSurvivesShortening(unittest.TestCase):
+    def test_a_new_429_is_named_ahead_of_unchanged_admission_refusals(self):
+        """The line prints because three 429s arrived. Shortening must not cut
+        them off in favour of a class that did not move."""
+        def local(rate, adm):
+            return {"requests": 20, "peak_concurrency": 11, "window_hours": 0.25,
+                    "by_outcome": {"rate_limited": rate, "admission_timeout": adm,
+                                   "completed": 4}}
+        before = local(1, 4)
+        now = local(4, 4)
+        cap = account(in_use=11, limit=12)
+        line = watch.sample_line(now, cap, "2026-10-26T04:00:01Z", before)
+        self.assertIn("rate limited", line)
+        self.assertLessEqual(len(line), 100, line)
+
+
 class StaleSampleIsNotCurrent(unittest.TestCase):
     def test_a_sample_that_is_no_longer_fresh_reads_as_unknown(self):
         """Yesterday's saturation beside today's timestamp would be a fact the

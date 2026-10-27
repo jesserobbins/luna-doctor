@@ -524,7 +524,15 @@ def attribute(local, capacity, priority) -> Attribution:
     # capacity of the account was exceeded, and nothing else. Requiring a fetched
     # sample on top of that let a window of real refusals land on
     # "concurrency is not what is wrong here".
-    corroborated = (acct.saturated or bool(acct.denial_days)
+    # A whole-day admission total says nothing about a 15-minute window inside
+    # that day: at 00:05 UTC the day has barely started, and yesterday's denials
+    # are not evidence about today's stall. Day totals corroborate only when the
+    # window is itself day-scale.
+    day_scale = False
+    hours = local.get("window_hours") if isinstance(local, dict) else None
+    if isinstance(hours, (int, float)) and not isinstance(hours, bool):
+        day_scale = hours >= 12
+    corroborated = (acct.saturated or (day_scale and bool(acct.denial_days))
                     or facts.account_limit > 0 or facts.rate_limited > 0)
     rows = _rows(facts, width, source, acct)
 
@@ -603,6 +611,21 @@ def attribute(local, capacity, priority) -> Attribution:
             "luna-doctor capacity shows it.",
         ]
         return Attribution(VERDICT_YOUR_ORG, headline, rows, actions)
+
+    # ---- 3b. a stall with no owner outranks the gateway branch ----------
+    # An upstream failure explains an upstream error, not an idle stream that the
+    # harness killed. When both appear, the stall still needs its owner named.
+    if stalls and facts.upstream and not corroborated:
+        headline = ("Concurrency pressure is present, but the owner is not established: %s "
+                    "stalled until the harness idle budget stopped the stream, and %s also "
+                    "failed upstream. The upstream failures explain themselves. The stall does "
+                    "not, so run %s to read the account's occupancy."
+                    % (_requests(stalls, "request", "requests"),
+                       _requests(facts.upstream, "request", "requests"), CAPACITY_COMMAND))
+        return Attribution(VERDICT_UNKNOWN, headline, rows, [
+            "Run %s for the account's own occupancy." % CAPACITY_COMMAND,
+            "Retry the upstream failures. They are a separate event from the stall.",
+        ])
 
     # ---- 4. upstream failures, no refusal, no occupancy -----------------
     # Saturation does not suppress this branch. An upstream failure with no local

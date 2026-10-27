@@ -260,17 +260,24 @@ def _refusal_clause(facts: _Local, previous: Optional[_Local], notes: bool,
     move. `limit` stops after that many classes, for a line that must stay
     short.
     """
-    bits = []
+    # Classes that moved sort first when the line must be shortened. A line that
+    # prints because three 429s just arrived must name the 429s, not the four
+    # unchanging admission refusals that happen to come earlier in the fixed
+    # order. Without this, a new event could be cut off the end of its own line.
+    ordered = []
     for field, label in _REFUSALS:
         count = getattr(facts, field)
         if not count:
             continue
         was = getattr(previous, field) if previous is not None else None
-        note = (" (was %d)" % was
-                if notes and was is not None and was != count else "")
-        bits.append("%d %s%s" % (count, label, note))
-        if limit is not None and len(bits) >= limit:
-            break
+        moved = was is not None and was != count
+        note = (" (was %d)" % was if notes and moved else "")
+        ordered.append((0 if moved else 1, field, "%d %s%s" % (count, label, note)))
+    if previous is not None:
+        ordered.sort(key=lambda item: item[0])
+    bits = [text for _rank, _field, text in ordered]
+    if limit is not None:
+        bits = bits[:limit]
     return " and ".join(bits)
 
 

@@ -243,6 +243,17 @@ class ToolEvidenceSurvives(unittest.TestCase):
         self.assertIn("~/private/x", redact("at /users/jesse/private/x"))
 
 
+class MaskedHomePrefix(unittest.TestCase):
+    def test_a_home_with_a_digit_in_it_is_redacted_in_its_masked_form(self):
+        out = redact_masked("at /opt/team/jesse#/file here", home="/opt/team/Jesse2")
+        self.assertNotIn("/opt/team", out)
+        self.assertIn("~/file", out)
+
+    def test_an_uppercase_credential_with_digits_is_redacted(self):
+        out = redact("key LR_7F3A9C2D5E8B1A4F6C0D3E7A here")
+        self.assertIn(MARK_TOKEN, out)
+
+
 class MaskedSignature(unittest.TestCase):
     def test_an_address_masked_in_its_domain_is_redacted(self):
         self.assertNotIn("example", redact_masked("contact jesse@example#.com"))

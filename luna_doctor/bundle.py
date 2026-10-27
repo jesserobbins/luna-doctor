@@ -73,7 +73,10 @@ _TOKEN = r"[A-Za-z0-9_\-]{24,}"
 # like CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS. A redactor that eats those removes
 # the reason the block exists. An all-caps-and-underscore run with no digit is a
 # name; a credential always carries digits or mixed case.
-_NAME_NOT_SECRET = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# No digit may appear. `CONCURRENT_REQUEST_LIMIT_EXCEEDED` has none and is a
+# name. `LR_7F3A9C2D5E8B1A4F6C0D3E7A` has digits and is a credential: allowing
+# digits here let an uppercase key through untouched.
+_NAME_NOT_SECRET = re.compile(r"^[A-Z][A-Z_]*$")
 
 
 def _redaction_pattern(home):
@@ -261,18 +264,41 @@ def _masked_view(text):
 def redact_masked(text, home=None):
     """`redact` for text that has been through `error_signature()`.
 
-    The signature masks every digit with `#`, including digits inside an address
-    or a credential, so a pattern run on the raw text misses both. This runs the
-    same patterns over a shadow copy where `#` reads as a digit and cuts the
-    matched spans out of the original. Callers that hold a signature use this,
-    because a widened character class still lets `jesse@example#.com` through.
+    The signature masks every digit as `#` and lowercases the text, so two
+    directions are needed and they are not the same:
+
+    - a home path in the text reads `/opt/team/jesse#/file`, so the *prefix* is
+      put through the same mask (digits to `#`, lowercased) and matched against
+      the raw text;
+    - an address or a credential in the text reads `jesse@example#.com`, so the
+      text is put through the inverse shadow (each `#` read as a digit) and the
+      email and token patterns run over that, with the matched spans cut out of
+      the original.
+
+    Doing only one direction leaves the other leak, which is how the first
+    masked pass let a home path with a digit in it through.
     """
     source = text if isinstance(text, str) else str(text)
-    pattern = _redaction_pattern(home or None)
-    out, last = [], 0
-    for match in pattern.finditer(_masked_view(source)):
-        out.append(source[last:match.start()])
-        out.append(_redacted(match))
-        last = match.end()
-    out.append(source[last:])
-    return "".join(out)
+
+    def _apply(pattern, haystack):
+        pieces, last = [], 0
+        for match in pattern.finditer(haystack):
+            pieces.append(source[last:match.start()])
+            pieces.append(_redacted(match))
+            last = match.end()
+        pieces.append(source[last:])
+        return "".join(pieces)
+
+    out = source
+    if isinstance(home, str) and home:
+        for prefix in {re.sub(r"\d", "#", home), re.sub(r"\d", "#", home).lower()}:
+            if not prefix:
+                continue
+            # A prefix match becomes `~`, the same replacement the shared pattern
+            # makes for a home path. No named groups here, so no _redacted().
+            pattern = re.compile(r"(?<![A-Za-z0-9_.\-])%s(?=/|$)" % re.escape(prefix))
+            source = out
+            out = pattern.sub("~", out)
+    source = out
+    out = _apply(_redaction_pattern(None), _masked_view(out))
+    return out

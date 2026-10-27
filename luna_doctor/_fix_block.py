@@ -904,9 +904,10 @@ def render_fix(recs, m, as_json: bool) -> None:
             "After restarting the harness, run: luna-doctor analyze --baseline prev", 70):
         print("  " + line)
     for line in _wrap(
-            "Success looks like: 0 request(s) blocked at admission, 0 silent stall(s), and no "
-            "429s in the new window - with enough traffic in both windows for the comparison to "
-            "mean anything (it says inconclusive when there is not).", 70):
+            "Success looks like `better`: a lower rate of blocked-at-admission requests than the "
+            "window before it, at the same time as no new silent stalls and no new 429s. The "
+            "comparison says `inconclusive` when either window holds too few requests to judge, "
+            "and that is not a failure.", 70):
         print("  " + line)
     print()
 
@@ -941,6 +942,14 @@ def cmd_fix(args) -> int:
     reqs = collect(hours, harnesses, getattr(args, "pi_root", None),
                    getattr(args, "claude_root", None), now=now)
     m = analyse(reqs, hours)
+    # The same priority-tier peak `analyze` computes. Without it every width
+    # comparison on this path silently fell back to total traffic, and the advice
+    # told users to lower settings because of entitled background work.
+    try:
+        m["peak_concurrency_priority"] = max_concurrency(
+            [r for r in timed(reqs) if getattr(r, "tier", "") == "interactive"])[0]
+    except Exception:
+        m["peak_concurrency_priority"] = m.get("peak_concurrency")
     m["declared_plan"] = getattr(args, "plan", None)
     try:
         m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)

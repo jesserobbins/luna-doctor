@@ -249,6 +249,12 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
     peers = _peers_served_during(reqs, req)
     own = req.outcome
     actions = []
+    # A request on the background tier does not draw on the priority pool, so the
+    # priority width says nothing about its wait. The comparison is skipped for
+    # background traffic instead of blaming the wrong pool.
+    is_priority = (getattr(req, "tier", "interactive") or "interactive") == "interactive"
+    if not is_priority:
+        value = None
     prio = _priority_only(reqs)
     prio_in_flight = _in_flight_at(prio, req.start) if req.start is not None else None
     prio_peak = (_peak_during(prio, req.start, req.end)
@@ -304,9 +310,9 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
                          "model itself was answering." % (peers, req.model or "the same model"))
             return head, actions
         if isinstance(value, int) and prio_peak is not None and prio_peak >= value:
-            head = ("This machine held %d concurrent requests at %s, when this request started. "
-                    "The width is %s, so the request queued behind them. It peaked at %d during "
-                    "the wait."
+            head = ("This machine held %d concurrent requests on the priority tier at %s, when "
+                    "this request started. The width is %s, so it queued for room then. The "
+                    "priority tier peaked at %d while it waited."
                     % (prio_in_flight or 0, _clock(req.start), _width_words(value, source),
                        prio_peak))
             actions.append("Narrow the concurrent requests on this machine to fit %s. Or send "
@@ -498,6 +504,11 @@ def explain(req, reqs, capacity=None, priority=None) -> dict:
         rows.append(("error text", text[:220] + ("…" if len(text) > 220 else "")))
 
     headline, actions = _why(req, reqs, capacity, priority)
+    if not _timed(req):
+        # The row already says the timing is unusable; the headline must not quote
+        # a decades-long duration from a record that wrote seconds.
+        headline = ("This request's logged interval is not usable timing, so its duration is "
+                    "unknown. " + headline)
     return {
         "headline": headline,
         "rows": rows,

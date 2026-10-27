@@ -1976,10 +1976,13 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         pressure = pressure or (isinstance(pv, int) and not isinstance(pv, bool))
         width = (f"more than {pv} concurrent requests" if isinstance(pv, int) and not isinstance(pv, bool)
                  else "more concurrent requests than the account's priority concurrency admits")
-        note = ("" if pressure else
+        # The qualification is about the threshold, not about the flag, so it
+        # cannot be conditional on pressure: a stall sets pressure too, and that
+        # made the sentence vanish exactly when the fallback was doing the work.
+        note = ("" if isinstance(pv, int) and not isinstance(pv, bool) else
                 " That count uses this tool's fallback threshold, not the width of your "
-                "account, so it does not change the exit code. Run `luna-doctor capacity "
-                "--online` or declare `--plan` to judge against the real number.")
+                "account. Run `luna-doctor capacity --online` or declare `--plan` to judge "
+                "against the real number.")
         adj.append(
             f"{m['pressure_windows']} window(s) held {width} at once. The longest lasted "
             f"{fmt(w.get('seconds'), 's')} and peaked at "
@@ -3884,10 +3887,15 @@ def cmd_explain(args) -> int:
     elif getattr(args, "blocked", False):
         picked = explain.blocked(reqs, limit)
         if not picked:
-            print(f"luna-doctor: no request in the last {human_window(hours)} was refused by the "
-                  f"gateway. There is no blocked request to explain. A stalled request is a "
-                  f"different event: run `luna-doctor explain` with no flag to see it.",
-                  file=sys.stderr)
+            message = (f"no request in the last {human_window(hours)} was refused by the "
+                       f"gateway. There is no blocked request to explain. A stalled request is a "
+                       f"different event: run `luna-doctor explain` with no flag to see it.")
+            if args.json:
+                print(json.dumps(envelope("explain", {
+                    "headline": message, "requests": [], "window_hours": hours,
+                }, contract=CONTRACT), indent=2))
+            else:
+                print(f"luna-doctor: {message}", file=sys.stderr)
             return 0
     elif getattr(args, "slowest", False):
         picked = explain.slowest(reqs, limit)
@@ -4091,6 +4099,11 @@ def cmd_analyze(args) -> int:
                 rows.append((row.label, row.value))
         for line in rep.adjustments[:3]:
             rows.append(("next", line))
+        # The `change:` section is the verification stage, so it is never dropped
+        # by the slice above: a ticket without it cannot show whether a fix helped.
+        for line in rep.adjustments[3:]:
+            if line.startswith("change"):
+                rows.append(("change", line))
         # Redaction is the promise of this surface, so it runs over everything
         # that reaches it: the rows, the headline, the verdict sentence, and the
         # store identity - which carries real paths whenever --pi-root or

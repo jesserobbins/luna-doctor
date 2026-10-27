@@ -616,8 +616,14 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
     def _labels(f, ts_list):
         return [datetime.fromtimestamp(t, timezone.utc).strftime(f) for t in ts_list]
     labels = _labels(fmt, ticks)
-    if not day_labels and len(set(labels)) != len(labels):
-        fmt = "%H:%M:%S"
+    if len(set(labels)) != len(labels):
+        # A short window puts two ticks in one minute; a window of a few days puts
+        # two ticks on one date. Both read as a rendering bug, so a repeated label
+        # triggers the finer format and then fewer ticks.
+        if not day_labels:
+            fmt = "%H:%M:%S"
+        else:
+            fmt = "%b %d %H:%M"
         labels = _labels(fmt, ticks)
         while len(set(labels)) != len(labels) and len(ticks) > 2:
             ticks = ticks[::2]
