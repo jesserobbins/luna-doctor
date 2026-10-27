@@ -84,6 +84,16 @@ Say the window was empty and widen once. If the wider window is empty too, run
 the tool can read and a machine that was quiet are two answers. Only `discover`
 tells them apart.
 
+`discover` also reports a local `agentsview`, when that command is installed. It
+is a second view of session history: an index of the session files of several
+harnesses, in SQLite. The tool reads it with one `agentsview projects --json`
+query. It never starts a daemon, never serves and never syncs, because a
+diagnostic run must not change the data it reads. A row that reads
+`present · unreadable (...)` means the command is installed and did not answer.
+Read it as "no second view this time", never as "no sessions existed".
+When the local logs are empty and agentsview reports sessions, the logs were
+rotated or moved. Say that, and ask for the store root with `--pi-root`.
+
 ## How this playbook ends
 
 The answer has four parts, in this order.

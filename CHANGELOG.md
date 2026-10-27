@@ -17,6 +17,46 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.2] - 2026-10-27
+
+### Added
+
+- `discover` reports a local `agentsview`, when that command is installed. It
+  gives the number of projects and sessions the index holds. The tool reads it
+  with one `agentsview projects --json` query. It starts no daemon, serves
+  nothing and syncs nothing, because a diagnostic run must not change the data
+  it reads. An installed command that does not answer is reported as
+  `present · unreadable` with the reason, never as absent and never as a count.
+  The reports keep reading the harness logs. agentsview is a second view of
+  session history, so it tells a rotated or moved store apart from a quiet
+  machine.
+
+### Changed
+
+- Every surface that a person reads now follows Simple English, in the spirit of
+  ASD-STE100: short sentences, active voice, simple tenses, one word for one
+  meaning. The change removes 385 em-dashes, semicolons, contractions, modal
+  forms and bold lead-ins from the README, the agent skill and the newest
+  release notes, and 10 more from the copy that the CLI prints. A release note
+  from an earlier version stays as it was written, because it is a record.
+- `scripts/check_simple_english.py` finds the violations that a machine can see,
+  and `tests/test_simple_english.py` runs it over the README, every skill file
+  and the newest CHANGELOG section. A new em-dash in the README now fails a
+  test.
+
+### Fixed
+
+- The two chart images in `assets/` come from a generated log store, not from an
+  account and not from a real session. The first version of those images carried
+  a real plan name and a real account width in the dashed rule.
+  `scripts/make_demo_charts.py` builds the store from an hour-of-week rhythm, a
+  mix of models and tiers, and a small share of refusals. It leaves the capacity
+  cache empty, so the rule is a `--plan teams` declaration and the picture states
+  that it is declared. The seed is fixed, so the images regenerate.
+- The advice copy writes "belongs" where it used to write a modal, and the
+  prerelease banner uses a comma instead of an em-dash.
+
+
 ## [0.3.0-alpha.1] - 2026-10-27
 
 ### Added

@@ -199,22 +199,24 @@ block does not carry the layout of your machine.
 priority-concurrency rule, and red flare ticks mark requests the gateway
 rejected](assets/chart-7d.png)
 
-Seven days of example traffic. The stack is the concurrent requests in flight.
-The dashed rule is a declared width, not a measured one. The open circle is the
-peak. Each red tick on the top edge is a request that the gateway rejected.
+Seven days of generated example traffic. The stack is the concurrent requests
+in flight, split by model and by scheduling class. The dashed rule is a declared
+width, not a measured one. The open circle is the peak. Each red tick on the top
+edge is a request that the gateway rejected. The thin stretches are the night.
 
-![One day of the same example: the stack never reaches the rule, and nothing
-was rejected](assets/chart-24h.png)
+![One day of the same example: a burst crosses the rule and five requests were
+refused](assets/chart-24h.png)
 
-One day of the same example logs. Nothing reaches the rule and nothing was
-rejected. That is the honest answer on a quiet day. The picture says so, and
-the person who reads it says so too.
+The same store, for the last day only. A burst crosses the declared width, and
+five requests were refused at admission. A day with a busy afternoon and a quiet
+night is what the tool usually has to describe.
 
-Both pictures above come from a synthetic log store, not from an account. They
-carry a declared width, so no plan and no account number appears in them. Run
-`python3 scripts/make_demo_charts.py` to write them again. The script builds the
-fake store, points the chart at it, and leaves the capacity cache empty so no
-account value can reach the picture.
+Both pictures come from a synthetic log store, not from an account and not from
+a real session. They carry a declared width, so no plan and no account number
+appears in them. Run `python3 scripts/make_demo_charts.py` to write them again.
+The script generates the store from an hour-of-week rhythm, a mix of models and
+tiers, and a small share of refusals, then points the chart at it and leaves the
+capacity cache empty, so no account value can reach the picture.
 
 A standalone SVG opens anywhere. It has no embedded or remote fonts, so the text
 names a system font stack. It has no scripts and no CDN. A PNG is written
@@ -288,6 +290,7 @@ Read-only, and offline by default for `discover` / `analyze` / `fix` / `chart`:
 | claude-code | `~/.claude/projects/**/*.jsonl` |
 | codex | `~/.codex/sessions/**/*.jsonl`: parsed into requests and counted as measured per model in the combined snapshot (compressed `*.jsonl.zst` rollouts are skipped because the Python 3.9 stdlib has no zstd), but not classified into the outcome classes above |
 | swamp | `~/.swamp` / sibling `swamp-tracker` repo: reported only while its activity falls inside the window |
+| agentsview | the local `agentsview` command, when it is installed: `discover` reports how many projects and sessions it holds, through one `agentsview projects --json` query. It is a second view of session history, never a log store, and the reports still read the harness logs. No daemon, no serve, no sync |
 
 Swamp is counted only when it is in use: files under `.swamp/data` or
 `.swamp/workflow-runs` modified inside the window. A populated but idle swamp

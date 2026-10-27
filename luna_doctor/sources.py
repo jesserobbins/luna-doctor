@@ -32,6 +32,8 @@ from __future__ import annotations
 import glob
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import time
 import urllib.error
@@ -1450,3 +1452,57 @@ class Snapshot:
             "findings": self.findings,
             "provenance": PROVENANCE_LEGEND,
         }
+
+
+# ---- agentsview: a second, read-only view of session history ---------------
+# agentsview indexes the session files of several agent harnesses into SQLite
+# and can report what it holds. It is optional, and luna-doctor treats it as a
+# second opinion about session history, never as a log store: the reports keep
+# reading the harness logs directly.
+#
+# Read-only means here: one `projects --json` query, no daemon, no serve, no
+# sync. A machine where agentsview is installed but not answering is reported
+# as unreadable with a reason, never as absent and never as a count.
+
+AGENTSVIEW_TIMEOUT_S = 5.0
+
+
+def agentsview_status(timeout: float = AGENTSVIEW_TIMEOUT_S) -> dict:
+    """What a local agentsview holds, or why we cannot say.
+
+    Never starts a daemon, never syncs, never writes. `present` says the binary
+    is on PATH; `readable` says the query answered; `sessions` and `projects`
+    are only set when the answer parsed.
+    """
+    exe = shutil.which("agentsview")
+    out = {"present": exe is not None, "path": exe, "readable": False,
+           "sessions": None, "projects": None, "reason": None,
+           "query": "agentsview projects --json"}
+    if exe is None:
+        out["reason"] = "not installed"
+        return out
+    try:
+        proc = subprocess.run([exe, "projects", "--json"], capture_output=True,
+                              text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        out["reason"] = f"query failed: {e.__class__.__name__}"
+        return out
+    if proc.returncode != 0:
+        out["reason"] = f"query exited {proc.returncode}"
+        return out
+    try:
+        payload = json.loads(proc.stdout or "[]")
+    except ValueError:
+        out["reason"] = "query output was not JSON"
+        return out
+    if not isinstance(payload, list):
+        out["reason"] = "query output was not a list"
+        return out
+    sessions = 0
+    for entry in payload:
+        if isinstance(entry, dict) and isinstance(entry.get("session_count"), int):
+            sessions += entry["session_count"]
+    out["readable"] = True
+    out["projects"] = len(payload)
+    out["sessions"] = sessions
+    return out

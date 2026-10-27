@@ -61,7 +61,7 @@ from luna_doctor.sources import (CLAUDE_STORE, CODEX_STORE, GATEWAY_HOST,
                                  PI_STORE, SWAMP_EXTRACT_CONCURRENCY_DEFAULT,
                                  SWAMP_LLM_CONCURRENCY_DEFAULT)
 
-VERSION = "0.3.0-alpha.1"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+VERSION = "0.3.0-alpha.2"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 4         # 4: capacity fields renamed to the LunaRoute
                            #     vocabulary (contract.advised_concurrency,
                            #     findings.priority_concurrency: null until
@@ -992,6 +992,8 @@ def discover(verbose: bool = False) -> dict:
     sw["inUse"] = sw_state["in_use"]
     sw["evidence"] = sw_state["evidence"]
     found["swamp"] = sw
+    # agentsview is optional and read only: one query, no daemon, no sync.
+    found["agentsview"] = sources.agentsview_status()
     return found
 
 
@@ -2896,6 +2898,7 @@ def _discover_stores(d: dict) -> dict:
     out = {"stores": stores, "lunaroute_config": d["lunaroute_config"]}
     if d.get("swamp") is not None:
         out["swamp"] = d["swamp"]
+    out["agentsview"] = d.get("agentsview")
     return out
 
 
@@ -2928,12 +2931,25 @@ def build_discover_report(d: dict) -> report.Report:
             bits.append(sw["repoDir"])
         bits.append(f"({sw.get('evidence', 'activity in window')})")
         rows.append(report.Row("swamp", " · ".join(bits)))
+    av = d.get("agentsview")
+    if av is not None:
+        if not av.get("present"):
+            bits = ["not installed"]
+        elif not av.get("readable"):
+            bits = ["present", "unreadable", av.get("reason") or "no reason given"]
+        else:
+            bits = ["present", f"{av.get('projects', 0)} projects",
+                    f"{av.get('sessions', 0)} sessions", "read only"]
+        rows.append(report.Row("agentsview", " \u00b7 ".join(bits)))
     lr = d.get("lunaroute_config")
     if lr is not None:
         state = "present" if lr.get("present") else "absent"
         rows.append(report.Row("lunaroute", f"{state} · {lr.get('path', '')}"))
     footnote = ("luna-doctor reads these stores read-only. codex rollouts are mostly zstd and are\n"
-                "not LunaRoute traffic on most machines, so tier analysis skips them for now.")
+                "not LunaRoute traffic on most machines, so tier analysis skips them for now.\n"
+                "agentsview, when it is installed, is a second view of session history: one\n"
+                "read-only query, never a daemon and never a sync. The reports still read the\n"
+                "harness logs.")
     return report.Report(headline="stores", sections=[report.Section("", rows)],
                          footnote=footnote)
 
