@@ -524,6 +524,23 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
     # starting point, labelled as advice rather than as a gateway fact.
     resolved, resolved_src = _priority_for_advice(m)
     target = resolved or ADVISED_CONCURRENCY
+    # When swamp is in use and its split is reduced to fit, pi's own budget is the
+    # pi slice of that split, not the whole width: emitting both a width target and
+    # a split that add up past the width is advice that cannot be followed.
+    swamp_pi = None
+    if "swamp" in agents:
+        try:
+            _present, _repo = _swamp_present(float(m.get("window_hours") or 24.0))
+            if _present:
+                _cap = resolved if isinstance(resolved, int) and not isinstance(resolved, bool) \
+                    and resolved > 0 else INTERACTIVE_BURST_CAP
+                _pi_rec, _ex_rec, _llm_rec = _swamp_split(_cap)
+                if _ex_rec and _pi_rec < target:
+                    swamp_pi = _pi_rec
+        except Exception:
+            swamp_pi = None
+    if swamp_pi is not None:
+        target = swamp_pi
     # When the width is unknown, the number in the instruction is a starting
     # point, never the account's. The sentence below every such instruction says
     # so, because a config value a reader cannot check is worse than no value.
@@ -533,7 +550,12 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
         start_note = (" This value is a starting point. The priority concurrency of your "
                       "account is unknown here. Run `luna-doctor capacity --online`, or declare "
                       "`--plan <name or number>`, and use that number instead.")
-    peak = m["peak_concurrency"]
+    # The peak the width is set against: the priority tier only. The all-tier peak
+    # is what `analyze` reports as total traffic, and comparing it with a priority
+    # allowance calls ten entitled background requests a breach.
+    peak = m.get("peak_concurrency_priority")
+    if not isinstance(peak, int) or isinstance(peak, bool):
+        peak = m["peak_concurrency"]
     dead = m["by_outcome"].get("admission_timeout", 0)
     idle_stalls = m["by_outcome"].get("client_idle_timeout", 0)
     bgcount = m["by_tier"].get("background", 0)

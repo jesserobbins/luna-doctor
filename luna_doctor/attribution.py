@@ -605,7 +605,12 @@ def attribute(local, capacity, priority) -> Attribution:
         return Attribution(VERDICT_YOUR_ORG, headline, rows, actions)
 
     # ---- 4. upstream failures, no refusal, no occupancy -----------------
-    if facts.upstream and rejected == 0 and facts.account_limit == 0 and not corroborated:
+    # Saturation does not suppress this branch. An upstream failure with no local
+    # refusal or stall is the gateway's own error, and a full pool does not change
+    # what the log says: dropping the "not corroborated" test here made a window of
+    # pure upstream errors read "nothing in the window was refused, stalled or
+    # failed" whenever the account happened to be busy.
+    if facts.upstream and rejected == 0 and facts.account_limit == 0:
         headline = (
             "The gateway: %s, with no refusal at admission. The peak "
             "concurrency beside them was %s. %s The failure was the "

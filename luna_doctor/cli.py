@@ -4071,6 +4071,14 @@ def cmd_analyze(args) -> int:
         adj.append(f"change verdict: {word} - {reason}")
     # `--for-issue`: the same evidence as one redacted, datable block. It goes
     # out instead of the report, never beside it, so a paste carries one thing.
+    if getattr(args, "for_issue", False) and args.json:
+        # Two artefacts on one stdout is unparseable, and letting --json win
+        # silently hands back the envelope WITH absolute paths, while the flag the
+        # reader typed promised a redacted block. Refuse instead.
+        print("luna-doctor: --for-issue and --json cannot be combined. --for-issue prints a "
+              "redacted text block, --json prints the machine-readable envelope, and the "
+              "envelope is not redacted. Use --for-issue alone to get the block.", file=sys.stderr)
+        return 2
     if getattr(args, "for_issue", False) and not args.json:
         rep = build_report(m, head, adj, att=att)
         # The verdict already opens the block, so its own rows would repeat it.
@@ -4096,11 +4104,13 @@ def cmd_analyze(args) -> int:
 
         def _redact(text):
             # Every string here may have been through `error_signature()`, which
-            # masks digits with `#`, so the masked-safe form runs too.
-            out = bundle_mod.redact_masked(text)
+            # masks digits with `#`, so every pass runs masked-safe: a home path
+            # with a digit in it arrives as `/opt/team/jesse#/file`, and a plain
+            # pattern would leave it alone.
+            out = text
             for prefix in homes:
-                out = bundle_mod.redact(out, home=prefix)
-            return out
+                out = bundle_mod.redact_masked(out, home=prefix)
+            return bundle_mod.redact_masked(out)
 
         rows = [(_redact(label), _redact(value)) for label, value in rows]
         provenance = {
