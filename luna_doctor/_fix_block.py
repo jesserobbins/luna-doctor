@@ -423,21 +423,6 @@ def _sizing_changes(sizing_eval, agents) -> dict:
     return out
 
 
-def _advice_width(m: dict):
-    """(value, source) for the width the advice should aim at.
-
-    The account's number leads; a `--plan` declaration is the fallback; with
-    neither, the value is unknown and the advice names the command that
-    fetches it rather than quoting one plan's default as a universal fact.
-    """
-    capm = m.get("capacity") or {}
-    try:
-        served = capm if capm.get("provenance") == sources.PROV_ACCOUNT else None
-        return attribution.resolve_priority_concurrency(served, m.get("declared_plan"))
-    except Exception:
-        return (None, "unknown")
-
-
 def _impact(peak: int, width=None, known=True) -> str:
     """What this change does at the peak this window measured.
 
@@ -537,7 +522,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
     # The width the advice aims at: the account's own priority concurrency, a
     # declared plan's, or - when neither is known - the old conservative
     # starting point, labelled as advice rather than as a gateway fact.
-    resolved, resolved_src = _advice_width(m)
+    resolved, resolved_src = _priority_for_advice(m)
     target = resolved or ADVISED_CONCURRENCY
     # When the width is unknown, the number in the instruction is a starting
     # point, never the account's. The sentence below every such instruction says
@@ -752,7 +737,10 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
 
     # ---------------- swamp ----------------
     if "swamp" in agents:
-        swamp_recs = recommendations_swamp(m, agents, width=target)
+        # The unresolved value, not `target`: `target` falls back to the starting
+        # constant, and passing it made the unknown-width path unreachable, so the
+        # swamp block claimed a budget the report itself called unknown.
+        swamp_recs = recommendations_swamp(m, agents, width=resolved)
         for grp in swamp_recs:
             out.append(grp)
 
@@ -824,8 +812,8 @@ def render_fix(recs, m, as_json: bool) -> None:
                 # The account's priority concurrency allowance, in concurrent
                 # requests. Resolved account-first, then a --plan declaration;
                 # still null when neither is known: never 0, never a guess.
-                "priority_concurrency": _advice_width(m)[0],
-                "priority_concurrency_source": _advice_width(m)[1],
+                "priority_concurrency": _priority_for_advice(m)[0],
+                "priority_concurrency_source": _priority_for_advice(m)[1],
             },
             "agents": recs,
         }, indent=2))
@@ -839,7 +827,7 @@ def render_fix(recs, m, as_json: bool) -> None:
     for line in _wrap(_lunaroute_preface_text(), 72):
         print(line)
     print()
-    width, source = _advice_width(m)
+    width, source = _priority_for_advice(m)
     if isinstance(width, int):
         where = ("account" if source == "account"
                  else f"declared plan {source[len('plan '):]}" if source.startswith("plan ")

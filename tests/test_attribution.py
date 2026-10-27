@@ -306,6 +306,23 @@ class PriorityTier(unittest.TestCase):
         self.assertIn("priority tier", att.headline)
 
 
+class PeakRowsMatchTheWidth(unittest.TestCase):
+    def test_a_background_heavy_window_never_says_the_peak_sat_inside_the_width(self):
+        """15 requests on both tiers, 1 on the priority tier, width 8. The
+        headline used to place the all-tier peak against the width and claim 15
+        sat inside 8."""
+        att = attribute(
+            {"requests": 16, "by_outcome": {"rate_limited": 1, "completed": 15},
+             "peak_concurrency": 15, "peak_concurrency_priority": 1,
+             "admission_conversion": {"interactive": {"admitted_pct": 100.0}}},
+            account(8, now=busy_now()), (8, "account"))
+        self.assertNotIn("15", att.headline)
+        self.assertIn("1 concurrent request", att.headline)
+        rows = dict(att.rows)
+        self.assertIn("all tiers", rows["peak concurrency"])
+        self.assertIn("set against", rows["peak on the priority tier"])
+
+
 class GatewayVerdict(unittest.TestCase):
     def test_upstream_failures_without_a_refusal_or_occupancy(self):
         att = attribute(

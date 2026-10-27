@@ -1501,9 +1501,11 @@ def _priority_tier(reqs: list[Request]) -> list[Request]:
 
     Comparing a priority width against concurrency across both tiers calls ten
     entitled background requests a breach of a two-request width. Every
-    priority-width comparison goes through this filter. When no request carries
-    an interactive tier the filter steps aside rather than inventing an empty
-    window.
+    priority-width comparison goes through this filter.
+
+    Background-only traffic produces an empty list, deliberately. Falling back to
+    every request there would compare background concurrency with a priority
+    width, which is the mistake this filter exists to stop.
     """
     # Background-only traffic has no priority intervals at all, so the answer is
     # an empty set. Falling back to every request there would compare background
@@ -3425,9 +3427,10 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--store-dir", default=None, metavar="DIR",
                    help="where run extractions are written (default ~/.luna-doctor/store)")
     a.add_argument("--no-store", action="store_true", help="do not persist this run")
-    a.add_argument("--baseline", default=None, metavar="prev",
-                   help="compare with the window before this one (only 'prev' is supported) "
-                        "and print a change: section")
+    a.add_argument("--baseline", default=None, metavar="prev", choices=("prev",),
+                   help="compare with the window before this one and print a change: section. "
+                        "'prev' is the only accepted value, and a typo exits 2 rather than "
+                        "silently running the same comparison")
     plan.add_plan_arg(a)
     a.add_argument("--for-issue", action="store_true",
                    help="print one redacted, datable block for a support ticket or an issue "

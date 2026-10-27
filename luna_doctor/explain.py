@@ -249,12 +249,15 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
     peers = _peers_served_during(reqs, req)
     own = req.outcome
     actions = []
+    prio = _priority_only(reqs)
+    prio_in_flight = _in_flight_at(prio, req.start) if req.start is not None else None
+    prio_peak = (_peak_during(prio, req.start, req.end)
+                 if req.start is not None and req.end is not None else None)
 
     if own == "completed":
         # Served, but the question was "why was this slow". Duration only means
         # something beside the width it ran at: a 145s answer on a quiet machine
         # is the model, and the same answer inside a 12-wide burst is a queue.
-        prio_in_flight = _in_flight_at(_priority_only(reqs), req.start) if req.start is not None else None
         if isinstance(value, int) and prio_in_flight is not None and prio_in_flight > value:
             # The queueing moment is when the request started, not any peak
             # later in its span: a 144-second generation that met a burst in its
@@ -300,12 +303,12 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
                 head += (" %d request(s) to %s were served inside this request's span, so the "
                          "model itself was answering." % (peers, req.model or "the same model"))
             return head, actions
-        prio_peak = _peak_during(_priority_only(reqs), req.start, req.end) if req.start is not None and req.end is not None else None
         if isinstance(value, int) and prio_peak is not None and prio_peak >= value:
-            head = ("This machine held %d concurrent requests at %s. The width is %s. The wait "
-                    "came from the concurrent requests on this machine, because this request "
-                    "queued behind them."
-                    % (prio_peak, _clock(req.start), _width_words(value, source)))
+            head = ("This machine held %d concurrent requests at %s, when this request started. "
+                    "The width is %s, so the request queued behind them. It peaked at %d during "
+                    "the wait."
+                    % (prio_in_flight or 0, _clock(req.start), _width_words(value, source),
+                       prio_peak))
             actions.append("Narrow the concurrent requests on this machine to fit %s. Or send "
                            "the wide work to the -background variant of the same model."
                            % _width_words(value, source))

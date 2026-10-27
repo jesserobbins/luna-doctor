@@ -163,9 +163,12 @@ def change_verdict(current, previous, floor=FLOOR):
             word, label, moved,
             _percent(before_rate), before, before_n,
             _percent(after_rate), after, after_n)
+    # Built from PRESSURES, so a signal added to the tuple cannot leave the
+    # sentence naming three of four and reading as if the fourth was not examined.
+    names = [label for label, _outcome_name in PRESSURES]
+    listed = ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]
     return ("unchanged",
-            "unchanged: blocked at admission, silent stalls and concurrency "
-            "rejections (429) sit at the same rate in both windows")
+            "unchanged: %s sit at the same rate in both windows" % listed)
 
 
 def _rate(count, requests):

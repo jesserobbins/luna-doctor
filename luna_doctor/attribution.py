@@ -440,7 +440,9 @@ def _rows(facts: _LocalFacts, value, source: str, acct: _AccountFacts) -> list:
     """Every row the attribution shows, ordered local then account."""
     rows = [
         ("request count", _requests_phrase(facts)),
-        ("peak concurrency", _concurrent(facts.peak)),
+        ("peak concurrency", _concurrent(facts.peak) + " (all tiers)"),
+        ("peak on the priority tier",
+         _concurrent(facts.peak_priority) + " (the peak the width is set against)"),
         ("priority concurrency", _width_value(value, source)),
     ]
     if (acct.in_use is not None or acct.limit is not None
@@ -588,9 +590,9 @@ def attribute(local, capacity, priority) -> Attribution:
     # ---- 3. the account was the width, not this machine -----------------
     if evidence and corroborated and (width is None or facts.peak_priority < width):
         headline = (
-            "Your organization: this machine's peak concurrency was %s. That "
+            "Your organization: this machine's peak on the priority tier was %s. That "
             "peak sat %s. %s This machine was not the width, the account was."
-            % (_concurrent(facts.peak), _inside_phrase(width, source),
+            % (_concurrent(facts.peak_priority), _inside_phrase(width, source),
                _account_sentence(acct)))
         actions = [
             "Nothing on this machine buys room. The width is the account's, "
@@ -645,7 +647,7 @@ def attribute(local, capacity, priority) -> Attribution:
     headline = (
         "Not concurrency: this machine's peak concurrency was %s. That peak "
         "sat %s. %s Concurrency is not what is wrong here."
-        % (_concurrent(facts.peak), _inside_phrase(width, source), middle))
+        % (_concurrent(facts.peak_priority), _inside_phrase(width, source), middle))
     if evidence:
         actions = [
             "Refresh the account sample with %s before you conclude anything "
