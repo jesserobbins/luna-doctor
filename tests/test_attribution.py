@@ -253,8 +253,9 @@ class YourOrgVerdict(unittest.TestCase):
         att = attribute(local_store(requests=20, peak=3,
                                     by_outcome={"client_idle_timeout": 1}),
                         account(12, days=[day]), (12, "account"))
-        self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict,
+        self.assertEqual(VERDICT_UNKNOWN, att.verdict,
                          "a stall with no denial day and no full pool stays unresolved")
+        self.assertIn("owner is not established", att.headline)
 
     def test_a_named_org_limit_rejection_corroborates_without_any_payload(self):
         """The real complaint: background work filled the pool and the next
@@ -325,11 +326,15 @@ class GatewayVerdict(unittest.TestCase):
         self.assertIn("2 requests failed upstream", att.headline)
 
     def test_a_refusal_at_admission_keeps_the_gateway_verdict_away(self):
+        """An upstream error is not the whole story when a request was also
+        refused at admission: the refusal needs an owner, so this cannot be
+        the gateway's verdict."""
         att = attribute(local_store(requests=20, peak=2,
                                     by_outcome={"admission_timeout": 1,
                                                 "upstream_error": 3}),
                         account(12, now=quiet_now()), (12, "account"))
-        self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)
+        self.assertEqual(VERDICT_UNKNOWN, att.verdict)
+        self.assertIn("owner is not established", att.headline)
 
 
 class NotConcurrencyVerdict(unittest.TestCase):
@@ -350,14 +355,14 @@ class NotConcurrencyVerdict(unittest.TestCase):
         self.assertEqual(VERDICT_YOUR_ORG, att.verdict)
 
     def test_a_stall_with_no_account_agreement_stays_unresolved(self):
-        """A stall is not the account's own word, so without a full pool the
-        owner stays unnamed instead of being called the account's."""
+        """A stall is a concurrency symptom. With no half able to name its owner
+        the answer is "unresolved", not a verdict of "not concurrency"."""
         att = attribute(local_store(requests=20, peak=2,
                                     by_outcome={"client_idle_timeout": 2,
                                                 "completed": 18}),
                         account(12, now=quiet_now()), (12, "account"))
-        self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)
-        self.assertIn("not matched by account occupancy", " ".join(att.actions))
+        self.assertEqual(VERDICT_UNKNOWN, att.verdict)
+        self.assertIn("owner is not established", att.headline)
 
     def test_a_declared_width_and_no_account_half_claims_nothing_about_it(self):
         att = attribute(local_store(requests=5, peak=1), None, (4, "declared"))

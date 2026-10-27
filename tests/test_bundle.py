@@ -27,6 +27,7 @@ from luna_doctor.bundle import (
     issue_block,
     manifest,
     redact,
+    redact_masked,
 )
 
 # Shaped like a real LunaRoute key: the lr_ prefix and 64 hex-ish characters.
@@ -240,6 +241,18 @@ class ToolEvidenceSurvives(unittest.TestCase):
         """error_signature() lowercases error text before it reaches this block."""
         self.assertNotIn("/users/jesse", redact("at /users/jesse/private/x"))
         self.assertIn("~/private/x", redact("at /users/jesse/private/x"))
+
+
+class MaskedSignature(unittest.TestCase):
+    def test_an_address_masked_in_its_domain_is_redacted(self):
+        self.assertNotIn("example", redact_masked("contact jesse@example#.com"))
+
+    def test_an_address_masked_in_its_local_part_is_redacted(self):
+        self.assertNotIn("example.com", redact_masked("contact jesse#@example.com"))
+
+    def test_a_credential_with_masked_digits_is_redacted(self):
+        out = redact_masked("bearer lr_4a8#f2c9d1e0b7a6c5d4e3f2a1b0c9d8e7f6")
+        self.assertIn(MARK_TOKEN, out)
 
 
 if __name__ == "__main__":

@@ -618,6 +618,24 @@ def attribute(local, capacity, priority) -> Attribution:
         ]
         return Attribution(VERDICT_THE_GATEWAY, headline, rows, actions)
 
+    # ---- 4b. evidence exists, its owner does not -------------------------
+    # A refusal or a stall is a concurrency symptom. If no half of this report
+    # can say which half it belongs to, the honest answer is that the owner is
+    # unresolved. "Not concurrency" is a verdict, and this branch has evidence
+    # against it.
+    if evidence:
+        headline = ("Concurrency pressure is present, but the owner is not established: %s "
+                    "refused or stalled in this window, and the account half gives nothing that "
+                    "says whether the pool was full. Run %s to read the account's occupancy, or "
+                    "declare a width with --plan."
+                    % (_requests(evidence, "request", "requests"), CAPACITY_COMMAND))
+        return Attribution(VERDICT_UNKNOWN, headline, rows, [
+            "Run %s for the account's own occupancy. Without it the owner of these "
+            "refusals cannot be named." % CAPACITY_COMMAND,
+            "Move the wide work to the -background variant while you find out. It parks for "
+            "room instead of competing for the priority pool.",
+        ])
+
     # ---- 5. none of the above -------------------------------------------
     if evidence:
         middle = "%s refused or stalled. %s" % (

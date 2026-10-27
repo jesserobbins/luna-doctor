@@ -45,7 +45,10 @@ def local_store(by_outcome=None, peak=11, windows=6):
 def account(in_use=11, limit=12, saturated=False,
             sampled_at="2026-10-24T17:44:03.510815919Z"):
     """The capacity payload's live sample: the account's own occupancy."""
+    # cli._capacity_metrics decides freshness against the window; these fixtures
+    # describe a sample that covers it.
     return {"provenance": "account", "plan": "apex", "priority_lanes": 12,
+            "now_fresh": True,
             "now": {"in_use": in_use, "limit": limit, "available": 1,
                     "saturated": saturated, "sampled_at": sampled_at}}
 
@@ -386,6 +389,20 @@ class EveryEmittedString(unittest.TestCase):
         for line in all_surfaces()["frame"]:
             outside_ascii = {ch for ch in line if ord(ch) > 127}
             self.assertLessEqual(outside_ascii, {"·"}, line)
+
+
+class StaleSampleIsNotCurrent(unittest.TestCase):
+    def test_a_sample_that_is_no_longer_fresh_reads_as_unknown(self):
+        """Yesterday's saturation beside today's timestamp would be a fact the
+        tool invented about right now."""
+        stale = {"provenance": "account", "priority_lanes": 12, "now_fresh": False,
+                 "now": {"in_use": 12, "limit": 12, "saturated": True,
+                         "sampled_at": "2026-10-25T00:00:00Z"}}
+        local = {"requests": 4, "by_outcome": {"completed": 4}, "peak_concurrency": 1,
+                 "window_hours": 0.25}
+        line = watch.sample_line(local, stale, "2026-10-26T04:00:00Z")
+        self.assertIn("unknown", line)
+        self.assertNotIn("12/12", line)
 
 
 class OwnerLabelSurvivesTheCap(unittest.TestCase):

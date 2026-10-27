@@ -132,13 +132,22 @@ class _Account(NamedTuple):
 
 
 def _account_facts(capacity) -> _Account:
+    """The account's occupancy, dropped when the sample no longer describes now.
+
+    `now_fresh` is decided once, by the layer that knows the window. A sample
+    that is no longer fresh is not current occupancy, so it is reported as
+    absent with its timestamp in `sampled_at`, and the clause names the command
+    that refreshes it. Presenting yesterday's saturation beside today's sample
+    time would be the tool inventing a fact about right now.
+    """
     capacity = capacity if isinstance(capacity, dict) else {}
     now = capacity.get("now")
     now = now if isinstance(now, dict) else {}
-    in_use = _int(now.get("in_use"))
-    limit = _int(now.get("limit"))
-    saturated = now.get("saturated") is True or (
-        in_use is not None and limit is not None and in_use >= limit)
+    fresh = capacity.get("now_fresh") is True
+    in_use = _int(now.get("in_use")) if fresh else None
+    limit = _int(now.get("limit")) if fresh else None
+    saturated = fresh and (now.get("saturated") is True or (
+        in_use is not None and limit is not None and in_use >= limit))
     return _Account(in_use=in_use, limit=limit, saturated=saturated,
                     sampled_at=now.get("sampled_at"))
 

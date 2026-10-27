@@ -1505,8 +1505,11 @@ def _priority_tier(reqs: list[Request]) -> list[Request]:
     an interactive tier the filter steps aside rather than inventing an empty
     window.
     """
-    tiered = [r for r in timed(reqs) if getattr(r, "tier", "") == "interactive"]
-    return tiered if tiered else timed(reqs)
+    # Background-only traffic has no priority intervals at all, so the answer is
+    # an empty set. Falling back to every request there would compare background
+    # concurrency with a priority width, which is the mistake this filter exists
+    # to stop.
+    return [r for r in timed(reqs) if getattr(r, "tier", "") == "interactive"]
 
 
 def _by_run(reqs: list[Request]) -> list[dict]:
@@ -4004,8 +4007,7 @@ def cmd_analyze(args) -> int:
     # resolved width re-counts the windows here - otherwise the report would
     # quote one width in prose and measure "wide" against another.
     pv, _pvsrc = _priority_for_advice(m)
-    if isinstance(pv, int) and not isinstance(pv, bool) and pv > 0 \
-            and pv != ADVISED_CONCURRENCY and m.get("requests"):
+    if isinstance(pv, int) and not isinstance(pv, bool) and pv > 0 and m.get("requests"):
         try:
             wide = pressure_windows(_priority_tier(reqs), pv)
             m["pressure_windows"] = len(wide)
@@ -4090,7 +4092,9 @@ def cmd_analyze(args) -> int:
         homes = [home, os.path.realpath(home)]
 
         def _redact(text):
-            out = text
+            # Every string here may have been through `error_signature()`, which
+            # masks digits with `#`, so the masked-safe form runs too.
+            out = bundle_mod.redact_masked(text)
             for prefix in homes:
                 out = bundle_mod.redact(out, home=prefix)
             return out

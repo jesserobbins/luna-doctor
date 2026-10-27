@@ -251,3 +251,28 @@ def manifest(included, omitted) -> List[str]:
     if not omissions:
         omissions.append("omitted: none (every part named above is in the block)")
     return lines + omissions
+
+
+def _masked_view(text):
+    """`text` with the signature mask (`#`) read as a digit, for matching only."""
+    return text.replace("#", "0")
+
+
+def redact_masked(text, home=None):
+    """`redact` for text that has been through `error_signature()`.
+
+    The signature masks every digit with `#`, including digits inside an address
+    or a credential, so a pattern run on the raw text misses both. This runs the
+    same patterns over a shadow copy where `#` reads as a digit and cuts the
+    matched spans out of the original. Callers that hold a signature use this,
+    because a widened character class still lets `jesse@example#.com` through.
+    """
+    source = text if isinstance(text, str) else str(text)
+    pattern = _redaction_pattern(home or None)
+    out, last = [], 0
+    for match in pattern.finditer(_masked_view(source)):
+        out.append(source[last:match.start()])
+        out.append(_redacted(match))
+        last = match.end()
+    out.append(source[last:])
+    return "".join(out)

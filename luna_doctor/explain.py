@@ -53,6 +53,19 @@ OUTCOME_COPY = {
     "request_timeout": "the client request timeout expired",
 }
 
+# The same ceiling analyse() uses to reject an untrustworthy interval. A foreign
+# archive writes timestamps in seconds, which turns a 300s stall into a
+# decades-long span; ranking by that duration would put a phantom request first.
+SANITY_MAX_DURATION_S = 86400.0
+
+
+def _timed(req):
+    """True when this request's interval can be trusted for timing arithmetic."""
+    if req.start is None or req.end is None:
+        return False
+    return 0 < (req.end - req.start) <= SANITY_MAX_DURATION_S
+
+
 # Outcomes where the wait was about room at the gateway, not about the work.
 _ROOM = ("admission_timeout", "client_idle_timeout", "org_concurrency_limit", "rate_limited")
 # Refused at the gateway, as opposed to stalled by the harness: the two failures
@@ -89,20 +102,31 @@ def _in_flight_phrase(n) -> str:
 
 
 def _in_flight_at(reqs, moment: float) -> int:
-    """How many requests were open at `moment`, inclusive of the one we ask about."""
+    """How many requests were open at `moment`, inclusive of the one we ask about.
+
+    Half-open on the right: a request that starts exactly when another ends did
+    not overlap it.
+    """
     n = 0
     for r in reqs:
-        if r.start is None or r.end is None:
+        if not _timed(r):
             continue
         if r.start <= moment < r.end:
             n += 1
     return n
 
 
+def _priority_only(reqs):
+    """The requests on the priority pool: the only ones a priority width bills."""
+    return [r for r in reqs if getattr(r, "tier", "") == "interactive"]
+
+
 def _peak_during(reqs, start: float, end: float) -> int:
     """Peak overlap inside [start, end]: measured, not inferred from a start burst."""
+    # A request that starts exactly at `end` is outside this span, following the
+    # same half-open rule as _in_flight_at.
     points = sorted({r.start for r in reqs
-                     if r.start is not None and start <= r.start <= end})
+                     if r.start is not None and start <= r.start < end})
     points.append(start)
     return max(_in_flight_at(reqs, p) for p in points) if points else 0
 
@@ -230,14 +254,15 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
         # Served, but the question was "why was this slow". Duration only means
         # something beside the width it ran at: a 145s answer on a quiet machine
         # is the model, and the same answer inside a 12-wide burst is a queue.
-        if isinstance(value, int) and in_flight is not None and in_flight > value:
+        prio_in_flight = _in_flight_at(_priority_only(reqs), req.start) if req.start is not None else None
+        if isinstance(value, int) and prio_in_flight is not None and prio_in_flight > value:
             # The queueing moment is when the request started, not any peak
             # later in its span: a 144-second generation that met a burst in its
             # last second did not wait for that burst.
             head = ("Served, but slowly. This machine already held %d concurrent requests when it "
                     "started, above %s, so the request queued behind them. That queue is a likelier "
                     "cause of the %s than the latency of the model."
-                    % (in_flight, _width_words(value, source), _seconds(req.duration)))
+                    % (prio_in_flight, _width_words(value, source), _seconds(req.duration)))
             actions.append("Narrow the concurrent requests on this machine to fit %s. If you do, "
                            "this request will not queue behind the others."
                            % _width_words(value, source))
@@ -275,11 +300,12 @@ def _why(req, reqs, capacity, priority) -> tuple[str, list]:
                 head += (" %d request(s) to %s were served inside this request's span, so the "
                          "model itself was answering." % (peers, req.model or "the same model"))
             return head, actions
-        if isinstance(value, int) and peak is not None and peak >= value:
+        prio_peak = _peak_during(_priority_only(reqs), req.start, req.end) if req.start is not None and req.end is not None else None
+        if isinstance(value, int) and prio_peak is not None and prio_peak >= value:
             head = ("This machine held %d concurrent requests at %s. The width is %s. The wait "
                     "came from the concurrent requests on this machine, because this request "
                     "queued behind them."
-                    % (peak, _clock(req.start), _width_words(value, source)))
+                    % (prio_peak, _clock(req.start), _width_words(value, source)))
             actions.append("Narrow the concurrent requests on this machine to fit %s. Or send "
                            "the wide work to the -background variant of the same model."
                            % _width_words(value, source))
@@ -355,6 +381,9 @@ def _width_words(value: int, source: str) -> str:
 
 # ---- selection --------------------------------------------------------------
 def _duration(req) -> float:
+    """Ranking duration, with an untrustworthy interval ranked last, not first."""
+    if not _timed(req):
+        return -1.0
     return req.duration if req.duration is not None else -1.0
 
 
@@ -439,7 +468,8 @@ def explain(req, reqs, capacity=None, priority=None) -> dict:
          % (req.tier or "unknown")),
         ("when", "unknown" if start_iso == end_iso == "unknown"
          else "%s → %s" % (start_iso, end_iso)),
-        ("duration", _seconds(duration)),
+        ("duration", _seconds(duration) if _timed(req)
+         else "unknown (the logged interval is not usable timing)"),
         ("outcome", "%s - %s" % (req.outcome, OUTCOME_COPY.get(req.outcome, "no known class"))),
     ]
     if req.stop_reason:

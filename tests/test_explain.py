@@ -152,7 +152,7 @@ class Rows(unittest.TestCase):
         doc = explain.explain(req(start=None, end=None), [req(start=None, end=None)],
                               None, (None, "unknown"))
         rows = dict(doc["rows"])
-        self.assertEqual("unknown", rows["duration"])
+        self.assertTrue(rows["duration"].startswith("unknown"), rows["duration"])
         self.assertEqual("unknown", rows["when"])
 
     def test_no_error_message_means_no_row(self):

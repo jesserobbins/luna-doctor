@@ -65,23 +65,23 @@ def _swamp_present(window_hours: float = 24.0) -> tuple[bool, str | None]:
     return bool(state["in_use"]), state["repo"]
 
 
-def _swamp_split() -> tuple[int, int, int]:
-    """Recommended split with pi+extract+llm <= INTERACTIVE_BURST_CAP."""
-    cap = INTERACTIVE_BURST_CAP
-    pi_rec, sw_extract, sw_llm = 4, 3, 2
-    total = pi_rec + sw_extract + sw_llm
-    if total > cap:
-        over = total - cap
-        take_extract = min(over, max(0, sw_extract - 1))
-        sw_extract -= take_extract
-        over -= take_extract
-        if over > 0:
-            take_llm = min(over, max(0, sw_llm - 1))
-            sw_llm -= take_llm
-            over -= take_llm
-        if over > 0:
-            pi_rec = max(2, pi_rec - over)
-    return pi_rec, sw_extract, sw_llm
+def _swamp_split(cap: int = INTERACTIVE_BURST_CAP) -> tuple:
+    """Recommended split with pi + extract + llm <= `cap`.
+
+    Returns (pi, extract, llm). A `cap` of 3 or more gets one request per phase
+    and the remainder to pi, because pi is the interactive work and swamp is the
+    background job. A `cap` below 3 cannot give every phase a slot, so the result
+    is (cap, 0, 0) with the swamp phases at zero: advise running swamp work
+    after the interactive session, never a split that does not fit. Nothing here
+    asserts: an earlier version asserted that the fixed 4/3/2 split fitted the
+    width, which raised AssertionError out of `fix` for every account narrower
+    than nine requests.
+    """
+    cap = max(1, int(cap or 1))
+    if cap < 3:
+        return (cap, 0, 0)
+    pi_rec = cap - 2
+    return (pi_rec, 1, 1)
 
 
 def recommendations_swamp(m: dict, agents: list[str], width=None) -> list:
@@ -148,9 +148,20 @@ def recommendations_swamp(m: dict, agents: list[str], width=None) -> list:
                 "impact": "no change needed; swamp is already within the combined budget.",
             }],
         }]
-    pi_rec, extract_rec, llm_rec = _swamp_split()
-    assert pi_rec + extract_rec + llm_rec <= cap, f"split {pi_rec}+{extract_rec}+{llm_rec} exceeds cap {cap}"
+    pi_rec, extract_rec, llm_rec = _swamp_split(cap)
     combined_rec = pi_rec + extract_rec + llm_rec
+    if extract_rec == 0:
+        # The width cannot hold an interactive request and a swamp phase at the
+        # same time. Say that, with the number, instead of a split that does not
+        # fit.
+        return [{
+            "agent": "swamp",
+            "note": (f"Swamp work is in use inside a window whose priority width leaves no room for "
+                     f"it: the budget is {cap} concurrent request(s). One interactive request plus "
+                     f"either swamp phase exceeds it. Run swamp work when the interactive session is "
+                     f"idle, or raise the width of the account. No split is recommended here."),
+            "changes": [],
+        }]
     return [{
         "agent": "swamp",
         "changes": [
@@ -216,7 +227,7 @@ def pick_background_model(reqs, cat):
             return twin
     for cand in sorted(known):
         if cand.endswith("-background"):
-            return [cand]
+            return cand
     return None
 
 
@@ -678,6 +689,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
             })
 
         idle_env = _declared(cc_cfg.get("env.CLAUDE_STREAM_IDLE_TIMEOUT_MS"))
+        api_env = _declared(cc_cfg.get("env.API_TIMEOUT_MS"))
         # Only raise a budget that is too short. A value already longer than the
         # target is permissive, and telling a user to lower it would make a
         # background request fail earlier than it does today. `too_big` was the
@@ -688,19 +700,33 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
             except ValueError:
                 return True
 
+        # Each timeout is judged on its own. One knob was inspected and both were
+        # rewritten, so a user with a permissive API timeout was told to lower it
+        # and a user with a short one was told nothing.
+        short_timeouts = []
         if _too_short(idle_env, RAISE_TIMEOUT_MS):
+            short_timeouts.append("CLAUDE_STREAM_IDLE_TIMEOUT_MS")
+        if _too_short(api_env, RAISE_TIMEOUT_MS):
+            short_timeouts.append("API_TIMEOUT_MS")
+        if short_timeouts:
             changes.append({
-                "key": "env.CLAUDE_STREAM_IDLE_TIMEOUT_MS + env.API_TIMEOUT_MS",
+                "key": "env." + " + env.".join(short_timeouts),
                 "file": CLAUDE_SETTINGS,
-                "from": idle_env if idle_env is not None else "unset (floor 300000)",
+                "from": ", ".join("%s %s" % (name, _declared(cc_cfg.get("env." + name))
+                                             or "unset (floor 300000)")
+                                  for name in short_timeouts),
                 "to": str(RAISE_TIMEOUT_MS),
                 "why": _why(evidence,
-                            "The stream idle floor is 300s and the API timeout is shorter than the background"
-                            " tier's time to first token. Both belong in the `env` block: the top-level"
-                            " settings keys are ignored behind a custom base URL, which LunaRoute is."),
-                "instruction": (f"Ask your agent to raise CLAUDE_STREAM_IDLE_TIMEOUT_MS and API_TIMEOUT_MS to {RAISE_TIMEOUT_MS} "
-                                f"in {CLAUDE_SETTINGS} (env block). This is what prevents a background request from being killed on the "
-                                f"client side before the gateway answers. Top-level timeout keys do not take effect when LunaRoute is the base URL."),
+                            "The background tier can stay silent for longer than this budget, so the"
+                            " client stops a request the gateway is still working on. Both timeout keys"
+                            " belong in the `env` block, because the top-level settings keys are ignored"
+                            " behind a custom base URL, which LunaRoute is.",
+                            "Short here: " + ", ".join(short_timeouts) + "."),
+                "instruction": (f"Ask your agent to raise {', '.join(short_timeouts)} to {RAISE_TIMEOUT_MS} "
+                                f"in {CLAUDE_SETTINGS} (env block). Leave any value that is already longer alone. "
+                                f"This prevents a background request from being killed on the client side before "
+                                f"the gateway answers. Top-level timeout keys do not take effect when LunaRoute is "
+                                f"the base URL."),
                 "impact": "prevents a demoted request from being killed before it speaks.",
             })
 
