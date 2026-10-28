@@ -61,7 +61,7 @@ from luna_doctor.sources import (CLAUDE_STORE, CODEX_STORE, GATEWAY_HOST,
                                  PI_STORE, SWAMP_EXTRACT_CONCURRENCY_DEFAULT,
                                  SWAMP_LLM_CONCURRENCY_DEFAULT)
 
-VERSION = "0.3.0-alpha.2"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
+VERSION = "0.3.0-alpha.3"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
 SCHEMA_VERSION = 4         # 4: capacity fields renamed to the LunaRoute
                            #     vocabulary (contract.advised_concurrency,
                            #     findings.priority_concurrency: null until

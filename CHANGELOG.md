@@ -17,6 +17,23 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.3] - 2026-10-28
+
+### Removed
+
+- The `load-test` and `compare` commands are gone, with the `--load-test-enable`
+  gate that guarded them. They opened real concurrent sessions against the
+  gateway to measure a width. That is the one thing this tool must not do. It
+  reads what a machine already did, and a diagnostic run must not add to the
+  pressure it is asked to explain. The width keeps two honest sources, the
+  account through `luna-doctor capacity` and a `--plan` declaration, and neither
+  of them opens a session.
+- The skill and the README no longer describe such a command. The guidance now
+  says that the tool does not generate load at all.
+  `tests/test_skill_package.py` fails if a skill file names a command that the
+  parser does not serve, so the surface cannot return by accident.
+
+
 ## [0.3.0-alpha.2] - 2026-10-27
 
 ### Added
