@@ -4,8 +4,7 @@ Stdlib only, no fixtures to maintain. Run from the repo root:
 
     python3 -m unittest discover -s tests -v
 
-The suite never opens live sessions on the gateway (the load-test commands
-stay behind their --load-test-enable gate), and every CLI run
+The suite never opens live sessions on the gateway, and every CLI run
 points `LUNA_DOCTOR_STORE` at a throwaway directory: nothing here writes to your
 real store or to a log store.
 """
@@ -147,57 +146,11 @@ class ExitCodes(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("unknown agent", err)
 
-    def test_load_test_rejects_zero_width(self):
-        code, _, err = run("load-test", "--n", "0")
-        self.assertEqual(code, 2)
-        self.assertIn("--n must be at least 1", err)
 
     def test_no_data_for_a_harness_we_do_not_read(self):
         code, _, _ = run("analyze", "--harness", "codex", "--since", "1m")
         self.assertEqual(code, 2)
 
-
-class LoadTestGate(unittest.TestCase):
-    """The burst commands are a load test against the live gateway, so they
-    stay behind an explicit opt-in. Without the flag they refuse, say
-    exactly what they would open and what it costs, and exit 2."""
-
-    def test_load_test_without_the_flag_refuses_and_names_the_width(self):
-        code, out, err = run("load-test", "--n", "8")
-        self.assertEqual(code, 2)
-        self.assertIn("--load-test-enable", err)
-        self.assertIn("8 concurrent sessions", err)
-        self.assertEqual(out, "")
-
-    def test_compare_without_the_flag_refuses(self):
-        code, _, err = run("compare", "--n", "4")
-        self.assertEqual(code, 2)
-        self.assertIn("--load-test-enable", err)
-
-    def test_the_refusal_is_honest_about_what_it_opens(self):
-        code, _, err = run("load-test", "--n", "8")
-        self.assertEqual(code, 2)
-        # the message must say what the run really is, not soften it
-        self.assertIn("load test against the live gateway", err)
-        self.assertIn("spending included inference", err)
-        self.assertIn("opt-in only", err)
-        self.assertIn("glm-5.3", err)
-
-    def test_message_says_concurrency_not_credits(self):
-        code, _, err = run("load-test", "--n", "8")
-        # billing/quota framing stays out; "spending included inference" is
-        # the owner's own honesty line and is asserted above
-        for forbidden in ("credit", "token", "cost"):
-            self.assertNotIn(forbidden, err.lower())
-
-    def test_help_lists_it_plainly_but_the_docs_do_not_advertise_it(self):
-        # `--help` is the one place the command stays visible (argparse
-        # cannot hide a subcommand cleanly); the README and the skill are
-        # the surfaces that went quiet
-        code, out, err = run("--help")
-        self.assertEqual(code, 0)
-        self.assertIn("load-test", out)
-        self.assertNotIn("probe", out, "the retired name is gone everywhere")
 
 
 class Chart(unittest.TestCase):
@@ -2920,20 +2873,7 @@ class OtherSurfacesUseReports(unittest.TestCase):
         self.assertEqual(len(rep.sections), 1)
         self.assertTrue(any(r.label == "pi" for r in rep.sections[0].rows))
 
-    def test_probe_report_keeps_the_admission_line(self):
-        m = _load_cli()
-        # A run_probe() result: wait_headers/ttfb are the p50 floats pct() returns.
-        r = {"n": 8, "tiers": {"interactive": 8, "background": 0}, "demoted": 0,
-             "streamed": 8, "silent": 0, "admission_deaths": 0, "errors": 0,
-             "keepalives": 0, "wait_headers": 25.2, "ttfb": 30.0, "cut": 0, "budget_s": 170}
-        rep = m.build_probe_report(r, 8, "glm-5.3")
-        from luna_doctor.report import render_plain
-        out = render_plain(rep)
-        self.assertIn("glm-5.3", out)
-        self.assertIn("blocked at admission 0", out)
 
-
-class StyleAndJson(unittest.TestCase):
     def test_json_wins_over_style(self):
         code, out, _ = run("analyze", "--since", "1h", "--json", "--style", "pretty")
         self.assertIn(code, (0, 1, 2))
@@ -3095,31 +3035,7 @@ class DemotionReason(unittest.TestCase):
         code, out, _ = run("analyze", "--since", "24h")
         self.assertIn("served tier is not in these logs", out)
 
-    def test_probe_report_splits_demoted_by_reason(self):
-        m = _load_cli()
-        r = {"n": 2, "tiers": {"interactive": 0, "background": 2}, "demoted": 2,
-             "streamed": 2, "silent": 0, "admission_deaths": 0, "errors": 0,
-             "keepalives": 0, "wait_headers": 1.0, "ttfb": 2.0, "cut": 0, "budget_s": 170,
-             "direct": [{"reason": "overflow"}, {"reason": "no_entitlement"}]}
-        rep = m.build_probe_report(r, 2, "glm-5.3-background")
-        from luna_doctor.report import render_plain
-        out = render_plain(rep)
-        self.assertIn("demoted 2", out)
-        self.assertIn("overflow 1", out)
-        self.assertIn("no entitlement 1", out)
-        self.assertIn("no-background-entitlement", out)
-        self.assertIn("priority concurrency", out)
 
-    def test_probe_report_without_reasons_keeps_the_old_row(self):
-        m = _load_cli()
-        r = {"n": 8, "tiers": {"interactive": 8, "background": 0}, "demoted": 0,
-             "streamed": 8, "silent": 0, "admission_deaths": 0, "errors": 0,
-             "keepalives": 0, "wait_headers": 25.2, "ttfb": 30.0, "cut": 0, "budget_s": 170}
-        from luna_doctor.report import render_plain
-        out = render_plain(m.build_probe_report(r, 8, "glm-5.3"))
-        self.assertIn("demoted 0", out)
-        self.assertNotIn("overflow 1", out)
-        self.assertNotIn("no entitlement", out)
 
     def test_demotion_note_names_the_priority_pool_when_observed(self):
         m = _load_cli()
@@ -3128,7 +3044,7 @@ class DemotionReason(unittest.TestCase):
         self.assertIn("priority concurrency", note)
         self.assertIn("no background entitlement", note)
 
-    def test_demotion_note_hedges_when_no_load_test_has_spoken(self):
+    def test_demotion_note_hedges_without_a_measured_tier(self):
         m = _load_cli()
         note = m.demotion_note("", "glm-5.3-background")
         self.assertIn("may be running on priority concurrency", note)

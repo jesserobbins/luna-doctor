@@ -109,8 +109,10 @@ put a short client timeout in front of a background request. On an account with
 no background entitlement, `-background` requests are downgraded into the
 priority pool and still count against the same headroom.
 
-`load-test` and `compare` open real concurrent sessions, and both refuse
-without `--load-test-enable`. Never tell a reader to run them.
+This tool does not open requests of its own. It measures what a machine did, so it
+cannot create the pressure it is asked to explain. If someone offers you a load test as
+the next step, that is a different tool and a different decision: it spends real
+concurrent sessions on the account.
 
 ## When the symptom is a 400, not a wait
 

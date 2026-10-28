@@ -642,7 +642,7 @@ def _merge_copies(a: dict, b: dict) -> dict:
 # Task-1 contract, revised: filesystem only. `swamp workspace list` cost a
 # second per run and reported nothing the filesystem could not, so swamp is
 # resolved by walking directories and never by spawning swamp itself.
-# discover() exports stores.swamp.repoDir for downstream tasks (analyze/fix/load-test).
+# discover() exports stores.swamp.repoDir for downstream tasks (analyze/fix).
 
 def _swamp_repo_dir() -> str | None:
     """Resolve one swamp repo dir from the filesystem alone, or None.
@@ -2584,218 +2584,6 @@ def probe_one(idx: int, key: str, model: str, max_tokens: int, timeout: float,
             pass
 
 
-def run_probe(n: int, model: str, max_tokens: int, timeout: float,
-              hard_limit: float) -> dict:
-    """Fire n concurrent streams. `hard_limit` is a true wall clock: when it is
-    reached the sockets are shut down and whatever each request had reached is
-    reported. A request that never terminated is counted as `cut`, never as a
-    success."""
-    if n < 1:
-        raise SystemExit("luna-doctor: --n must be at least 1")
-    if hard_limit <= 0:
-        raise SystemExit("luna-doctor: --max-seconds must be positive")
-    key = routing_key()
-    # A socket timeout longer than the wall clock is a lie: derive it.
-    timeout = hard_limit if timeout <= 0 else min(timeout, max(5.0, hard_limit))
-    results = [
-        {"idx": i, "model": model, "status": None, "tier": None, "warning": None,
-         "class": None, "wait_headers": None, "ttfb": None, "chunks": 0,
-         "keepalives": 0, "duration": None, "finish": None, "error": None,
-         "headers": {}, "outcome": "budget_exceeded", "cut": False}
-        for i in range(n)
-    ]
-    socks: list = []
-    lock = threading.Lock()
-    threads = [
-        threading.Thread(target=probe_one, daemon=True,
-                         args=(i, key, model, max_tokens, timeout, results[i], socks, lock))
-        for i in range(n)
-    ]
-    t0 = time.monotonic()
-    deadline = t0 + hard_limit
-    for t in threads:
-        t.start()
-    for t in threads:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        t.join(remaining)
-    for s in list(socks):
-        try:
-            s.shutdown(2)
-        except Exception:
-            pass
-    for r in results:
-        if r["outcome"] == "budget_exceeded":
-            r["cut"] = True
-            r["outcome"] = "streamed" if r["chunks"] else "silent"
-            r["error"] = r["error"] or f"cut at the {hard_limit:.0f}s budget"
-    live = results
-    wait = [r["wait_headers"] for r in live if r["wait_headers"] is not None]
-    ttfb = [r["ttfb"] for r in live if r["ttfb"] is not None]
-    return {
-        "n": n,
-        "model": model,
-        "wall_s": round(time.monotonic() - t0, 1),
-        "budget_s": hard_limit,
-        "socket_timeout_s": timeout,
-        "tiers": {t: sum(1 for r in live if r["class"] == t) for t in ("interactive", "background")},
-        "demoted": sum(1 for r in live if r["warning"]),
-        "streamed": sum(1 for r in live if r["outcome"] == "streamed"),
-        "silent": sum(1 for r in live if r["outcome"] == "silent"),
-        "admission_deaths": sum(1 for r in live if r["outcome"] == "admission_timeout"),
-        "errors": sum(1 for r in live if r["outcome"] == "error"),
-        "cut": sum(1 for r in live if r["cut"]),
-        "wait_headers": pct(wait, 50),
-        "ttfb": pct(ttfb, 50),
-        "keepalives": sum(r["keepalives"] for r in live),
-        "direct": live,
-    }
-
-
-def _probe_swamp_headroom(probe_n: int) -> str | None:
-    """One-sentence headroom note for a load test, or None when swamp is
-    not in use.
-
-    The load test measured probe_n; swamp's extract+llmConcurrency via
-    sources.swamp_knobs() is a setting. They are reported as separate facts,
-    and the only sum sits inside an explicitly assumed "if ... would" clause.
-    No network, no second load test.
-    """
-    try:
-        state = swamp_state(since=time.time() - 24 * 3600)
-        if not state["in_use"]:
-            return None
-        knobs = sources.swamp_knobs(state["repo"])
-        ex = int(knobs.get("extractConcurrency", {}).get("value", SWAMP_EXTRACT_CONCURRENCY_DEFAULT))
-        ll = int(knobs.get("llmConcurrency", {}).get("value", SWAMP_LLM_CONCURRENCY_DEFAULT))
-    except Exception:
-        return None
-    configured = ex + ll
-    assumed = probe_n + configured
-    verdict_word = "within" if assumed <= INTERACTIVE_BURST_CAP else "past"
-    return (
-        f"swamp is configured for {configured} concurrent requests per behavior (extract {ex} + verify {ll}) "
-        f"- a setting, not measured traffic; this load test measured {probe_n} concurrent sessions. "
-        f"If swamp ran at its configured width during such a load test, the account would see "
-        f"{assumed} concurrent requests, {verdict_word} the conservative combined budget - an "
-        f"assumption, not a measurement. {CAP_COPY[0].upper()}{CAP_COPY[1:]}."
-    )
-
-
-def build_probe_report(r: dict, n: int, model: str) -> report.Report:
-    """One load-test run as rows, with the run's own advice as adjustments.
-
-    The rows keep the old inline printer's order and labels; the bullets
-    that printer printed conditionally become `adjustments` so every
-    renderer can carry them.
-    """
-    # Demotions split by what the live warning header actually said: an
-    # overflow spill and a missing entitlement are different situations.
-    direct = r.get("direct") or []
-    overflow_n = sum(1 for x in direct if x.get("reason") == "overflow")
-    no_ent_n = sum(1 for x in direct if x.get("reason") == "no_entitlement")
-    demoted = r.get("demoted", 0)
-    tier_line = (f"interactive {r['tiers']['interactive']} · background {r['tiers']['background']} "
-                 f"· demoted {demoted}")
-    if demoted:
-        tier_line += f" (overflow {overflow_n} · no entitlement {no_ent_n})"
-    burst = [
-        report.Row("tier header", tier_line),
-        report.Row("outcome",
-                   f"streamed {r['streamed']} · no first token {r['silent']} · "
-                   f"blocked at admission {r['admission_deaths']} · errors {r['errors']} · cut {r['cut']}"),
-        report.Row("wait to headers", f"p50 {fmt(r['wait_headers'], 's')}"),
-        report.Row("first token", f"p50 {fmt(r['ttfb'], 's')}"),
-        report.Row("keep-alives", f"{r['keepalives']}"),
-    ]
-    adj: list[str] = []
-    if r["cut"]:
-        adj.append(f"{r['cut']} request(s) had no terminal outcome inside the {r['budget_s']:.0f}s budget "
-                   f"and were cut. That is not a failure: the background tier can take ~600s to first "
-                   f"token. Raise --max-seconds before judging it.")
-    if r["admission_deaths"]:
-        adj.append(f"{r['admission_deaths']}/{n} were blocked at admission (`scheduler admission timeout`). "
-                   f"For {n} concurrent requests at once, use the -background variant of the same model.")
-    if overflow_n:
-        adj.append(f"{overflow_n} request(s) carried `overflowed-to-background`: the burst was "
-                   f"wider than the interactive admission width - {CAP_COPY}.")
-    if no_ent_n:
-        # demotion_note lives in _fix_block.py, exec'd into this namespace at
-        # import time; the probe and fix advice must say the same thing.
-        adj.append(f"{no_ent_n} request(s) carried `no-background-entitlement`: "
-                   + demotion_note("no_entitlement", model))
-    if r["streamed"] == r["n"] and not r["cut"]:
-        adj.append("all requests streamed; no pressure at this width.")
-    return report.Report(headline=f"load-test: {n} x {model}",
-                         sections=[report.Section("burst", burst)], adjustments=adj)
-
-
-def cmd_probe(args) -> int:
-    # Progress is not report: it goes to stderr whenever stdout is spoken for
-    # (--json or a pipe), and to stdout only on a terminal, where motion may
-    # redraw it.
-    stream = sys.stderr if args.json or not sys.stdout.isatty() else sys.stdout
-    reveal(f"load-testing {args.n} x {args.model} (max_tokens {args.max_tokens}, budget {args.max_seconds:.0f}s)",
-           getattr(args, "_style", None), stream)
-    r = run_probe(args.n, args.model, args.max_tokens, args.timeout, args.max_seconds)
-    headroom = _probe_swamp_headroom(args.n)
-    if args.json:
-        payload: dict = {"run": r}
-        if headroom:
-            payload["summary"] = headroom
-            payload["swamp_headroom"] = headroom
-        print(json.dumps(envelope("load-test", payload, contract=CONTRACT), indent=2))
-        return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
-    rep = build_probe_report(r, args.n, args.model)
-    if headroom:
-        rep.adjustments.append(headroom + ".")
-    print_report(rep, args)
-    return 0 if r["streamed"] == r["n"] and not r["cut"] else 1
-
-
-def build_compare_report(rows: list) -> report.Report:
-    """Both runs side by side: one row per model, its statistics inside the value.
-
-    The old printer's class column leads each value so a demoted burst still
-    shows which tier answered; the fixed tier advice and the dirty-run note
-    ride along as adjustments.
-    """
-    runs = []
-    for r in rows:
-        klass = ", ".join(k for k, v in r["tiers"].items() if v) or "n/a"
-        runs.append(report.Row(
-            r["model"],
-            f"{klass} · streamed {r['streamed']} · no token {r['silent']} · "
-            f"adm.blocked {r['admission_deaths']} · cut {r['cut']} · ttfb p50 {fmt(r['ttfb'], 's')}"))
-    adj = ["the interactive tier admits fewer parallel requests but answers in tens of seconds; "
-           "the -background tier admits more and answers in minutes. Pick the tier by how many "
-           "concurrent requests you hold at once, not by impatience."]
-    if any(r["cut"] or r["admission_deaths"] or r["silent"] for r in rows):
-        adj.append("at least one row did not stream cleanly at this width. Read the two rows against "
-                   "each other before changing models: `cut` means the budget was too small to judge "
-                   "the tier.")
-    return report.Report(headline=f"compare at width {rows[0]['n']}",
-                         sections=[report.Section("runs", runs)], adjustments=adj)
-
-
-def cmd_compare(args) -> int:
-    base = args.model
-    bg = base if base.endswith("-background") else base + "-background"
-    rows = []
-    stream = sys.stderr if args.json or not sys.stdout.isatty() else sys.stdout
-    for model in (base, bg):
-        reveal(f"running {args.n} x {model} ...", getattr(args, "_style", None), stream)
-        r = run_probe(args.n, model, args.max_tokens, args.timeout, args.max_seconds)
-        rows.append(r)
-    bad = any(r["cut"] or r["admission_deaths"] or r["silent"] for r in rows)
-    if args.json:
-        print(json.dumps(envelope("compare", {"runs": rows}, contract=CONTRACT), indent=2))
-        return 1 if bad else 0
-    print_report(build_compare_report(rows), args)
-    return 1 if bad else 0
-
-
 # ---- cli --------------------------------------------------------------------
 def window_hours(spec: str | None, now: bool) -> float:
     """Parse 24h/90m/7d. Raises ValueError; the caller turns that into exit 2."""
@@ -3250,27 +3038,6 @@ def _add_network(sp, subject: str = "the live model catalog from the gateway",
                           f"(this is the default; stated for scripts)")
 
 
-def probe_required_message(cmd: str, n: int, model: str, budget_s: float) -> str:
-    """What a load test would do, stated without running it.
-
-    LunaRoute bills concurrent sessions, so the message counts sessions,
-    not usage of any other kind. The run is opt-in because it is real:
-    it opens live sessions against the gateway and spends included
-    inference, and the message says both.
-    """
-    width = f"{n:g}"
-    if cmd == "compare":
-        return (f"compare would load-test {model} and its -background twin: two "
-                f"bursts of {width} concurrent sessions each, for up to "
-                f"{budget_s:g}s, spending included inference - a load test "
-                f"against the live gateway, opt-in only; pass "
-                f"--load-test-enable to run it")
-    return (f"{cmd} would open {width} concurrent sessions at {model} for up "
-            f"to {budget_s:g}s, spending included inference - a load test "
-            f"against the live gateway, opt-in only; pass --load-test-enable "
-            f"to run it")
-
-
 # ---- the friendly default run (bare `luna-doctor`) ---------------------------
 
 WELCOME = (
@@ -3467,38 +3234,7 @@ def main(argv: list[str] | None = None) -> int:
     # visible: argparse cannot hide a subcommand cleanly (help=SUPPRESS
     # leaks a literal marker into the listing), so it is listed like any
     # other command, invocable as ever, and its own `--help` documents it.
-    p = sub.add_parser("load-test",
-                       help="load-test the gateway at a chosen burst width "
-                            "(needs --load-test-enable to actually open one)",
-                       description="load-test the gateway at a chosen burst width "
-                                   "(needs --load-test-enable to actually open one)")
-    p.add_argument("--n", type=int, default=10)
-    p.add_argument("--model", default="glm-5.3")
-    p.add_argument("--max-tokens", type=int, default=800)
-    p.add_argument("--timeout", type=float, default=320.0)
-    p.add_argument("--max-seconds", type=float, default=170.0)
-    p.add_argument("--load-test-enable", action="store_true",
-                   help="open the burst; without this flag luna-doctor only says "
-                        "what it would open")
-    p.add_argument("--json", action="store_true")
-    _add_copy(p)
-    _add_style(p)
-    p.set_defaults(func=cmd_probe)
 
-    c = sub.add_parser("compare", help="load-test a model and its -background twin "
-                                       "(needs --load-test-enable to actually open one)")
-    c.add_argument("--n", type=int, default=10)
-    c.add_argument("--model", default="glm-5.3")
-    c.add_argument("--max-tokens", type=int, default=800)
-    c.add_argument("--timeout", type=float, default=320.0)
-    c.add_argument("--max-seconds", type=float, default=170.0)
-    c.add_argument("--load-test-enable", action="store_true",
-                   help="open the bursts; without this flag luna-doctor only says "
-                        "what they would open")
-    c.add_argument("--json", action="store_true")
-    _add_copy(c)
-    _add_style(c)
-    c.set_defaults(func=cmd_compare)
 
     f = sub.add_parser("fix", help="print per-agent copy-paste instructions")
     f.add_argument("--since", default=None)
@@ -3552,16 +3288,9 @@ def main(argv: list[str] | None = None) -> int:
         # the bare run: account line, welcome mat, the one-hour analysis,
         # and the chart (SVG and PNG) beside it
         return _default_run(ap)
-    if args.cmd in ("load-test", "compare") and getattr(args, "n", 1) < 1:
-        print("luna-doctor: --n must be at least 1", file=sys.stderr)
-        return 2
     # A burst opens real concurrent sessions on the account, so it stays
     # behind an explicit opt-in: without the flag we say what it would do
     # and nothing is opened.
-    if args.cmd in ("load-test", "compare") and not args.load_test_enable:
-        print(probe_required_message(args.cmd, args.n, args.model, args.max_seconds),
-              file=sys.stderr)
-        return 2
     if getattr(args, "copy", False):
         return _run_captured(args)
     return _run(args)

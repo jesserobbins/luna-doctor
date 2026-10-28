@@ -28,7 +28,7 @@ PLAYBOOKS_DIR = os.path.join(REFERENCES_DIR, "playbooks")
 # Every subcommand the skill's command index speaks for. The bare run (no
 # subcommand) is the tenth target and is spelled "".
 COMMANDS = ("discover", "explain", "watch", "analyze", "fix", "chart",
-            "capacity", "load-test", "compare")
+            "capacity")
 
 # argparse's own help pair: present everywhere, documented nowhere.
 IGNORED_FLAGS = ("-h", "--help")

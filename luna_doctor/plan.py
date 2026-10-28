@@ -15,7 +15,7 @@ else from its disk cache) and the user's `--plan` declaration. The account
 is the first authority on every account fact; `--plan` is the fallback
 for when the API is unreachable. Today `chart` consumes the resolution;
 the thresholds that are still hardcoded elsewhere (analyze's pressure
-verdict, fix's advice, the load-test command's default widths, the share
+verdict, fix's advice, the share
 card's copy) are per-plan wrong and should read their number from here in
 a follow-up pass.
 
@@ -200,7 +200,7 @@ def _plan_arg(value):
 def add_plan_arg(parser, help_text: str = PLAN_HELP) -> None:
     """Add the one --plan definition every command shares.
 
-    One helper so `chart`, `analyze`, `fix`, `load-test` and `compare`
+    One helper so `chart`, `analyze`, `fix` and `explain`
     cannot drift apart as the follow-up pass wires them to
     resolve_capacity().
     """

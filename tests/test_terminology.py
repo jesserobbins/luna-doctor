@@ -8,7 +8,7 @@ FORBIDDEN below, as the strings the scan hunts for.
 The scan is over rendered surfaces, not source text, because what a user
 sees is the contract: the plain and pretty renderers, the WhatsApp share
 message and its card, the fix block and its --json envelope, the chart SVG,
-the load-test and compare reports, and the README and every markdown file of
+the README and every markdown file of
 the skill package a reader is pointed at. The in-process surfaces are driven
 with synthetic data that forces every advice branch to render; the fix and
 chart surfaces run the real commands the way a user would.
@@ -131,20 +131,6 @@ class NoRetiredVocabulary(unittest.TestCase):
         from luna_doctor.scene import build_card_scene, svg_from
         surfaces["share card svg"] = svg_from(build_card_scene(metrics, head))
 
-        # probe and compare: pure report builders, no network, all branches.
-        probe_run = {"direct": [{"reason": "overflow"}, {"reason": "no_entitlement"}],
-                     "demoted": 2, "tiers": {"interactive": 6, "background": 2},
-                     "streamed": 6, "silent": 1, "admission_deaths": 1, "errors": 0,
-                     "cut": 0, "wait_headers": 25.2, "ttfb": 41.0, "keepalives": 40,
-                     "budget_s": 600.0, "n": 8}
-        surfaces["probe report"] = render_plain(
-            cli.build_probe_report(probe_run, 8, "glm-5.3"))
-        rows = [{"model": "glm-5.3", "n": 8, "tiers": {"interactive": 8}, "streamed": 8,
-                 "silent": 0, "admission_deaths": 0, "cut": 0, "ttfb": 41.0},
-                {"model": "glm-5.3-background", "n": 8, "tiers": {"background": 8},
-                 "streamed": 7, "silent": 0, "admission_deaths": 0, "cut": 1,
-                 "ttfb": 590.0}]
-        surfaces["compare report"] = render_plain(cli.build_compare_report(rows))
         return surfaces
 
     def test_rendered_reports_are_clean(self):

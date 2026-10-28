@@ -20,7 +20,8 @@ which that starts belongs to the account. It is not in these logs.
 - Never repeat a plan width as a universal fact: fetch it (`capacity`) or declare it (`--plan`).
 - Never diagnose from the error string. `Stream ended without finish_reason` is a client string.
 - If there is no pressure, say so.
-- Never run `load-test` or `compare`. They open real concurrent sessions.
+- Never open concurrent requests of your own to test a theory. This tool measures
+  what already happened. It does not generate load.
 
 ## Symptom -> Playbook
 
@@ -52,10 +53,10 @@ which that starts belongs to the account. It is not in these logs.
 Exit codes, once: `0` no pressure, `1` pressure found, `2` no data (usage errors are also `2`).
 That is the contract for `analyze`, `explain` and `watch`. `fix` exits `1` when a change
 exists, measured window or not: [fix-families.md](references/fix-families.md) says how to
-read that. `load-test` and `compare` exit `1` when a burst did not stream cleanly.
+read that.
 `--offline` is the default for `analyze`, `fix` and `capacity`. `--online` is the only flag that
-touches the network. `load-test` and `compare` open real concurrent sessions and refuse to run
-without `--load-test-enable`: they are a gate, never a step in a diagnosis.
+touches the network. There is no load test in this tool, on purpose: it opens real
+concurrent sessions, and a diagnostic must not add to the pressure it is measuring.
 
 ## Rendering
 

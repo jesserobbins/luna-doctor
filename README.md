@@ -322,7 +322,7 @@ never describes that concurrency as measured.
 | `luna_doctor/font.py` | the hand-drawn 5x7 bitmap font and its ASCII folding |
 | `bin/luna-doctor` | launcher for the no-packaging path. It resolves its own symlink and imports the package |
 | `skills/luna-doctor/` | the agent skill: a router, five playbooks, four catalogues |
-| `assets/` | the two chart images above, each one written by `luna-doctor chart` |
+| `assets/` | the two chart images above, each one written by `luna-doctor chart`, and the social preview, written by `python3 scripts/titlecard.py --moon <screenshot>` |
 
 These files ship together as the package. `cli` loads `_fix_block` and
 `_chart_block` off disk from its own directory, so a partial install is the one
