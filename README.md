@@ -21,7 +21,7 @@ pipx install .        # installs the `luna-doctor` command
 luna-doctor --version # prints the version in VERSION (0.3.0-alpha.4)
 ```
 
-Give the install to your agent instead: [`docs/install-with-an-agent.md`](docs/install-with-an-agent.md)
+Give the install to your agent instead: [`docs/install-with-an-agent.md`](https://github.com/jesserobbins/luna-doctor/blob/main/docs/install-with-an-agent.md)
 holds one block to paste, which installs the tool, reads the account's capacity
 and applies the settings that `fix` names.
 
@@ -201,7 +201,7 @@ block does not carry the layout of your machine.
 
 ![Seven days of concurrent requests: the stack peaks above the dashed
 priority-concurrency rule, and red flare ticks mark requests the gateway
-rejected](assets/chart-7d.png)
+rejected](https://raw.githubusercontent.com/jesserobbins/luna-doctor/main/assets/chart-7d.png)
 
 Seven days of generated example traffic. The stack is the concurrent requests
 in flight, split by model and by scheduling class. The dashed rule is a declared
@@ -209,7 +209,7 @@ width, not a measured one. The open circle is the peak. Each red tick on the top
 edge is a request that the gateway rejected. The thin stretches are the night.
 
 ![One day of the same example: a burst crosses the rule and five requests were
-refused](assets/chart-24h.png)
+refused](https://raw.githubusercontent.com/jesserobbins/luna-doctor/main/assets/chart-24h.png)
 
 The same store, for the last day only. A burst crosses the declared width, and
 five requests were refused at admission. A day with a busy afternoon and a quiet

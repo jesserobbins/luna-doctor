@@ -83,8 +83,12 @@ so the run does not add to the pressure it reports.
 
 ## After the install
 
-The agent-facing skill ships inside the package, so the agent that did the
-install can keep using it: `luna-doctor` explains a window, `explain` explains
-one request, and `--for-issue` prints a redacted block for a support thread.
-`docs/` in this repository holds the design notes, and the README holds the full
-command surface.
+The wheel installs the command, not the skill. The skill that an agent reads is
+in the repository, at `skills/luna-doctor/SKILL.md`, with its playbooks under
+`references/`. Point the agent at that file, or copy the directory into the
+agent's own skill directory.
+
+With the skill loaded, the agent has three more surfaces: `luna-doctor` explains
+a window, `explain` explains one request, and `--for-issue` prints a redacted
+block for a support thread. This repository holds the design notes under
+`docs/`, and the README holds the full command surface.

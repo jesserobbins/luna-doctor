@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,17 @@ dynamic = ["version"]
 description = "Diagnose LunaRoute concurrency problems from local agent logs, and emit per-agent config fixes"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
+# PEP 639: the license is an SPDX expression, and the text ships beside it.
+# A `{ file = "LICENSE" }` table puts the whole Apache text into the `License:`
+# metadata field, which PyPI then renders as a wall of boilerplate.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Jesse Robbins", email = "jesse.robbins@openaid.org" }]
 keywords = ["lunaroute", "concurrency", "agents", "diagnostics", "pi", "claude-code", "codex"]
 classifiers = [
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
@@ -22,7 +26,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://jesserobbins.com"
+Homepage = "https://github.com/jesserobbins/luna-doctor"
+Documentation = "https://github.com/jesserobbins/luna-doctor/blob/main/README.md"
+Repository = "https://github.com/jesserobbins/luna-doctor"
+Issues = "https://github.com/jesserobbins/luna-doctor/issues"
+Changelog = "https://github.com/jesserobbins/luna-doctor/blob/main/CHANGELOG.md"
 
 [project.scripts]
 luna-doctor = "luna_doctor.cli:main"
