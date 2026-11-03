@@ -17,6 +17,21 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Fixed
+
+- The unresolved verdict no longer sends a reader to fetch an account sample
+  that the report already holds. When the cache carries a fresh sample, and
+  that sample sits below the cap, the headline now states the reading and says
+  plainly that the sample does not corroborate a full pool. The earlier copy
+  said "the account half gives nothing that says whether the pool was full"
+  while the rows underneath it printed `in use 8 of 12 priority concurrent
+  requests (account)`. The verdict is unchanged: a reading below the cap still
+  does not name an owner, and the new sentence says which fact is missing.
+- The two unresolved branches printed the count noun twice, as "2 requests
+  requests refused or stalled" and "1 request request stalled", because the
+  sentence supplied its own verb phrase after `_requests` had already supplied
+  the noun.
+
 ### Added
 
 - `capacity` reports the account's overflow pool, not only its priority pool.

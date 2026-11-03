@@ -356,9 +356,11 @@ def _account_sentence(acct: _AccountFacts) -> str:
 def _requests(n: int, one: str, many: Optional[str] = None) -> str:
     """`n` requests as copy, with the verb agreeing: "1 request was",
     "2 requests were". `many` defaults to `one` when the verb does not
-    change."""
-    return "%d %s %s" % (n, "request" if n == 1 else "requests",
-                         one if n == 1 else (one if many is None else many))
+    change. An empty tail yields the count alone, so a caller whose sentence
+    supplies the verb does not print the noun twice or leave a double space."""
+    tail = one if n == 1 else (one if many is None else many)
+    noun = "%d %s" % (n, "request" if n == 1 else "requests")
+    return noun + (" " + tail if tail else "")
 
 
 def _concurrent(n: int) -> str:
@@ -620,8 +622,8 @@ def attribute(local, capacity, priority) -> Attribution:
                     "stalled until the harness idle budget stopped the stream, and %s also "
                     "failed upstream. The upstream failures explain themselves. The stall does "
                     "not, so run %s to read the account's occupancy."
-                    % (_requests(stalls, "request", "requests"),
-                       _requests(facts.upstream, "request", "requests"), CAPACITY_COMMAND))
+                    % (_requests(stalls, "", ""),
+                       _requests(facts.upstream, "", ""), CAPACITY_COMMAND))
         return Attribution(VERDICT_UNKNOWN, headline, rows, [
             "Run %s for the account's own occupancy." % CAPACITY_COMMAND,
             "Retry the upstream failures. They are a separate event from the stall.",
@@ -654,11 +656,36 @@ def attribute(local, capacity, priority) -> Attribution:
     # unresolved. "Not concurrency" is a verdict, and this branch has evidence
     # against it.
     if evidence:
+        # What the account half actually said decides this sentence. A fresh
+        # sample that sits below the cap is a fact the report already holds, so
+        # the headline states it: telling a reader to fetch a payload that is on
+        # screen is a false statement about what was measured, and it hides the
+        # interesting reading, which is a refusal served while the account said
+        # it had room.
+        if acct.fresh and acct.in_use is not None and acct.limit is not None:
+            account_clause = (
+                "the account's own sample reported in use %d of %d priority "
+                "concurrent requests at %s, below its cap, so that sample does not "
+                "corroborate a full pool, and neither half names the owner"
+                % (acct.in_use, acct.limit,
+                   acct.sampled_at or "an unreported time"))
+            actions = [
+                "Read the account's occupancy at the moment of a refusal with "
+                "%s. A sample below the cap taken near the refusal points at a "
+                "race between the sample and the refusal, not at a pool that was "
+                "full for the whole window." % CAPACITY_COMMAND,
+                "Move the wide work to the -background variant while you find out. It "
+                "parks for room instead of competing for the priority pool.",
+            ]
+            headline = ("Concurrency pressure is present, but the owner is not established: "
+                        "%s refused or stalled in this window while %s."
+                        % (_requests(evidence, "", ""), account_clause))
+            return Attribution(VERDICT_UNKNOWN, headline, rows, actions)
         headline = ("Concurrency pressure is present, but the owner is not established: %s "
                     "refused or stalled in this window, and the account half gives nothing that "
                     "says whether the pool was full. Run %s to read the account's occupancy, or "
                     "declare a width with --plan."
-                    % (_requests(evidence, "request", "requests"), CAPACITY_COMMAND))
+                    % (_requests(evidence, "", ""), CAPACITY_COMMAND))
         return Attribution(VERDICT_UNKNOWN, headline, rows, [
             "Run %s for the account's own occupancy. Without it the owner of these "
             "refusals cannot be named." % CAPACITY_COMMAND,
