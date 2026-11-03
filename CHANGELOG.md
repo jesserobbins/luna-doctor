@@ -17,12 +17,14 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.4.0-alpha.1] - 2026-11-03
+
 ### Added
 
 - The wheel carries the agent skill. `pipx install luna-doctor` used to give a
-  command and nothing an agent could load: the wheel held `luna_doctor/` and
-  stopped there, and `tests/test_skill_package.py` read the checkout, so the
-  guard passed while the artifact was incomplete. The skill now lives at
+  command with no skill beside it: the wheel held `luna_doctor/` and stopped
+  there, and `tests/test_skill_package.py` read the checkout, so the guard
+  passed while the artifact was incomplete. The skill now lives at
   `luna_doctor/skills/luna-doctor/` and `[tool.setuptools.package-data]`
   declares it, so it ships by construction rather than by a build step. The
   repository keeps `skills/luna-doctor` as a symlink to that path, which is
