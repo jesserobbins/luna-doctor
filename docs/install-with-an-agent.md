@@ -21,7 +21,9 @@ concurrency settings.
    pipx install luna-doctor
 
    If pipx is missing, install it (brew install pipx) and run pipx ensurepath.
-   Open a new shell after that. To install the newest commit instead of the
+   Open a new shell after that. If you just published or installed a release,
+   pipx can resolve the previous one from its cached index: `pipx install
+   --force luna-doctor` takes the newest. To install the newest commit instead of the
    newest release:
 
    pipx install "luna-doctor @ git+https://github.com/jesserobbins/luna-doctor.git"
