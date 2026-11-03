@@ -2459,6 +2459,88 @@ def _excluded_rows(m: dict) -> list:
     return [report.Row("excluded", "\n".join(lines))]
 
 
+def _service_rows(m: dict) -> list:
+    """The account's own numbers, as the report's first section.
+
+    Service first: this is what LunaRoute says about the account, and every
+    number here belongs to the account. The sections under it explain what this
+    machine contributed, and the two are labelled so they never read as one
+    number. A live pool row carries the sample time, because a reading without
+    its moment is a fact about no moment in particular.
+    """
+    capm = m.get("capacity") or {}
+    if capm.get("provenance") != sources.PROV_ACCOUNT:
+        return []
+    rows: list[report.Row] = []
+
+    def num(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    plan = capm.get("plan")
+    priority = num(capm.get("priority_lanes"))
+    overflow = num(capm.get("background_lanes"))
+    routing = capm.get("overflow_routing")
+    if plan is not None or priority is not None:
+        bits = []
+        if plan is not None:
+            bits.append(f"plan {plan}")
+        if priority is not None:
+            bits.append(f"{priority} priority concurrent requests")
+        rows.append(report.Row("plan and width", " \u00b7 ".join(bits) + " (account)"))
+    if overflow is not None or routing is not None:
+        if overflow == 0:
+            bits = ["no overflow entitlement"]
+        elif overflow is not None:
+            bits = [f"{overflow} concurrent requests"]
+        else:
+            bits = ["width not reported"]
+        if routing is not None:
+            bits.append(f"overflow routing {routing}")
+        rows.append(report.Row("overflow pool", " \u00b7 ".join(bits) + " (account)"))
+
+    now = capm.get("now") or {}
+    sampled = now.get("sampled_at")
+    live = now.get("in_use")
+    limit = num(now.get("limit"))
+    if isinstance(live, int) and limit is not None:
+        rows.append(report.Row(
+            "live priority pool",
+            f"in use {live} of {limit} priority concurrent requests"
+            + (f" at {sampled}" if sampled else "") + " (account)"))
+    bg = now.get("background") or {}
+    bg_live, bg_limit = bg.get("in_use"), num(bg.get("limit"))
+    if isinstance(bg_live, int) and bg_limit is not None:
+        rows.append(report.Row(
+            "live overflow pool",
+            f"in use {bg_live} of {bg_limit} concurrent requests"
+            + (f" at {sampled}" if sampled else "") + " (account)"))
+
+    days = capm.get("window_days") or []
+    as_of = capm.get("admission_as_of")
+    if days:
+        denied = 0
+        worst, worst_day = 0, None
+        for day in days:
+            value = day.get("denied_after_wait")
+            if isinstance(value, int) and not isinstance(value, bool):
+                denied += value
+                if value > worst:
+                    worst, worst_day = value, day.get("day")
+        bits = [f"{len(days)} complete UTC day(s)"]
+        if as_of:
+            bits.append(f"through {as_of}")
+        bits.append(f"{denied} denied after waiting")
+        if worst_day:
+            bits.append(f"most on {worst_day}, at {worst}")
+        rows.append(report.Row("admission record", " \u00b7 ".join(bits) + " (account)"))
+    if capm.get("stale"):
+        rows.append(report.Row(
+            "account sample", "the cache is past its TTL; run with --online to refresh "
+                              "(a stale reading describes another moment)"))
+    return rows
+
+
+
 def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
     """Turn analyse() metrics into the Report every renderer prints.
 
@@ -2609,6 +2691,12 @@ def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
         rows.extend(report.Row(label, value) for label, value in att.rows)
         sections.insert(0, report.Section("attribution", rows))
         adj = list(adj) + list(att.actions)
+    # Service first: what LunaRoute says about the account, before anything
+    # this machine measured. Absent when no account payload was served, in
+    # which case the report is the local story and says so.
+    service = _service_rows(m)
+    if service:
+        sections.insert(0, report.Section("service", service))
     return report.Report(headline=head, sections=sections, adjustments=list(adj))
 
 
