@@ -25,6 +25,13 @@ A request that finds no room is not refused at once. It waits, then ends with
   admission deadline from an expired park. Quote that model's own median with
   its count, or report `unknown`.
 
+The published park does not cover the glm-5.3 reading. LunaRoute's own pages say
+the priority park deadline is exactly 60 s. These logs measured 120.2 s on
+glm-5.3, over 23 observations, and no documented mechanism explains a priority
+wait past that park. These logs cannot tell an admission deadline from an
+expired park, so this file records the ambiguity and does not resolve it. Quote
+each model's own median with its count.
+
 `analyze` measures each model separately. The `admission wall` row names the
 model, its median and its sample count, in the form `glm-5.3 120.2s (n=12)`.
 Below `DEADLINE_MIN_SAMPLES = 3` usable observations, the row reads
@@ -40,20 +47,31 @@ the gateway emits the SSE comment `: lunaroute-keepalive` every 10.0 s. 729 of
 732 gaps fell between 9.5 and 10.5 s at 20 concurrent requests. The gateway
 pauses the keep-alives while chunks are flowing.
 
+The keep-alive cadence is measured here and undocumented. LunaRoute's own pages
+name no keep-alive, no heartbeat, and no statement about whether a parked stream
+is held open before bytes flow. What this file says about the ~10 s interval is
+this machine's reading of its own traffic, never a contract.
+
 So a request can stay alive for its whole 300 s and produce nothing. That is
 the silent-overflow signature, and the 300 s in that error string is the
 harness's number, not the gateway's.
 
 ## The response headers
 
-`x-lunaroute-service-class` (`interactive` / `background`),
-`x-lunaroute-service-tier` (`realtime` / `background`) and
-`x-lunaroute-warning` (`overflowed-to-background`) are honest. They appeared
-where the traffic predicts. At 20 concurrent requests on the account measured
-on 2026-10-20, the run split 10 interactive and 10 background. The warning
-sat on the demoted half, and no background header appeared at 1 or 10. That
-split follows that account's priority concurrency. It is not a gateway
+The documented pair is `x-lunaroute-service-class` (`interactive` /
+`background`) and `x-lunaroute-warning` (`overflowed-to-background`).
+LunaRoute's own pages define both. Measured here, they are honest. They
+appeared where the traffic predicts. At 20 concurrent requests on the account
+measured on 2026-10-20, the run split 10 interactive and 10 background. The
+warning sat on the demoted half, and no background header appeared at 1 or 10.
+That split follows that account's priority concurrency. It is not a gateway
 constant, and no plan width is a gateway fact.
+
+Two more headers are measured here and undocumented by LunaRoute.
+`x-lunaroute-service-tier` (`realtime` / `background`) appears in none of the
+published pages, so the docs neither confirm nor deny its meaning.
+`x-lunaroute-queue-ms` is in the same position. Read what follows as this
+machine's reading of its own traffic, never as a published contract.
 
 `x-lunaroute-queue-ms` is not honest. It read `0` on all 32 responses. Of
 those, 11 died at the 120.2 s deadline and produced zero tokens. Do not offer

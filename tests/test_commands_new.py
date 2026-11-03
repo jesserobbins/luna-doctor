@@ -104,13 +104,26 @@ def overflow_capacity_cache(home, background=None,
     return path
 
 
+# Service first: analyze, fix and chart ask the account for its capacity by
+# default, and no test may touch the network. A run that names no network flag
+# gets --offline unless the test is about the fetch itself.
+_FETCHING = ("analyze", "fix", "chart")
+
+
+def _no_network(args):
+    if (args and args[0] in _FETCHING
+            and "--online" not in args and "--offline" not in args):
+        return tuple(args) + ("--offline",)
+    return args
+
+
 def run(home, *args, timeout=120, capacity=None):
     env = dict(os.environ)
     env["HOME"] = home
     env["LUNA_DOCTOR_STORE"] = os.path.join(home, "store")
     env["LUNA_DOCTOR_CAPACITY"] = capacity or os.path.join(home, "no-capacity.json")
     env["NO_COLOR"] = "1"
-    proc = subprocess.run([sys.executable, CLI, *args], capture_output=True,
+    proc = subprocess.run([sys.executable, CLI, *_no_network(args)], capture_output=True,
                           text=True, cwd=ROOT, env=env, timeout=timeout)
     return proc.returncode, proc.stdout, proc.stderr
 

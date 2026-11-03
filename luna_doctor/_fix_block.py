@@ -965,7 +965,8 @@ def cmd_fix(args) -> int:
     m["declared_plan"] = getattr(args, "plan", None)
     _swamp_enrich(m, getattr(args, "swamp_root", None), now - hours * 3600, now)
     try:
-        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
+        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m,
+                                          allow_network=_account_network(args))
     except Exception:
         m["capacity"] = {"provenance": sources.PROV_UNKNOWN}
     # One combined snapshot feeds the advice: the harness configs with

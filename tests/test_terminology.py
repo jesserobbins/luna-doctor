@@ -50,12 +50,25 @@ _STORE = tempfile.mkdtemp(prefix="luna-doctor-terms-")
 _CAPACITY = os.path.join(_STORE, "absent-capacity.json")
 
 
+# Service first: analyze, fix and chart ask the account for its capacity by
+# default, and no test may touch the network. A run that names no network flag
+# gets --offline unless the test is about the fetch itself.
+_FETCHING = ("analyze", "fix", "chart")
+
+
+def _no_network(args):
+    if (args and args[0] in _FETCHING
+            and "--online" not in args and "--offline" not in args):
+        return tuple(args) + ("--offline",)
+    return args
+
+
 def run(*args, timeout=180, env_extra=None):
     env = dict(os.environ)
     env["LUNA_DOCTOR_STORE"] = _STORE
     env["LUNA_DOCTOR_CAPACITY"] = _CAPACITY
     env.update(env_extra or {})
-    proc = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True,
+    proc = subprocess.run([sys.executable, CLI, *_no_network(args)], capture_output=True, text=True,
                           timeout=timeout, cwd=ROOT, env=env)
     return proc.returncode, proc.stdout, proc.stderr
 

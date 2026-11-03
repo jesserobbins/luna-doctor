@@ -51,6 +51,17 @@ def _capacity_cache_doc(payload, fetched_at):
             "url": "https://api.lunaroute.com/v1/capacity", "response": payload}
 
 
+# Service first: analyze, fix and chart ask the account for its capacity by
+# default. No test may touch the network, so a run that names no network flag
+# gets --offline unless the test is about the fetch itself.
+_FETCHING = ("analyze", "fix", "chart")
+
+def _no_network(args):
+    if (args and args[0] in _FETCHING
+            and "--online" not in args and "--offline" not in args):
+        return tuple(args) + ("--offline",)
+    return args
+
 def run(*args, timeout=180, store=None, capacity=None, env=None):
     _env = dict(os.environ)
     _env["LUNA_DOCTOR_STORE"] = store or _TEST_STORE
@@ -63,8 +74,8 @@ def run(*args, timeout=180, store=None, capacity=None, env=None):
             json.dump(_capacity_cache_doc(capacity, time.time()), fh)
     if env:
         _env.update(env)
-    proc = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True,
-                          timeout=timeout, cwd=ROOT, env=_env)
+    proc = subprocess.run([sys.executable, CLI, *_no_network(args)], capture_output=True,
+                          text=True, timeout=timeout, cwd=ROOT, env=_env)
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -298,11 +309,13 @@ def _recent_store(home, n=6):
         fh.write("\n".join(lines) + "\n")
 
 
-def _bare_run(home, work, capacity=None, timeout=180):
+def _bare_run(home, work, capacity=None, timeout=180, offline=True):
     """Run bare `luna-doctor` the way a first-time user does: no arguments,
     a $HOME that holds only the fixture store (so the default roots read
     the fixture, never this machine's real logs), and a working directory
-    the chart files must land in."""
+    the chart files must land in. The run is offline unless a test is about the
+    fetch itself: no test may touch the network, and a fetch would write the
+    shared test capacity cache."""
     env = dict(os.environ)
     env["HOME"] = home
     env["LUNA_DOCTOR_STORE"] = os.path.join(home, "store")
@@ -313,7 +326,8 @@ def _bare_run(home, work, capacity=None, timeout=180):
         env["LUNA_DOCTOR_CAPACITY"] = os.path.join(d, "capacity.json")
         with open(env["LUNA_DOCTOR_CAPACITY"], "w") as fh:
             json.dump(_capacity_cache_doc(capacity, time.time()), fh)
-    proc = subprocess.run([sys.executable, CLI], capture_output=True, text=True,
+    argv = [sys.executable, CLI] + (["--offline"] if offline else [])
+    proc = subprocess.run(argv, capture_output=True, text=True,
                           timeout=timeout, cwd=work, env=env)
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -440,7 +454,8 @@ class DefaultRun(unittest.TestCase):
         env["HOME"] = home
         env["LUNA_DOCTOR_STORE"] = os.path.join(home, "store")
         env["LUNA_DOCTOR_CAPACITY"] = _TEST_CAPACITY
-        proc = subprocess.run([sys.executable, CLI, "analyze", "--since", "1h"],
+        proc = subprocess.run([sys.executable, CLI, "analyze", "--since", "1h",
+                               "--offline"],
                               capture_output=True, text=True, timeout=180,
                               cwd=work, env=env)
         bare_code, _, _ = _bare_run(home, work)
@@ -854,9 +869,10 @@ class ChartAccountRule(unittest.TestCase):
             env["LUNA_DOCTOR_STORE"] = _TEST_STORE
             env["LUNA_DOCTOR_CAPACITY"] = stale_path
             proc = subprocess.run([sys.executable, CLI, "chart", "--since", "24h",
-                                  "--out", out, "--pi-root", tmp, "--harness", "pi"],
-                                 capture_output=True, text=True, timeout=180,
-                                 cwd=ROOT, env=env)
+                                   "--out", out, "--pi-root", tmp, "--harness", "pi",
+                                   "--offline"],
+                                  capture_output=True, text=True, timeout=180,
+                                  cwd=ROOT, env=env)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             with open(out) as fh:
                 svg = fh.read()
@@ -2960,8 +2976,9 @@ class CopyToClipboard(unittest.TestCase):
         return env, clip
 
     def _run(self, env, *args):
-        return subprocess.run([sys.executable, CLI, *args], capture_output=True,
-                              text=True, timeout=180, cwd=ROOT, env=env)
+        return subprocess.run([sys.executable, CLI, *_no_network(args)],
+                              capture_output=True, text=True, timeout=180,
+                              cwd=ROOT, env=env)
 
     def test_analyze_plain_copy_equals_stdout(self):
         env, clip = self._fake_clipboard()

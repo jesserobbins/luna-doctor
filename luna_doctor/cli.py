@@ -3408,20 +3408,21 @@ def _add_network(sp, subject: str = "the live model catalog from the gateway",
                  ttl: str = "24h") -> None:
     """The offline/online pair for the commands that consume fetched facts.
 
-    The default is offline: a cached payload serves (a stale one too,
-    marked stale), and the network is never touched. `--online` allows one
-    authenticated GET (refreshing the disk cache); a network failure still
-    never turns the report into an error - what could not be fetched is
-    reported unknown.
+    Service first: the account's capacity is fetched by default, so the report
+    leads with the account's own numbers. The cache serves first and the
+    network is touched only when it is past its TTL. `--offline` is the
+    escape: it serves the cache and touches nothing. A network failure never
+    turns the report into an error - what could not be fetched is reported
+    unknown.
     """
     grp = sp.add_mutually_exclusive_group()
     grp.add_argument("--online", action="store_true",
-                     help=f"fetch {subject} (one authenticated GET) and "
-                          f"refresh the {ttl} disk cache; without this flag "
-                          f"nothing leaves the machine")
+                     help=f"fetch {subject} (one authenticated GET) and refresh "
+                          f"the {ttl} disk cache. This is the default; the flag "
+                          f"stays so a script can state its intent")
     grp.add_argument("--offline", action="store_true",
-                     help=f"never touch the network, even for {subject} "
-                          f"(this is the default; stated for scripts)")
+                     help=f"never touch the network, even for {subject}: serve the "
+                          f"cache and mark it stale")
 
 
 # ---- the friendly default run (bare `luna-doctor`) ---------------------------
@@ -3443,17 +3444,18 @@ WELCOME = (
 )
 
 
-def _account_line() -> str:
+def _account_line(allow_network: bool = False) -> str:
     """The account's own capacity facts, one line, from the disk cache.
 
     The default run opens with this because it frames everything after
     it: the local numbers are being judged against the account's real
-    allowance. Cache-only by construction - the bare run never waits on
-    the 4-17s endpoint - and a cold cache, a null config or a collection
-    failure is unknown with the command that fills it: never a block,
-    never a fabrication."""
+    allowance. The bare run asks the account for it like every other
+    diagnosing command does (cache first, one GET past the TTL) unless the
+    caller passed --offline, and a cold cache, a null config or a collection
+    failure is unknown with the command that fills it: never a block, never a
+    fabrication."""
     try:
-        cap, _ = sources._capacity_with_note(False)
+        cap, _ = sources._capacity_with_note(allow_network)
     except Exception:
         cap = None
     cfg = getattr(cap, "config", None) if cap is not None else None
@@ -3492,7 +3494,7 @@ def _open_png_quietly(path) -> None:
         pass
 
 
-def _default_run(ap) -> int:
+def _default_run(ap, args) -> int:
     """What bare `luna-doctor` does: the friendly default run.
 
     The account line first - it frames the judgement - then a short
@@ -3500,10 +3502,14 @@ def _default_run(ap) -> int:
     and PNG both written to the working directory. The exit code is the
     analysis verdict; the chart is a bonus that can never turn the run
     red, and a chart that cannot be drawn says so and steps aside."""
-    print(_account_line())
+    # The network flag belongs to the whole run: the account line and the
+    # analysis it frames must read the same payload.
+    net = ["--offline"] if getattr(args, "offline", False) else (
+        ["--online"] if getattr(args, "online", False) else [])
+    print(_account_line(allow_network=_account_network(args)))
     print()
     print(WELCOME)
-    code = _run(ap.parse_args(["analyze", "--since", "1h"]))
+    code = _run(ap.parse_args(["analyze", "--since", "1h"] + net))
     if code == 2:
         # Nothing was measured, so there is nothing to draw: a picture and a
         # "this run read the last hour of your logs" claim on a machine with
@@ -3513,7 +3519,7 @@ def _default_run(ap) -> int:
               "Run `luna-doctor discover` to list the stores on this machine. For a wider "
               "window, run `luna-doctor analyze --since 7d`.")
         return code
-    chart_args = ap.parse_args(["chart", "--since", "1h"])
+    chart_args = ap.parse_args(["chart", "--since", "1h"] + net)
     try:
         _run(chart_args)
     except Exception as e:
@@ -3533,6 +3539,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="luna-doctor", description=desc,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=_version_string())
+    _add_network(ap, subject="the account's capacity", ttl="5-minute")
     # No subcommand is the friendly default run, so `cmd` is optional; the
     # welcome path prints the account line, a short explanation, the
     # one-hour analysis and the chart beside it.
@@ -3665,6 +3672,9 @@ def main(argv: list[str] | None = None) -> int:
     ch.add_argument("--json", action="store_true")
     _add_style(ch)
     _add_swamp_root(ch)
+    # The chart draws the account's rule, so it asks the account for it by
+    # default like analyze does, and --offline turns that off.
+    _add_network(ch, subject="the account's capacity", ttl="5-minute")
     ch.set_defaults(func=None)
 
     cp = sub.add_parser("capacity",
@@ -3681,7 +3691,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd is None:
         # the bare run: account line, welcome mat, the one-hour analysis,
         # and the chart (SVG and PNG) beside it
-        return _default_run(ap)
+        return _default_run(ap, args)
     # A burst opens real concurrent sessions on the account, so it stays
     # behind an explicit opt-in: without the flag we say what it would do
     # and nothing is opened.
@@ -3781,7 +3791,19 @@ def _utc_days(since: float, until: float) -> list:
 CAPACITY_FRESH_S = 15 * 60
 
 
-def _capacity_metrics(since: float, until: float, m: dict) -> dict:
+def _account_network(args) -> bool:
+    """Does this run ask the account for its capacity?
+
+    Service first: `analyze`, `fix` and `chart` fetch the account's capacity by
+    default (cache-first, one GET when the cache is past its TTL), because the
+    account's numbers are what the report explains. `--offline` is the escape,
+    and it serves whatever the cache holds, marked stale.
+    """
+    return not bool(getattr(args, "offline", False))
+
+
+def _capacity_metrics(since: float, until: float, m: dict,
+                      *, allow_network: bool = False) -> dict:
     """The additive metrics.capacity block: the account's plan, concurrency
     and overflow routing, plus - when the window overlaps the API's complete
     UTC days - the server's admission counts for those days placed next to
@@ -3793,11 +3815,19 @@ def _capacity_metrics(since: float, until: float, m: dict) -> dict:
     degrade to unknown with a reason - never to zero, never to an error,
     and every field keeps the API's own name verbatim.
     """
+    started = time.time()
     try:
-        cap, note = sources._capacity_with_note(False)
+        cap, note = sources._capacity_with_note(allow_network)
     except Exception as e:
         return {"provenance": sources.PROV_UNKNOWN,
                 "reason": f"collection failed: {type(e).__name__}: {e}"[:200]}
+    waited = time.time() - started
+    if allow_network and waited >= 2.0 and cap is not None:
+        # The endpoint is slow: live samples ran 3.3s to 39.3s. A long wait is
+        # not an error, and a reader is entitled to know which one it was.
+        print(f"luna-doctor: the account's capacity took {waited:.1f}s to arrive; "
+              f"it is cached for {sources.CAPACITY_TTL_S // 60} minutes, so the next "
+              f"run is fast", file=sys.stderr)
     if cap is None:
         return {"provenance": sources.PROV_UNKNOWN, "reason": note}
 
@@ -3884,7 +3914,8 @@ def _watch_sample(args, now_ts=None):
     m = analyse(reqs, hours)
     m["declared_plan"] = getattr(args, "plan", None)
     try:
-        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
+        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m,
+                                          allow_network=_account_network(args))
     except Exception:
         m["capacity"] = {"provenance": sources.PROV_UNKNOWN}
     capm = m.get("capacity") or {}
@@ -4065,7 +4096,8 @@ def cmd_explain(args) -> int:
     m = analyse(reqs, hours)
     m["declared_plan"] = getattr(args, "plan", None)
     try:
-        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
+        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m,
+                                          allow_network=_account_network(args))
     except Exception:
         m["capacity"] = {"provenance": sources.PROV_UNKNOWN}
     capm = m.get("capacity") or {}
@@ -4169,7 +4201,8 @@ def cmd_analyze(args) -> int:
     # Cache-only by construction - the 4-17s endpoint is never on this
     # path - and a failure degrades to unknown, never to an error.
     try:
-        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
+        m["capacity"] = _capacity_metrics(now - hours * 3600, now, m,
+                                          allow_network=_account_network(args))
     except Exception as e:
         m["capacity"] = {"provenance": sources.PROV_UNKNOWN,
                          "reason": f"collection failed: {type(e).__name__}: {e}"[:200]}

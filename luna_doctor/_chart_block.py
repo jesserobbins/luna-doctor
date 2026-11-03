@@ -848,7 +848,7 @@ def cmd_chart(args) -> int:
     # capacity` refreshes it), and a collection failure there is unknown,
     # never an error.
     try:
-        account_payload = sources.fetch_capacity(False)
+        account_payload = sources.fetch_capacity(_account_network(args))
     except Exception:
         account_payload = None
     try:

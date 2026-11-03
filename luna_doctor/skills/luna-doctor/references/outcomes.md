@@ -81,10 +81,10 @@ requests (the account is entitled to no overflow)", and a null average queue
 wait reads "no waiting that day". Account counts never sum with local ones.
 
 `capacity` reports two pools. The priority pool is the account's main width.
-The overflow pool holds the requests that run on a background tier, so a
-request demoted to a background tier waits there. A full overflow pool is one
-reason a demoted stream stays quiet. Read the two pools side by side. Never add
-one pool to the other.
+The overflow pool is where overflow traffic runs. A request that cannot get
+overflow waits for a priority slot, and waiting is not an attribute of either
+pool. A full overflow pool is one reason a demoted stream stays quiet. Read the
+two pools side by side. Never add one pool to the other.
 
 Attribution can lean on a daily total, which covers midnight to midnight rather
 than your window. When a verdict rests on one, quote `account sample time` beside
