@@ -108,13 +108,17 @@ HTTP_TIMEOUT_S = 10.0
 # The capacity cache sits beside the catalog cache. The 5-minute TTL matches
 # the server's own history cadence (history is rolled up ~5-minutely server
 # side; `now` and `admission` are computed per call, and `now.sampled_at`
-# surfaces how fresh the occupancy sample really is). The endpoint answers in
-# 4-17s in practice, so its timeout is deliberately longer than the shared
-# HTTP_TIMEOUT_S - and a timeout still degrades to None (a stale cache serves,
-# marked stale; no cache means unknown), never a blocked report.
+# surfaces how fresh the occupancy sample really is). The endpoint is slow and
+# its tail is long: four live samples on 2026-11-03 took 3.3s, 9.7s, 37.8s and
+# 39.3s, and `generated_at` sits ~35ms from `now.sampled_at`, so the wait is
+# server-side work before assembly. A 30s timeout therefore failed on half the
+# honest responses, which is why this one is 90s: longer than the observed
+# worst case, and still short enough that a dead network ends the run. A
+# timeout degrades to None (a stale cache serves, marked stale; no cache means
+# unknown), never a blocked report.
 CAPACITY_CACHE = "~/.luna-doctor/capacity.json"
 CAPACITY_TTL_S = 5 * 60
-CAPACITY_TIMEOUT_S = 30.0
+CAPACITY_TIMEOUT_S = 90.0
 
 # Swamp knob defaults are documented constants from the extension source.
 SWAMP_CITATION_DEFAULT = "extensions/models/obsidian_ideas.ts"
@@ -638,6 +642,11 @@ class Capacity:
     history: object = None
     admission: object = None
     fetched_at: float | None = None
+    # The server's own assembly stamp, verbatim from the envelope. It sits
+    # seconds from `now.sampled_at`, while `fetched_at` is this client's clock at
+    # receipt: with a 37s server-side stall one clock cannot tell a slow answer
+    # from a fresh one, and a reader is entitled to both.
+    generated_at: str | None = None
     served_from: str = "cache"       # "network" | "cache"
     stale: bool = False
     age_s: float = 0.0
@@ -664,6 +673,7 @@ class Capacity:
             "provenance": PROV_ACCOUNT,
             "served_from": self.served_from,
             "fetched_at": _iso(self.fetched_at) if self.fetched_at else None,
+            "generated_at": self.generated_at,
             "age_s": int(self.age_s),
             "ttl_s": int(self.ttl_s),
             "stale": self.stale,
@@ -701,7 +711,9 @@ def _parse_capacity_payload(response) -> tuple:
     data = response.get("data")
     if not isinstance(data, dict):
         return None, "payload held no data block"
+    generated = response.get("generated_at")
     return {
+        "generated_at": generated if isinstance(generated, str) else None,
         "now": _capacity_block(data, "now", CapacityNow,
                                nested={"background": CapacityPool}),
         "config": _capacity_block(data, "config", CapacityConfig),

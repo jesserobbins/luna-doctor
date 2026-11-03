@@ -195,6 +195,25 @@ class CapacityWiring(unittest.TestCase):
         self.assertIn("overflow pool: peak 12 concurrent requests", out)
         self.assertIn("p95 11", out)
 
+    def test_the_capacity_report_carries_both_clocks(self):
+        """The server's assembly stamp beside the client's receipt time.
+
+        Live, the endpoint took up to 39.3s, so one clock cannot tell a slow
+        answer from a fresh one: the report shows the server's own stamp when
+        the payload carries one.
+        """
+        home = _store()
+        cap = overflow_capacity_cache(home)
+        with open(cap) as fh:
+            doc = json.load(fh)
+        doc["response"]["generated_at"] = "2026-11-02T23:51:44.000000001Z"
+        with open(cap, "w") as fh:
+            json.dump(doc, fh)
+        code, out, err = run(home, "capacity", "--offline", "--style", "plain",
+                             capacity=cap)
+        self.assertIn(code, (0, 1), err)
+        self.assertIn("assembled by the server at 2026-11-02T23:51:44.000000001Z", out)
+
     def test_an_overflow_pool_at_its_cap_is_named_in_the_analysis(self):
         """A fresh sample of a full overflow pool is the one account fact that
         explains a demoted stream waiting, so the analysis names it - and only

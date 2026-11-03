@@ -1093,3 +1093,49 @@ class NetworkFlags(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CapacitySeam(unittest.TestCase):
+    """The two clocks, and a timeout that survives the endpoint's own tail.
+
+    Live probe, 2026-11-03: four `GET /v1/capacity` samples took 3.3s, 9.7s,
+    37.8s and 39.3s, and `generated_at` sat ~35ms from `now.sampled_at` inside
+    one response, so the wait is server-side work before assembly. With
+    `fetched_at` taken from the client clock alone, a 37-second stall and a
+    fresh answer look identical.
+    """
+
+    def test_the_server_clock_rides_along(self):
+        payload = _capacity_payload()
+        payload["generated_at"] = "2026-10-23T18:00:00.123456789Z"
+        fields, err = sources._parse_capacity_payload(payload)
+        self.assertEqual(err, "")
+        self.assertEqual(fields["generated_at"], "2026-10-23T18:00:00.123456789Z")
+        cap = sources.Capacity(**fields)
+        self.assertEqual(cap.to_dict()["generated_at"],
+                         "2026-10-23T18:00:00.123456789Z")
+
+    def test_a_payload_without_the_server_clock_invents_none(self):
+        payload = _capacity_payload()
+        payload.pop("generated_at", None)
+        fields, err = sources._parse_capacity_payload(payload)
+        self.assertEqual(err, "")
+        self.assertIsNone(fields["generated_at"],
+                          "an absent stamp is unknown, never a client timestamp")
+
+    def test_the_cache_path_keeps_it(self):
+        payload = _capacity_payload()
+        payload["generated_at"] = "2026-10-23T18:00:00.123456789Z"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "capacity.json")
+            _write_cap_cache(path, payload, time.time() - 60)
+            cap, _err = sources._read_capacity_cache(path, time.time(),
+                                                     sources.CAPACITY_TTL_S)
+        self.assertIsNotNone(cap)
+        self.assertEqual(cap.generated_at, "2026-10-23T18:00:00.123456789Z")
+
+    def test_the_timeout_covers_the_observed_tail(self):
+        self.assertGreaterEqual(
+            sources.CAPACITY_TIMEOUT_S, 45.0,
+            "the live endpoint answered in 39.3s; a 30s timeout failed on half "
+            "of the honest responses")

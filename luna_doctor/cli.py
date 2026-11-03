@@ -3322,6 +3322,8 @@ def build_capacity_report(cap, note: str = "") -> report.Report:
         else ": plan and concurrency not reported (unknown)"
 
     foot = note or cap.describe()
+    if cap.generated_at:
+        foot += f" \u00b7 assembled by the server at {cap.generated_at}"
     foot += (" \u00b7 history is cached \u22485 minutes server-side; now and "
              "admission are computed per call \u00b7 rate limit 60/min per key")
     if cap.stale:
@@ -3807,6 +3809,7 @@ def _capacity_metrics(since: float, until: float, m: dict) -> dict:
         "source": cap.describe(),
         "stale": cap.stale,
         "note": note,
+        "generated_at": getattr(cap, "generated_at", None),
         "plan": cfg("plan"),
         "priority_lanes": cfg("priority_lanes"),
         "background_lanes": cfg("background_lanes"),
