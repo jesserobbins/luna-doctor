@@ -17,6 +17,26 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.1] - 2026-11-03
+
+### Added
+
+- `luna-doctor latency` prints the latency table: one row per cell with n, p50,
+  p90 and max, split by `--by model|harness|outcome` and filtered by `--tier`.
+  The matrix existed only inside the `--json` envelope, so the report's three
+  lines were the whole readable story and answering "which model is slow" meant
+  parsing JSON by hand.
+
+  Every number is measured on this machine: LunaRoute's API reports no request
+  latency, no first token and no percentile, so nothing here is quoted from the
+  account. A cell under the sample floor is counted and left out of the table
+  rather than printed as if it were a rate.
+
+### Changed
+
+- `analyze` keeps three bounded lines in its latency section and names the
+  command that carries the rest.
+
 ## [0.5.0-alpha.1] - 2026-11-03
 
 ### Changed
