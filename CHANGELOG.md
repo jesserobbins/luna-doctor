@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.6] - 2026-11-03
+
 ### Changed
 
 - Swamp is opt-in. It kept run history per repository, and nothing on the
@@ -26,7 +28,6 @@ Versioning policy:
   or found the wrong repository, and the guess decided a number the report told
   the reader to set. A swamp repository now enters a report only when the run
   names one with `--swamp-root DIR`.
-
 - Inside a named repository, use comes from swamp's own run tracker, not from
   file times. `<repo>/.swamp/run_tracker.db` holds one row per method and
   workflow run with `started_at`, `completed_at` and `status`, so a run that
@@ -35,26 +36,20 @@ Versioning policy:
   repository without a tracker reads `installed, no run tracker`, and a corrupt
   one says it is unreadable. The database is opened read-only, and swamp is
   never spawned.
+- The install is one command. `pipx install luna-doctor` resolves from PyPI,
+  and the checkout path stays as the way to run an unreleased commit. The README
+  no longer prints a version number in the install block, because the number
+  drifted from `VERSION` twice.
 
 ### Added
 
 - `--swamp-root DIR` on `discover`, `analyze`, `fix` and `chart`.
 - `metrics.swamp.runTracker` carries what the tracker said: `overlapping`,
   `in_flight`, `pending` and `last_started`. The envelope schema moves to 5.
-
-### Added
-
 - `scripts/publish.sh` builds the tagged release, uploads it with the token
   from `~/.config/luna-doctor/pypi-token`, and then reads the index back to
   confirm that the version is live. It refuses a dirty tree and a missing tag,
   so an upload cannot describe a commit that nobody can find.
-
-### Changed
-
-- The install is one command. `pipx install luna-doctor` resolves from PyPI,
-  and the checkout path stays as the way to run an unreleased commit. The
-  README no longer prints a version number in the install block, because the
-  number drifted from `VERSION` twice.
 
 ## [0.3.0-alpha.5] - 2026-11-03
 
