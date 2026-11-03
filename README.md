@@ -18,8 +18,12 @@ Requirements: Python 3.9+. Everything below, `discover`, `analyze`, `fix`, `char
 git clone https://github.com/jesserobbins/luna-doctor.git
 cd luna-doctor
 pipx install .        # installs the `luna-doctor` command
-luna-doctor --version # prints the version in VERSION (0.2.0-alpha.3)
+luna-doctor --version # prints the version in VERSION (0.3.0-alpha.4)
 ```
+
+Give the install to your agent instead: [`docs/install-with-an-agent.md`](docs/install-with-an-agent.md)
+holds one block to paste, which installs the tool, reads the account's capacity
+and applies the settings that `fix` names.
 
 Or without packaging, put it on your `PATH`:
 

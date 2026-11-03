@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.4] - 2026-11-03
+
 ### Fixed
 
 - The unresolved verdict no longer sends a reader to fetch an account sample
@@ -41,8 +43,8 @@ Versioning policy:
   background tier waits in the overflow pool, so it never appears in the
   priority pool's in-use count. The old report said that and then left a
   reader with no way to see the pool that the demoted request was sitting in.
-- The two null shapes of a pool cap read as two different facts. A null cap is
-  a cap that could not be read, so the report claims nothing about the pool. A
+- The two null shapes of a pool cap read as two different facts. A null cap
+  means the cap was not read, so the report claims nothing about the pool. A
   zero cap is a closed pool, which is never saturated and always reports 0
   available. A payload captured before the account reported the overflow pool
   carries no such block, and that reads as unknown, never as a pool with no
