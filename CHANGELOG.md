@@ -17,6 +17,31 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Changed
+
+- Swamp is opt-in. It kept run history per repository, and nothing on the
+  machine lists the repositories a person uses swamp in, so the tool had to
+  guess: it walked up from the working directory, then tried `~/.swamp` and two
+  sibling directory names. On any other machine that guess either found nothing
+  or found the wrong repository, and the guess decided a number the report told
+  the reader to set. A swamp repository now enters a report only when the run
+  names one with `--swamp-root DIR`.
+
+- Inside a named repository, use comes from swamp's own run tracker, not from
+  file times. `<repo>/.swamp/run_tracker.db` holds one row per method and
+  workflow run with `started_at`, `completed_at` and `status`, so a run that
+  started before the window closed and finished after it opened counts as in
+  flight during the window. A store with thousands of old files reads idle. A
+  repository without a tracker reads `installed, no run tracker`, and a corrupt
+  one says it is unreadable. The database is opened read-only, and swamp is
+  never spawned.
+
+### Added
+
+- `--swamp-root DIR` on `discover`, `analyze`, `fix` and `chart`.
+- `metrics.swamp.runTracker` carries what the tracker said: `overlapping`,
+  `in_flight`, `pending` and `last_started`. The envelope schema moves to 5.
+
 ### Added
 
 - `scripts/publish.sh` builds the tagged release, uploads it with the token

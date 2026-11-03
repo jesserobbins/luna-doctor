@@ -1187,9 +1187,6 @@ def read_configs(*, swamp_repo_dir: str | None = None) -> Configs:
             cfg.codex[dotted] = Fact(provenance=PROV_UNKNOWN,
                                      source=f"file {CODEX_CONFIG} key {dotted}", reason=reason)
 
-    if swamp_repo_dir is None:
-        from luna_doctor import cli       # swamp repo discovery lives in cli
-        swamp_repo_dir = cli._swamp_repo_dir()
     cfg.swamp = _swamp_facts(swamp_repo_dir, files)
     return cfg
 
@@ -1406,7 +1403,8 @@ def build_snapshot(requests: list, *, since: float | None = None,
                    include_codex: bool = True, codex_roots: list | None = None,
                    now: float | None = None, cache_path: str | None = None,
                    key: str | None = None, ttl: float | None = None,
-                   configs: Configs | None = None) -> "Snapshot":
+                   configs: Configs | None = None,
+                   swamp_repo_dir: str | None = None) -> "Snapshot":
     """The one object commands consume: measured requests, declared configs
     and the live catalog, joined per model.
 
@@ -1417,7 +1415,7 @@ def build_snapshot(requests: list, *, since: float | None = None,
     """
     now = time.time() if now is None else now
     if configs is None:
-        configs = read_configs()
+        configs = read_configs(swamp_repo_dir=swamp_repo_dir)
     catalog, catalog_note = _catalog_with_note(allow_network, cache_path=cache_path,
                                                now=now, ttl=ttl, key=key)
     limits, limits_note = _limits_with_note(allow_network, now=now, key=key)

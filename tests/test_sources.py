@@ -144,10 +144,10 @@ def _degraded_capacity_payload():
 
 
 def _home_env(tmp, **extra):
-    """A fake $HOME (empty unless the test writes into it) + no swamp repo."""
+    """A fake $HOME (empty unless the test writes into it)."""
     home = os.path.join(tmp, "home")
     os.makedirs(home, exist_ok=True)
-    env = {"HOME": home, "SWAMP_ROOT": os.path.join(home, "no-such-swamp")}
+    env = {"HOME": home}
     env.update(extra)
     return env
 
@@ -782,7 +782,7 @@ class ConfigsProvenance(unittest.TestCase):
             os.makedirs(repo)
             with open(os.path.join(repo, ".env.swamp"), "w") as fh:
                 fh.write("SWAMP_LLM_CONCURRENCY=6\n")
-            env = _home_env(tmp, SWAMP_ROOT=os.path.join(tmp, "no-such-swamp"))
+            env = _home_env(tmp)
             home = os.path.join(tmp, "home")
             with open(os.path.join(home, ".swamp.yaml"), "w") as fh:
                 fh.write("SWAMP_LLM_CONCURRENCY: 9\n")
@@ -1074,7 +1074,7 @@ class NetworkFlags(unittest.TestCase):
         code, out, err = _run_cli("analyze", "--since", "1h", "--json", "--offline")
         self.assertIn(code, (0, 1, 2), err)
         doc = json.loads(out)
-        self.assertEqual(doc["schema"], 4)
+        self.assertEqual(doc["schema"], 5)
         snap = doc["metrics"]["snapshot"]
         self.assertEqual(snap["catalog"]["provenance"], "unknown",
                          "with no cache and no network the catalog is unknown, not defaulted")

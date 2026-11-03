@@ -59,10 +59,22 @@ def _declared(fact) -> object:
     return sources.declared_value(fact)
 
 
-def _swamp_present(window_hours: float = 24.0) -> tuple[bool, str | None]:
-    """The swamp advice gate: in use, not merely installed."""
-    state = swamp_state(since=time.time() - window_hours * 3600)
-    return bool(state["in_use"]), state["repo"]
+def _swamp_present(m: dict) -> tuple[bool, str | None]:
+    """The swamp advice gate: the caller named a repo, and swamp ran in it.
+
+    Swamp is opt-in. `metrics.swamp` exists only when `--swamp-root` named a
+    repository, and its `runTracker` is what decides use: a store full of old
+    runs is installed, not running. No stanza means swamp never entered this
+    run, and the advice stays silent.
+    """
+    sw = m.get("swamp") or {}
+    repo = sw.get("repoDir")
+    if not repo:
+        return False, None
+    tracker = sw.get("runTracker") or {}
+    if not tracker.get("available"):
+        return False, repo
+    return bool(tracker.get("overlapping") or tracker.get("pending")), repo
 
 
 def _swamp_split(cap: int = INTERACTIVE_BURST_CAP) -> tuple:
@@ -94,7 +106,7 @@ def recommendations_swamp(m: dict, agents: list[str], width=None) -> list:
     """
     if "swamp" not in agents:
         return []
-    present, repo_dir = _swamp_present(float(m.get("window_hours") or 24.0))
+    present, repo_dir = _swamp_present(m)
     if not present:
         return []
     knobs = sources.swamp_knobs(repo_dir)
@@ -516,7 +528,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
     """
     out = []
     if configs is None:
-        configs = sources.read_configs()
+        configs = sources.read_configs(swamp_repo_dir=(m.get("swamp") or {}).get("repoDir"))
     cat = list(catalog_ids or [])
     bg = pick_background_model(reqs, cat)
     # The width the advice aims at: the account's own priority concurrency, a
@@ -530,7 +542,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
     swamp_pi = None
     if "swamp" in agents:
         try:
-            _present, _repo = _swamp_present(float(m.get("window_hours") or 24.0))
+            _present, _repo = _swamp_present(m)
             if _present:
                 _cap = resolved if isinstance(resolved, int) and not isinstance(resolved, bool) \
                     and resolved > 0 else INTERACTIVE_BURST_CAP
@@ -951,6 +963,7 @@ def cmd_fix(args) -> int:
     except Exception:
         m["peak_concurrency_priority"] = m.get("peak_concurrency")
     m["declared_plan"] = getattr(args, "plan", None)
+    _swamp_enrich(m, getattr(args, "swamp_root", None), now - hours * 3600, now)
     try:
         m["capacity"] = _capacity_metrics(now - hours * 3600, now, m)
     except Exception:
@@ -965,7 +978,8 @@ def cmd_fix(args) -> int:
     snap = None
     try:
         snap = sources.build_snapshot(reqs, since=now - hours * 3600, until=now,
-                                      allow_network=bool(getattr(args, "online", False)))
+                                      allow_network=bool(getattr(args, "online", False)),
+                                      swamp_repo_dir=(m.get("swamp") or {}).get("repoDir"))
         configs = snap.configs
         catalog_ids = snap.catalog.ids() if snap.catalog is not None else []
         if bool(getattr(args, "online", False)) and snap.catalog is None:
