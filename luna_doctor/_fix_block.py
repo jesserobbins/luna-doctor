@@ -994,6 +994,26 @@ def cmd_fix(args) -> int:
     sizing_eval = sizing.evaluate(snap)
     recs = recommendations(m, reqs, agents, configs=configs, catalog_ids=catalog_ids,
                            sizing_eval=sizing_eval)
+    # No concurrency advice without local evidence. When the account reports
+    # pressure and this machine cannot explain it, `fix` says so before it says
+    # anything else. The config audit that follows is a different question - it
+    # is about settings this machine declares, not about what went wrong in this
+    # window - so it is not suppressed. Nothing here is derived from the
+    # account's pressure.
+    pressed = service_pressure(m)
+    note = None
+    if pressed:
+        claim, tier = pressed
+        state, why = local_evidence(m, tier)
+        if state != "enough":
+            note = (claim, why)
+    if note is not None and not args.json:
+        claim, why = note
+        print(f"no concurrency change to suggest: {claim}.")
+        print(f"what is missing here: {why}.")
+        print("Run luna-doctor on the machine that serves this traffic, or ask the agent "
+              "there to collect its logs and run it again.")
+        print("")
     render_fix(recs, m, args.json)
     actionable = any(ch["from"] != ch["to"] for g in recs for ch in g["changes"])
     return 1 if actionable else 0

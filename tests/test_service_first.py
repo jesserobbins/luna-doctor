@@ -13,6 +13,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from unittest import mock  # noqa: E402
+
+from datetime import datetime, timezone
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+
+
 from luna_doctor import cli
 
 
@@ -106,3 +115,112 @@ class TheServiceSectionLeads(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheInsufficientEvidenceOutcome(unittest.TestCase):
+    """The account can be conclusive while these logs are not.
+
+    Jesse's shape, 2026-11-03: "you appear to be going over capacity, however
+    I can't see on this machine's logs or in agentsview what is wrong, so I
+    have no suggestions to give here. You can run me elsewhere, or you can ask
+    your agent to collect logs". Three parts, in order, and no invented advice.
+    """
+
+    def _pressed(self, **over):
+        cap = dict(ACCOUNT)
+        cap["now"] = dict(ACCOUNT["now"], saturated=True, in_use=12)
+        cap.update(over)
+        return metrics(**cap)
+
+    def test_the_three_parts_in_order(self):
+        head, adj, code = cli.verdict(self._pressed())
+        self.assertIn("The account reports pressure this machine cannot explain", head)
+        self.assertIn("priority pool was full at the sample", head)
+        self.assertIn("(account)", head)
+        self.assertTrue(adj[0].startswith("what is missing here:"), adj[0])
+        self.assertTrue(adj[1].startswith("what to do:"), adj[1])
+        self.assertIn("run luna-doctor on the machine that serves this traffic", adj[1])
+        self.assertIn("collect its logs", adj[1])
+
+    def test_an_empty_window_still_carries_the_service_answer(self):
+        """No data here is exit 2, and stdout still answers for the account."""
+        head, adj, code = cli.verdict(self._pressed())
+        self.assertEqual(code, 2, "nothing measured here keeps the no-data code")
+        self.assertIn("(account)", head)
+
+    def test_a_thin_window_names_the_floor(self):
+        m = self._pressed()
+        m["requests"] = 3
+        m["by_outcome"] = {"completed": 3}
+        m["latency_s"] = {"interactive": {"n": 3, "p50": 1.0, "p90": 1.0, "max": 1.0},
+                          "background": {"n": 0, "p50": None, "p90": None, "max": None}}
+        head, adj, code = cli.verdict(m)
+        self.assertIn("EVIDENCE" if "EVIDENCE" in adj[0] else str(cli.EVIDENCE_MIN_REQUESTS), adj[0])
+        self.assertIn("fewer than", adj[0])
+        self.assertEqual(code, 0, "measured, but not enough to explain")
+
+    def test_no_store_says_so_and_names_the_missing_thing(self):
+        with unittest.mock.patch.object(cli, "_any_default_store", return_value=False):
+            state, why = cli.local_evidence(metrics())
+        self.assertEqual(state, "none")
+        self.assertIn("no pi, claude-code or codex log store", why)
+
+    def test_an_empty_store_asks_for_the_logs_instead(self):
+        with unittest.mock.patch.object(cli, "_any_default_store", return_value=True):
+            state, why = cli.local_evidence(metrics())
+        self.assertEqual(state, "none")
+        self.assertIn("hold no request inside the window", why)
+
+    def test_local_pressure_keeps_its_own_verdict(self):
+        """When this machine did see pressure, the account does not take over."""
+        m = self._pressed()
+        m["by_outcome"] = {"admission_timeout": 2, "completed": 40}
+        m["requests"] = 42
+        head, adj, code = cli.verdict(m)
+        self.assertNotIn("cannot explain", head)
+        self.assertEqual(code, 1)
+
+    def test_a_background_only_window_is_its_own_state(self):
+        m = self._pressed()
+        m["requests"] = 40
+        m["peak_concurrency_priority"] = 0
+        state, why = cli.local_evidence(m, "priority")
+        self.assertEqual(state, "other-tier")
+        self.assertIn("background tier", why)
+
+    def test_fix_suggests_nothing_without_local_evidence(self):
+        with unittest.mock.patch.object(cli, "_any_default_store", return_value=False):
+            import subprocess
+            import tempfile
+            with tempfile.TemporaryDirectory() as home:
+                cache = os.path.join(home, "capacity.json")
+                import json
+                with open(cache, "w") as fh:
+                    json.dump({"fetched_at": __import__("time").time(),
+                               "response": {"success": True,
+                                            "generated_at": _now_iso(),
+                                            "data": {"now": {"limit": 12, "in_use": 12,
+                                                             "available": 0, "saturated": True,
+                                                             "ledger": "up",
+                                                             "sampled_at": _now_iso()},
+                                                     "config": {"plan": "apex",
+                                                                "priority_lanes": 12,
+                                                                "background_lanes": 12,
+                                                                "overflow_routing": "enabled"}}}},
+                              fh)
+                env = dict(os.environ, HOME=home, LUNA_DOCTOR_CAPACITY=cache,
+                           LUNA_DOCTOR_STORE=os.path.join(home, "store"), NO_COLOR="1")
+                empty = os.path.join(home, "empty")
+                os.makedirs(empty, exist_ok=True)
+                proc = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "luna-doctor"),
+                                       "fix", "--since", "1h", "--offline",
+                                       "--pi-root", empty, "--claude-root", empty],
+                                      capture_output=True, text=True, timeout=180,
+                                      cwd=ROOT, env=env)
+        self.assertIn("no concurrency change to suggest", proc.stdout)
+        self.assertIn("what is missing here", proc.stdout)
+        self.assertIn("Run luna-doctor on the machine that serves this traffic", proc.stdout)
+        # The config audit that follows is about declared settings, never about
+        # the account's pressure, and it keeps its own findings.
+        self.assertNotIn("concurrency allowance", proc.stdout.lower().replace(
+            "priority concurrent", ""))

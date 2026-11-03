@@ -2133,6 +2133,9 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
     adj: list[str] = []
     n = m["requests"]
     if n == 0:
+        answer = _service_without_local(m)
+        if answer:
+            return answer
         return "No requests found in the window.", ["Widen the window with --since, or run `luna-doctor discover`."], 2
 
     dead = m["by_outcome"].get("admission_timeout", 0)
@@ -2425,6 +2428,14 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         # pressure" on a window that has none.
         head = f"{n} requests, none blocked at admission, peak concurrency {m['peak_concurrency']}."
     adj.append(_advice_line(m))
+    # The service can be conclusive while these logs are not. When the account
+    # reports pressure and this machine measured none of its own, the answer is
+    # the account's claim, what is missing here, and the two moves that would
+    # produce an explanation - never a guess dressed as advice.
+    if not pressure:
+        answer = _service_without_local(m, adj)
+        if answer:
+            return answer
     return head, adj, (1 if pressure else 0)
 
 
@@ -2457,6 +2468,120 @@ def _excluded_rows(m: dict) -> list:
     if not lines:
         return []
     return [report.Row("excluded", "\n".join(lines))]
+
+
+# ---- can this machine explain what the account reported? -------------------
+# Service first: the account can be conclusive while these logs are not. Below
+# this many local requests a share is noise (one request is ten percent of ten),
+# so the tool says what it cannot see instead of dressing a small number up as
+# an explanation.
+EVIDENCE_MIN_REQUESTS = 10
+
+
+def _any_default_store() -> bool:
+    """Does the machine hold a log store where the harnesses write one?"""
+    for root in (sources.PI_STORE, sources.CLAUDE_STORE, sources.CODEX_STORE):
+        try:
+            if os.path.isdir(os.path.expanduser(root)):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def service_pressure(m: dict) -> tuple[str, str] | None:
+    """The account's own pressure, as one sentence, when it reports any.
+
+    Two sources, both the account's: a fresh live sample of a saturated pool,
+    which is one dated instant, and the admission record's denied-after-waiting
+    counts, which cover complete UTC days. Neither is compared with a local
+    number here.
+    """
+    capm = m.get("capacity") or {}
+    if capm.get("provenance") != sources.PROV_ACCOUNT:
+        return None
+    now = capm.get("now") or {}
+    sampled = now.get("sampled_at")
+    if capm.get("now_fresh"):
+        if now.get("saturated") is True:
+            return (f"the account's priority pool was full at the sample: in use "
+                    f"{now.get('in_use')} of {now.get('limit')} priority concurrent "
+                    f"requests at {sampled} (account)", "priority")
+        bg = now.get("background") or {}
+        if bg.get("saturated") is True:
+            return (f"the account's overflow pool was full at the sample: in use "
+                    f"{bg.get('in_use')} of {bg.get('limit')} concurrent requests at "
+                    f"{sampled} (account)", "overflow")
+    denied = 0
+    days = []
+    for day in capm.get("window_days") or []:
+        value = day.get("denied_after_wait")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            denied += value
+            days.append(str(day.get("day")))
+    if denied:
+        return (f"the account recorded {denied} request(s) denied after waiting on "
+                f"{', '.join(days[:4])}{' and more' if len(days) > 4 else ''} (account)",
+                "either")
+    return None
+
+
+def local_evidence(m: dict, pressed: str = "either") -> tuple[str, str]:
+    """(state, sentence): what this machine can say about the window.
+
+    `enough` means the logs carry enough requests to be an explanation.
+    `none` means nothing was measured here, and it says whether a store exists
+    at all, because "run this where the traffic is" and "collect the logs" are
+    different instructions. `thin` means requests exist but too few to explain
+    anything. `other-tier` means the traffic that did run here was on the tier
+    the account did not report as pressed.
+    """
+    n = m.get("requests") or 0
+    if n == 0:
+        if _any_default_store():
+            return "none", ("this machine's log stores hold no request inside the "
+                            "window, so the logs cannot say what caused it")
+        return "none", ("this machine holds no pi, claude-code or codex log store, so "
+                        "there is nothing here to read")
+    if n < EVIDENCE_MIN_REQUESTS:
+        return "thin", (f"this window holds {n} request(s) here, fewer than the "
+                        f"{EVIDENCE_MIN_REQUESTS} it takes to say anything about a rate")
+    if pressed == "priority" and (m.get("peak_concurrency_priority") or 0) == 0:
+        return "other-tier", ("every request this machine ran in the window was on the "
+                              "background tier, and the account reports the priority pool "
+                              "under pressure")
+    return "enough", ""
+
+
+
+def _service_without_local(m: dict, extra=()):
+    """The three-part answer, when the account reports and this machine cannot.
+
+    Returns None when there is nothing to say: no account payload, no pressure
+    in it, or enough local evidence to explain the window. Otherwise: the
+    account's claim, what is missing here, and the two moves that would produce
+    an explanation. Exit 2 stays "nothing measured here", and stdout still
+    carries the account's answer.
+    """
+    pressed = service_pressure(m)
+    if not pressed:
+        return None
+    claim, tier = pressed
+    state, why = local_evidence(m, tier)
+    if state == "enough":
+        return None
+    n = m.get("requests") or 0
+    head = f"The account reports pressure this machine cannot explain: {claim}."
+    # What is missing comes first, the existing account corroboration keeps its
+    # place in the middle (it is the account's evidence, not advice this machine
+    # invented), and the two moves close the answer.
+    adj = [f"what is missing here: {why}."] + list(extra) + [
+        "what to do: run luna-doctor on the machine that serves this traffic, or ask "
+        "the agent there to collect its logs and run it again (`luna-doctor discover` "
+        "lists the stores it will read).",
+    ]
+    return head, adj, (2 if n == 0 else 0)
+
 
 
 def _service_rows(m: dict) -> list:
