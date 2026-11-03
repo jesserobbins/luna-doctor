@@ -17,6 +17,29 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.5] - 2026-11-03
+
+### Added
+
+- The package declares its license as an SPDX expression, `Apache-2.0`, and
+  ships the license text beside it. PyPI reads that field in a sidebar. The
+  earlier form put the whole Apache text in the field, so the page opened with
+  boilerplate.
+- `[project.urls]` names the repository, the issue tracker, the changelog and
+  the documentation. The `Homepage` entry pointed at a personal site and gave a
+  reader no path to the code.
+- A `Development Status :: 3 - Alpha` classifier states what every report
+  already prints.
+
+### Changed
+
+- The README carries absolute URLs for its two chart images and for the install
+  document. The README is the description on the PyPI page, and a relative path
+  leads nowhere there.
+- The install document says where the agent skill lives. The wheel holds
+  `luna_doctor/` only, so the skill stays in the repository at
+  `skills/luna-doctor/SKILL.md` until packaging carries it.
+
 ## [0.3.0-alpha.4] - 2026-11-03
 
 ### Fixed
