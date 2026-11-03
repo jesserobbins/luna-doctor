@@ -517,6 +517,134 @@ class CapacityFetch(_NoNetwork, unittest.TestCase):
                               if cap.config is not None else None)
 
 
+# ---- the overflow pool: both pools reported, two null shapes kept apart ----
+
+
+def _overflow_capacity_payload():
+    """The live capacity payload captured 2026-11-02, the first one this
+    suite holds that reports the overflow pool: `now.background` (0 of 12, not
+    saturated) and a `background` object inside both history windows. The
+    priority pool reads 7 in use of 12 while the overflow pool reads 0 of 12,
+    which is exactly the pair a report must not add together."""
+    with open(os.path.join(ROOT, "tests", "fixtures",
+                           "capacity-2026-11-02.json")) as fh:
+        return json.load(fh)
+
+
+def _pool_payload(background, history_background=None):
+    """A minimal payload with one overflow-pool shape, for the null contract."""
+    payload = {"success": True, "data": {
+        "now": {"limit": 12, "in_use": 3, "available": 9, "saturated": False,
+                "ledger": "up", "sampled_at": "2026-11-02T23:51:43Z",
+                "background": background},
+        "config": {"plan": "apex", "priority_lanes": 12,
+                   "background_lanes": 12, "overflow_routing": "enabled"},
+        "history": {"as_of": "2026-11-01", "last_30d": None,
+                    "rollup_computed_at": None, "tail": None,
+                    "last_7d": {}},
+        "admission": None}}
+    if history_background is not None:
+        payload["data"]["history"]["last_7d"] = {"peak_lanes": 12, "background": history_background}
+    return payload
+
+
+class CapacityOverflowPool(_NoNetwork, unittest.TestCase):
+    """`now.background` and `history.*.background` are the overflow pool: a
+    demoted request lands there, not in the priority pool's `in_use`, so a
+    consumer that reads only the flat fields cannot see the pool a paused
+    stream is sitting in. The two null shapes stay apart: a null cap is
+    unknown, a zero cap is a closed pool."""
+
+    def _cap(self, tmp, payload=None):
+        path = os.path.join(tmp, "capacity.json")
+        _write_cap_cache(path, payload if payload is not None
+                         else _overflow_capacity_payload(), time.time())
+        return sources.fetch_capacity(False, cache_path=path)
+
+    def test_the_live_payload_reports_both_pools_side_by_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = self._cap(tmp)
+            self.assertEqual(cap.now.in_use, 7, "the flat fields are the priority pool")
+            pool = cap.now.background
+            self.assertEqual(pool.limit, 12)
+            self.assertEqual(pool.in_use, 0)
+            self.assertEqual(pool.available, 12)
+            self.assertIs(pool.saturated, False)
+            self.assertFalse(pool.closed)
+            self.assertEqual(sources.capacity_overflow_now(cap),
+                             {"available": 12, "in_use": 0, "limit": 12,
+                              "saturated": False},
+                             "the block goes out verbatim, nulls and all")
+            week = sources.capacity_overflow_rollup(cap, "last_7d")
+            self.assertEqual(week["peak_lanes"], 12)
+            self.assertEqual(week["p95_lanes"], 11)
+            self.assertEqual(week["queued_pct"], 0.02)
+            self.assertEqual(
+                sources.capacity_overflow_rollup(cap, "last_30d")["queued_pct"], 58.14,
+                "the two windows are different facts and are never merged")
+
+    def test_a_null_cap_is_unknown_and_never_reads_as_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = self._cap(tmp, _pool_payload(
+                {"limit": None, "in_use": None, "available": None,
+                 "saturated": None}))
+            pool = cap.now.background
+            self.assertIsNone(pool.limit)
+            self.assertIsNone(pool.in_use)
+            self.assertFalse(pool.closed, "an unread cap is not a closed pool")
+
+    def test_a_zero_cap_is_a_closed_pool_and_keeps_its_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = self._cap(tmp, _pool_payload(
+                {"limit": 0, "in_use": 0, "available": 0, "saturated": False}))
+            pool = cap.now.background
+            self.assertEqual(pool.limit, 0, "a closed pool is a measured zero, not unknown")
+            self.assertTrue(pool.closed)
+            self.assertIs(pool.saturated, False)
+
+    def test_a_cap_with_an_unread_count_keeps_the_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = self._cap(tmp, _pool_payload(
+                {"limit": 8, "in_use": None, "available": None,
+                 "saturated": None}))
+            pool = cap.now.background
+            self.assertEqual(pool.limit, 8)
+            self.assertIsNone(pool.in_use)
+            self.assertIsNone(pool.saturated)
+
+    def test_a_payload_without_the_pool_is_unknown_not_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = self._cap(tmp, _capacity_payload())     # captured before the pool existed
+            self.assertIsNone(sources.capacity_overflow_now(cap),
+                              "an absent block is unknown, not a pool with no capacity")
+            self.assertIsNone(sources.capacity_overflow_rollup(cap, "last_7d"))
+            self.assertIsNone(sources.capacity_overflow_rollup(cap, "last_30d"))
+
+    def test_a_pool_that_never_carried_traffic_keeps_its_null_averages(self):
+        """An unused pool reports zeros with a null average and a null queued
+        share, because those are averages of nothing; the zeros stay zeros."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = self._cap(tmp, _pool_payload(
+                {"limit": 12, "in_use": 0, "available": 12, "saturated": False},
+                history_background={"peak_lanes": 0, "avg_lanes": None,
+                                    "p95_lanes": 0, "lane_hours": 0,
+                                    "queued_pct": None, "days_active": 0,
+                                    "days_covered": 7}))
+            week = sources.capacity_overflow_rollup(cap, "last_7d")
+            self.assertEqual(week["peak_lanes"], 0)
+            self.assertIsNone(week["avg_lanes"])
+            self.assertIsNone(week["queued_pct"])
+            self.assertIsNone(sources.capacity_overflow_rollup(cap, "last_30d"),
+                              "a window the account did not report is absent, not idle")
+
+    def test_the_degraded_shapes_survive_inside_the_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = self._cap(tmp, _degraded_capacity_payload())
+            self.assertIsNone(cap.now.background,
+                              "a degraded payload carries no overflow block at all")
+            self.assertIsNone(sources.capacity_overflow_now(cap))
+
+
 # ---- configs: provenance, defaults, unchecked ---------------------------------
 
 class ConfigsProvenance(unittest.TestCase):

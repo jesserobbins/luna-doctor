@@ -2147,6 +2147,23 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
                 f"the account's capacity and served from its disk cache)"
             )
         days = capm.get("window_days") or []
+        # The overflow pool at its cap, from a sample taken inside this window.
+        # Only a fresh sample may say this: a saturated reading from yesterday
+        # cannot corroborate a stall from today, and the report does not state
+        # a fact about a moment it did not measure. The line never merges the
+        # two vantages - the sample is one instant, the stall has its own
+        # duration.
+        bg = (capm.get("now") or {}).get("background") or {}
+        if capm.get("now_fresh") and bg.get("saturated") is True:
+            adj.append(
+                f"the account's overflow pool was full at the sample "
+                f"({bg.get('in_use')} of {bg.get('limit')} overflow concurrent "
+                f"requests, sampled {capm['now'].get('sampled_at')}, account) - a "
+                f"request demoted to a background tier waits for a slot in this "
+                f"pool, so a stream that went quiet while this pool was full has "
+                f"a pool that agrees with it. Cross-check, not a merge: the "
+                f"sample is one instant and the stall has its own duration."
+            )
         if days:
             daw_days = []
             daw_total = 0
@@ -2744,12 +2761,13 @@ def build_discover_report(d: dict) -> report.Report:
 
 # ---- the capacity command ----------------------------------------------------
 # The one command that may fetch the account capacity live (with --online):
-# it renders the API's own story - live priority-pool occupancy, plan and
-# concurrency, the 7d/30d occupancy rollups, and the per-complete-UTC-day
-# admission table. The null contract governs every line: an absent value
-# renders as unknown with its reason, never as a zero; a null
-# avg_queue_wait_ms is "no waiting that day"; background_lanes 0 is a real
-# value (no overflow entitled); priority_lanes null is unknown, not zero.
+# it renders the API's own story - live priority-pool and overflow-pool
+# occupancy, plan and concurrency, the 7d/30d occupancy rollups for both pools,
+# and the per-complete-UTC-day admission table. The null contract governs every
+# line: an absent value renders as unknown with its reason, never as a zero; a
+# null avg_queue_wait_ms is "no waiting that day"; background_lanes 0 is a real
+# value (no overflow entitled); priority_lanes null is unknown, not zero; a
+# pool cap of null is an unread cap, while a zero cap is a closed pool.
 
 def _cap_field(block, name):
     """One sub-block field, None-safe for absent blocks and out-of-contract
@@ -2812,6 +2830,63 @@ def _cap_overflow(value) -> str:
     return str(value)
 
 
+def _cap_overflow_value(r: dict) -> str:
+    """The overflow pool's own measures for one history window.
+
+    The measures are the API's, under the same null contract: a pool that was
+    never used reports zeros with a null average and a null queued share, so
+    those two read unknown and the zeros are left standing as zeros. A peak
+    that equals the pool's cap means the pool ran full in that window, which
+    is the reading a demoted request cares about."""
+    def n(v):
+        return "unknown (not reported)" if v is None else str(v)
+    bits = [
+        "peak %s concurrent requests" % n(r.get("peak_lanes")),
+        "average %s" % n(r.get("avg_lanes")),
+        "p95 %s" % n(r.get("p95_lanes")),
+        "occupancy %s concurrent-request-hours" % n(r.get("lane_hours")),
+        "queued %s%% of the time" % n(r.get("queued_pct")),
+        "%s day(s) with traffic" % n(r.get("days_active")),
+        "%s day(s) with data" % n(r.get("days_covered")),
+    ]
+    if r.get("peak_lanes") == 0 and r.get("queued_pct") is None \
+            and r.get("avg_lanes") is None:
+        bits.append("a pool that never carried traffic reports zeros with no "
+                    "average and no queued share, and that is not an error")
+    return " \u00b7 ".join(bits)
+
+
+def _cap_pool_now(pool) -> str:
+    """One live pool, in the vocabulary the report uses everywhere.
+
+    Two null shapes stay apart. A null cap is unknown, so nothing is claimed
+    about the pool. A measured zero cap is a closed pool: never saturated and
+    always 0 available, because those two answers do not depend on the count.
+    For a pool with capacity, a count that could not be read leaves the
+    occupancy and the flag unknown while the cap still reports."""
+    if pool is None:
+        return ("not reported by the account (unknown) - a payload captured "
+                "before the account reported this pool carries no such block, "
+                "and that is not the same as a pool with no capacity")
+    limit = _cap_field(pool, "limit")
+    in_use = _cap_field(pool, "in_use")
+    avail = _cap_field(pool, "available")
+    if limit is None:
+        return ("cap unknown (not reported) \u00b7 occupancy unknown "
+                "(not reported)")
+    if limit == 0 and not isinstance(limit, bool):
+        return ("0 concurrent requests: the account is entitled to no "
+                "overflow, so this pool is never saturated and always reports "
+                "0 available, whatever the count says")
+    if in_use is None:
+        occ = "in use unknown (not reported) \u00b7 cap %s" % limit
+    else:
+        occ = "in use %s of %s concurrent requests" % (in_use, limit)
+    if avail is not None:
+        occ += " \u00b7 %s available" % avail
+    return occ
+
+
 def _capacity_rollup_value(r: dict) -> str:
     """One occupancy rollup in the product vocabulary.
 
@@ -2849,12 +2924,13 @@ def _capacity_admission_row(entry: dict) -> report.Row:
 def build_capacity_report(cap, note: str = "") -> report.Report:
     """The capacity API's own story as a Report.
 
-    `now` is the priority pool only (overflow traffic does not appear in
-    in_use; it does appear in admission), the admission table covers
-    complete UTC days only, and the counts' exclusions are stated where the
-    counts are - a naive reader would otherwise take them for the whole
-    account's traffic. When `cap` is None everything is unknown with its
-    reason; fetching is `--online`, and a fetch failure is never an error.
+    The flat `now` fields are the priority pool only, and the overflow pool is
+    reported in its own row, because overflow traffic does not appear in
+    in_use (it does appear in admission). The admission table covers complete
+    UTC days only, and the counts' exclusions are stated where the counts are
+    - a naive reader would otherwise take them for the whole account's
+    traffic. When `cap` is None everything is unknown with its reason;
+    fetching is `--online`, and a fetch failure is never an error.
     """
     if cap is None:
         return report.Report(
@@ -2869,7 +2945,8 @@ def build_capacity_report(cap, note: str = "") -> report.Report:
     n, cfg, h, adm = cap.now, cap.config, cap.history, cap.admission
     now_rows = [report.Row(
         "covers", "the priority pool only - overflow traffic does not appear "
-        "in in_use (it does appear in the admission counts below)")]
+        "in in_use; the overflow pool is the row below, and the admission "
+        "counts cover both pools")]
     if n is None:
         now_rows.append(report.Row("now", "not reported by the account (unknown)"))
     else:
@@ -2889,6 +2966,12 @@ def build_capacity_report(cap, note: str = "") -> report.Report:
         now_rows.append(report.Row("saturated", _cap_flag(_cap_field(n, "saturated"))))
         now_rows.append(report.Row("ledger", _cap_unknown(_cap_field(n, "ledger"))))
         now_rows.append(report.Row("sampled at", _cap_unknown(_cap_field(n, "sampled_at"))))
+        bg = _cap_field(n, "background")
+        pool = _cap_pool_now(bg)
+        if bg is not None:
+            pool += (f"\nsaturated: {_cap_flag(_cap_field(bg, 'saturated'))}"
+                     " \u00b7 this is the same cap as config background")
+        now_rows.append(report.Row("overflow pool", pool))
 
     config_rows = [
         report.Row("plan", _cap_unknown(_cap_field(cfg, "plan"))),
@@ -2902,6 +2985,10 @@ def build_capacity_report(cap, note: str = "") -> report.Report:
         r = _cap_field(h, key)
         if isinstance(r, dict):
             val = _capacity_rollup_value(r)
+            bg = sources.capacity_overflow_rollup(cap, key)
+            val += "\noverflow pool: " + (_cap_overflow_value(bg) if bg is not None
+                                          else "not reported by the account "
+                                               "(unknown)")
             as_of = _cap_field(h, "as_of")
             if as_of is not None:
                 val += f"\nrollup as of {as_of}"
@@ -3446,7 +3533,23 @@ def _capacity_metrics(since: float, until: float, m: dict) -> dict:
             "saturated": getattr(cap.now, "saturated", None),
             "ledger": getattr(cap.now, "ledger", None),
             "sampled_at": getattr(cap.now, "sampled_at", None),
+            # the overflow pool, verbatim: a request demoted to a background
+            # tier lands here, not in the priority pool's in_use, so a
+            # consumer that reads only the flat fields cannot see the pool a
+            # paused stream is sitting in. null stays null, and a closed pool
+            # keeps its 0 cap instead of reading as unknown.
+            "background": sources.capacity_overflow_now(cap),
         }
+    # the overflow pool's own 7d/30d measures, kept beside the priority
+    # pool's. A pool that never carried traffic reports zeros with a null
+    # average and a null queued share; an absent block stays absent rather
+    # than becoming a pool that was idle.
+    overflow = {w: sources.capacity_overflow_rollup(cap, w)
+                for w in ("last_7d", "last_30d")}
+    if cap.history is not None:
+        overflow["as_of"] = getattr(cap.history, "as_of", None)
+    if any(overflow.get(w) is not None for w in ("last_7d", "last_30d")):
+        block["overflow_pool"] = overflow
     if cap.admission is not None:
         block["admission_as_of"] = getattr(cap.admission, "as_of", None)
     by_day = dict(sources.capacity_admission_days(cap))

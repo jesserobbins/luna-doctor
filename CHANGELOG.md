@@ -17,6 +17,32 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- `capacity` reports the account's overflow pool, not only its priority pool.
+  The API sends the live overflow occupancy inside `now`, and its own 7-day
+  and 30-day measures inside both history windows. Each pool now gets its own
+  row, and the report never adds one pool to the other. A request demoted to a
+  background tier waits in the overflow pool, so it never appears in the
+  priority pool's in-use count. The old report said that and then left a
+  reader with no way to see the pool that the demoted request was sitting in.
+- The two null shapes of a pool cap read as two different facts. A null cap is
+  a cap that could not be read, so the report claims nothing about the pool. A
+  zero cap is a closed pool, which is never saturated and always reports 0
+  available. A payload captured before the account reported the overflow pool
+  carries no such block, and that reads as unknown, never as a pool with no
+  capacity.
+- `metrics.capacity` carries the same overflow facts in the `--json` envelope:
+  `now.background` verbatim, and `overflow_pool` with the 7-day and 30-day
+  measures beside their priority counterparts. `analyze` adds one adjustment
+  line when a fresh sample shows the overflow pool at its cap, because that is
+  the pool a paused demoted stream waits in. A stale sample says nothing,
+  because it is a fact about a different moment.
+- A new fixture, `tests/fixtures/capacity-2026-11-02.json`, holds the live
+  payload captured on 2026-11-02, the first one this suite holds that reports
+  the overflow pool.
+
+
 ## [0.3.0-alpha.3] - 2026-10-28
 
 ### Removed

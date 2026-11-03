@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "bin", "luna-doctor")
@@ -78,6 +79,31 @@ def capacity_cache(home, in_use=12, limit=12, sampled_at="2026-10-26T04:00:00Z")
     return path
 
 
+def _fresh_stamp(minutes_ago=1):
+    """A sample time inside the freshness window `analyze` judges a live
+    reading against, so a test can put a current sample in front of it."""
+    stamp = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def overflow_capacity_cache(home, background=None,
+                            sampled_at="2026-11-02T23:51:43Z"):
+    """The captured live payload (both pools, both history windows) as a
+    fresh cache file, with the live sample optionally replaced so a test can
+    put a full, empty or stale pool in front of a consumer."""
+    with open(os.path.join(ROOT, "tests", "fixtures",
+                          "capacity-2026-11-02.json")) as fh:
+        payload = json.load(fh)
+    if background is not None:
+        payload["data"]["now"]["background"] = dict(background)
+    payload["data"]["now"]["sampled_at"] = sampled_at
+    doc = {"fetched_at": time.time() - 30, "response": payload}
+    path = os.path.join(home, "capacity.json")
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+    return path
+
+
 def run(home, *args, timeout=120, capacity=None):
     env = dict(os.environ)
     env["HOME"] = home
@@ -130,6 +156,68 @@ class CapacityWiring(unittest.TestCase):
         now = doc["metrics"]["capacity"].get("now") or {}
         self.assertEqual(12, now.get("in_use"))
         self.assertEqual("2026-10-26T04:00:00Z", now.get("sampled_at"))
+
+    def test_the_overflow_pool_reaches_the_json_block(self):
+        """Both pools travel, side by side and unmerged: the priority pool's
+        flat fields and the overflow block beside them, plus the overflow
+        pool's own 7d/30d measures."""
+        home = _store()
+        cap = overflow_capacity_cache(home)
+        code, out, err = run(home, "analyze", "--since", "1h", "--json", capacity=cap)
+        self.assertIn(code, (0, 1), err)
+        block = json.loads(out)["metrics"]["capacity"]
+        now = block["now"]
+        self.assertEqual(7, now["in_use"], "the flat fields stay the priority pool")
+        self.assertEqual({"available": 12, "in_use": 0, "limit": 12,
+                          "saturated": False}, now["background"])
+        self.assertEqual(11, block["overflow_pool"]["last_7d"]["p95_lanes"])
+        self.assertEqual(58.14, block["overflow_pool"]["last_30d"]["queued_pct"])
+
+    def test_a_payload_with_no_overflow_block_claims_nothing_about_it(self):
+        home = _store()
+        cap = capacity_cache(home)
+        code, out, err = run(home, "analyze", "--since", "1h", "--json", capacity=cap)
+        self.assertIn(code, (0, 1), err)
+        block = json.loads(out)["metrics"]["capacity"]
+        self.assertIsNone(block["now"].get("background"))
+        self.assertNotIn("overflow_pool", block,
+                         "an absent pool is absent, not a pool that was idle")
+
+    def test_the_capacity_command_reports_both_pools(self):
+        home = _store()
+        cap = overflow_capacity_cache(home)
+        code, out, err = run(home, "capacity", "--offline", "--style", "plain",
+                            capacity=cap)
+        self.assertIn(code, (0, 1), err)
+        self.assertIn("in use 7 of 12 priority concurrent requests", out)
+        self.assertIn("overflow pool", out)
+        self.assertIn("in use 0 of 12 concurrent requests", out)
+        self.assertIn("overflow pool: peak 12 concurrent requests", out)
+        self.assertIn("p95 11", out)
+
+    def test_an_overflow_pool_at_its_cap_is_named_in_the_analysis(self):
+        """A fresh sample of a full overflow pool is the one account fact that
+        explains a demoted stream waiting, so the analysis names it - and only
+        when the sample is fresh, since a stale one is a fact about another
+        moment."""
+        home = _store()
+        cap = overflow_capacity_cache(home, background={"limit": 12, "in_use": 12,
+                                                         "available": 0, "saturated": True},
+                                      sampled_at=_fresh_stamp())
+        code, out, err = run(home, "analyze", "--since", "1h", capacity=cap)
+        self.assertIn(code, (0, 1), err)
+        self.assertIn("overflow pool was full at the sample", out)
+        self.assertIn("Cross-check, not a merge", out)
+
+    def test_a_stale_full_pool_sample_is_not_stated_as_now(self):
+        home = _store()
+        cap = overflow_capacity_cache(home, background={"limit": 12, "in_use": 12,
+                                                         "available": 0, "saturated": True},
+                                      sampled_at="2026-10-20T04:00:00Z")
+        code, out, err = run(home, "analyze", "--since", "1h", capacity=cap)
+        self.assertIn(code, (0, 1), err)
+        self.assertNotIn("overflow pool was full at the sample", out,
+                         "a stale sample is a fact about another moment")
 
     def test_a_quiet_machine_with_429s_and_a_full_account_reads_your_org(self):
         home = _store(kind="refusals_only")
