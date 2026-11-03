@@ -17,6 +17,49 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.3.0-alpha.4] - 2026-11-03
+
+### Fixed
+
+- The unresolved verdict no longer sends a reader to fetch an account sample
+  that the report already holds. When the cache carries a fresh sample, and
+  that sample sits below the cap, the headline now states the reading and says
+  plainly that the sample does not corroborate a full pool. The earlier copy
+  said "the account half gives nothing that says whether the pool was full"
+  while the rows underneath it printed `in use 8 of 12 priority concurrent
+  requests (account)`. The verdict is unchanged: a reading below the cap still
+  does not name an owner, and the new sentence says which fact is missing.
+- The two unresolved branches printed the count noun twice, as "2 requests
+  requests refused or stalled" and "1 request request stalled", because the
+  sentence supplied its own verb phrase after `_requests` had already supplied
+  the noun.
+
+### Added
+
+- `capacity` reports the account's overflow pool, not only its priority pool.
+  The API sends the live overflow occupancy inside `now`, and its own 7-day
+  and 30-day measures inside both history windows. Each pool now gets its own
+  row, and the report never adds one pool to the other. A request demoted to a
+  background tier waits in the overflow pool, so it never appears in the
+  priority pool's in-use count. The old report said that and then left a
+  reader with no way to see the pool that the demoted request was sitting in.
+- The two null shapes of a pool cap read as two different facts. A null cap
+  means the cap was not read, so the report claims nothing about the pool. A
+  zero cap is a closed pool, which is never saturated and always reports 0
+  available. A payload captured before the account reported the overflow pool
+  carries no such block, and that reads as unknown, never as a pool with no
+  capacity.
+- `metrics.capacity` carries the same overflow facts in the `--json` envelope:
+  `now.background` verbatim, and `overflow_pool` with the 7-day and 30-day
+  measures beside their priority counterparts. `analyze` adds one adjustment
+  line when a fresh sample shows the overflow pool at its cap, because that is
+  the pool a paused demoted stream waits in. A stale sample says nothing,
+  because it is a fact about a different moment.
+- A new fixture, `tests/fixtures/capacity-2026-11-02.json`, holds the live
+  payload captured on 2026-11-02, the first one this suite holds that reports
+  the overflow pool.
+
+
 ## [0.3.0-alpha.3] - 2026-10-28
 
 ### Removed

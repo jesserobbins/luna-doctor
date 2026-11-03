@@ -10,7 +10,7 @@ It prints one block instead of the report, never beside it. `--json` suppresses
 it, `--style` does not decorate it, and `--copy` copies it.
 
 ```
-luna-doctor 0.2.0-alpha.3 (log schema 4)
+luna-doctor 0.3.0-alpha.4 (log schema 4)
 window: 2026-10-26T12:00:00Z .. 2026-10-27T12:00:00Z
 stores: 1 (claude-code:default, pi:default)
 verdict: your org (the account) - <the sentence that explains the verdict>

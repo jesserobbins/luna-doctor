@@ -18,8 +18,12 @@ Requirements: Python 3.9+. Everything below, `discover`, `analyze`, `fix`, `char
 git clone https://github.com/jesserobbins/luna-doctor.git
 cd luna-doctor
 pipx install .        # installs the `luna-doctor` command
-luna-doctor --version # prints the version in VERSION (0.2.0-alpha.3)
+luna-doctor --version # prints the version in VERSION (0.3.0-alpha.4)
 ```
+
+Give the install to your agent instead: [`docs/install-with-an-agent.md`](docs/install-with-an-agent.md)
+holds one block to paste, which installs the tool, reads the account's capacity
+and applies the settings that `fix` names.
 
 Or without packaging, put it on your `PATH`:
 
@@ -299,7 +303,7 @@ is not traffic. When swamp does appear, the report describes its concurrency as
 configured (its extract and verify configuration, and where they came from). It
 never describes that concurrency as measured.
 
-`luna-doctor capacity` serves a disk cache of the account's plan and priority concurrency by default. It serves a cached payload even when that payload is stale, and the network stays untouched. Two flags can fetch, and each one is a single authenticated GET: `capacity --online` refreshes the capacity cache (5 minutes), and `analyze --online` / `fix --online` refresh the 24-hour model catalog at `~/.luna-doctor/catalog.json`. Both use the routing key that `lunaroute login` already stored. Anything that cannot be fetched is reported as unknown, and never as an error.
+`luna-doctor capacity` serves a disk cache of the account's plan, priority concurrency and overflow capacity by default. The report keeps the two pools apart. The priority pool is the account's main width. The overflow pool holds the requests that a background tier takes, so a demoted request waits there. Each pool has its own occupancy and its own 7-day and 30-day rollups. The report never adds one pool to the other. It serves a cached payload even when that payload is stale, and the network stays untouched. Two flags can fetch, and each one is a single authenticated GET: `capacity --online` refreshes the capacity cache (5 minutes), and `analyze --online` / `fix --online` refresh the 24-hour model catalog at `~/.luna-doctor/catalog.json`. Both use the routing key that `lunaroute login` already stored. Anything that cannot be fetched is reported as unknown, and never as an error.
 
 ## Limits worth knowing
 

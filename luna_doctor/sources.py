@@ -508,21 +508,54 @@ def _limits_with_note(allow_network: bool, *, key: str | None = None,
 # ---- capacity (the account host) --------------------------------------------
 # GET /v1/capacity on api.lunaroute.com: the account's effective capacity
 # (plan, priority and background concurrency, overflow routing), live
-# priority-pool occupancy, 7d/30d occupancy rollups and per-complete-UTC-day
-# admission outcomes. THE NULL CONTRACT IS LOAD-BEARING: a degraded block
-# arrives HTTP 200 with `null` - `config: null`, `now` fields null with
-# `ledger: "unknown"`, `history.tail: null`, `avg_queue_wait_ms: null` on
-# days nobody waited. `priority_lanes: null` means unknown, NOT zero;
-# `background_lanes: 0` is a real value (entitled to no overflow). Every
-# field below is preserved verbatim and None-preserving - nothing here
-# defaults a null to 0, and only a rolled-history failure is a hard 500.
+# priority-pool and overflow-pool occupancy, 7d/30d occupancy rollups for both
+# pools, and per-complete-UTC-day admission outcomes. THE NULL CONTRACT IS
+# LOAD-BEARING: a degraded block arrives HTTP 200 with `null` - `config: null`,
+# `now` fields null with `ledger: "unknown"`, `history.tail: null`,
+# `avg_queue_wait_ms: null` on days nobody waited. `priority_lanes: null` means
+# unknown, NOT zero; `background_lanes: 0` is a real value (entitled to no
+# overflow). A pool `limit: null` means the cap could not be read while a pool
+# `limit: 0` means a closed pool, which is never saturated and always 0
+# available. Every field below is preserved verbatim and None-preserving -
+# nothing here defaults a null to 0, and only a rolled-history failure is a
+# hard 500.
+
+
+@dataclass
+class CapacityPool:
+    """One pool's live occupancy, in the shape the API uses for both: `limit`,
+    `in_use`, `available`, `saturated`.
+
+    The two null shapes are different facts and are kept apart. `limit: null`
+    is a cap that could not be read (unknown). `limit: 0` is a closed pool: the
+    account is entitled to no overflow, so it is never saturated and always
+    reports 0 available, whatever the count says. For a pool with capacity, a
+    count that could not be read leaves `in_use`, `available` and `saturated`
+    null while `limit` still reports the cap. `raw` keeps the block verbatim."""
+
+    limit: object = None
+    in_use: object = None
+    available: object = None
+    saturated: object = None
+    raw: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return dict(self.raw)
+
+    @property
+    def closed(self) -> bool:
+        """True only for a measured zero cap. An unknown cap is not closed:
+        it is unknown, and a guard that read it as closed would tell a reader
+        their overflow is gone when the API merely failed to report it."""
+        return self.limit == 0 and not isinstance(self.limit, bool)
 
 
 @dataclass
 class CapacityNow:
-    """The live priority-pool occupancy. Covers the priority pool only:
-    overflow traffic does not appear in `in_use` (it does appear in the
-    admission counts). `raw` keeps the block exactly as the API sent it."""
+    """The live occupancy. The flat fields are the priority pool only:
+    overflow traffic does not appear in `in_use`; it appears in `background`,
+    and both pools appear in the admission counts. `raw` keeps the block
+    exactly as the API sent it."""
 
     limit: object = None
     in_use: object = None
@@ -530,6 +563,7 @@ class CapacityNow:
     saturated: object = None
     ledger: object = None
     sampled_at: object = None
+    background: object = None       # CapacityPool, a verbatim value, or None
     raw: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -558,7 +592,12 @@ class CapacityHistory:
     `days_covered` (days with data) are different facts and are never
     combined into a rate; when `tail` is null, `days_covered` already
     excludes it, so a smaller `days_covered` never means "fewer days had
-    traffic". `raw` keeps the block verbatim."""
+    traffic". Each window may also carry a `background` object with the same
+    measures for the overflow pool; a pool that was never used reports zeros
+    with a null `avg_lanes` and a null `queued_pct`, because those are
+    averages of nothing. Each window stays a plain dict, verbatim, so a
+    measure this model does not name is never lost. `raw` keeps the block
+    verbatim."""
 
     as_of: object = None
     last_7d: object = None
@@ -637,15 +676,19 @@ class Capacity:
         return out
 
 
-def _capacity_block(data: dict, name: str, cls):
+def _capacity_block(data: dict, name: str, cls, nested: dict | None = None):
     """One sub-block as a dataclass when the API sent an object, None when it
     sent null, or the verbatim value when it sent something out of contract.
-    Named fields default to None - a missing key is unknown, never zero."""
+    Named fields default to None - a missing key is unknown, never zero.
+    `nested` names the fields that hold a sub-object of their own (the overflow
+    pool inside `now`); each is parsed the same way, so its nulls survive too."""
     val = data.get(name)
     if not isinstance(val, dict):
         return val
     kwargs = {f: val.get(f) for f in getattr(cls, "__dataclass_fields__", {})
               if f != "raw"}
+    for fname, fcls in (nested or {}).items():
+        kwargs[fname] = _capacity_block(val, fname, fcls)
     return cls(raw=dict(val), **kwargs)
 
 
@@ -659,7 +702,8 @@ def _parse_capacity_payload(response) -> tuple:
     if not isinstance(data, dict):
         return None, "payload held no data block"
     return {
-        "now": _capacity_block(data, "now", CapacityNow),
+        "now": _capacity_block(data, "now", CapacityNow,
+                               nested={"background": CapacityPool}),
         "config": _capacity_block(data, "config", CapacityConfig),
         "history": _capacity_block(data, "history", CapacityHistory),
         "admission": _capacity_block(data, "admission", CapacityAdmission),
@@ -685,6 +729,36 @@ def _read_capacity_cache(path: str, now: float, ttl: float) -> tuple:
     age = max(0.0, now - float(fetched))
     return Capacity(fetched_at=float(fetched), served_from="cache",
                     stale=age > ttl, age_s=age, ttl_s=ttl, **fields), ""
+
+
+def capacity_overflow_now(cap) -> dict | None:
+    """The live overflow-pool block as the API sent it, or None when the
+    account did not report one.
+
+    None is unknown, not a closed pool: a payload captured before the account
+    reported the overflow pool carries no such block at all, and reading that
+    as "no overflow capacity" would be a fabricated fact. A pool the account
+    reports as `limit: 0` comes back as that block, with its zero."""
+    now = getattr(cap, "now", None) if cap is not None else None
+    bg = getattr(now, "background", None) if now is not None else None
+    if hasattr(bg, "to_dict"):
+        return bg.to_dict()
+    return bg if isinstance(bg, dict) else None
+
+
+def capacity_overflow_rollup(cap, window: str = "last_7d") -> dict | None:
+    """The overflow pool's own measures for one history window, or None.
+
+    The measures keep the API's names and nulls. A pool that was never used
+    reports zeros with a null average and a null queued share, so a consumer
+    renders those nulls as unknown instead of turning an average of nothing
+    into a number. An absent block is unknown, never "the pool was idle"."""
+    hist = getattr(cap, "history", None) if cap is not None else None
+    w = getattr(hist, window, None) if hist is not None else None
+    if not isinstance(w, dict):
+        return None
+    bg = w.get("background")
+    return bg if isinstance(bg, dict) else None
 
 
 def capacity_admission_days(cap) -> list:

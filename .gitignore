@@ -30,4 +30,6 @@ luna-doctor-share-*.png
 # Re-include it explicitly, and keep any other bin/ contents ignored.
 !bin/
 !bin/luna-doctor
-.kata.local.toml
+
+# per-checkout toolchain binding, never part of the package
+*.local.toml

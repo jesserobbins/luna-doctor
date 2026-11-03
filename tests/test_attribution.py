@@ -381,6 +381,60 @@ class NotConcurrencyVerdict(unittest.TestCase):
         self.assertEqual(VERDICT_UNKNOWN, att.verdict)
         self.assertIn("owner is not established", att.headline)
 
+class UnresolvedCopy(unittest.TestCase):
+    """The unresolved branches have to describe what was measured.
+
+    A fresh account sample is on screen in the rows of these reports, so a
+    headline telling the reader to go and fetch it is false about what the tool
+    already holds, and it hides the reading that matters: a refusal served while
+    the account reported room. The count noun is a separate defect of the same
+    branch - `_requests` already spells "requests", so passing it as the verb
+    phrase printed "2 requests requests".
+    """
+
+    def _no_doubled_noun(self, att):
+        for text in strings_of(att):
+            self.assertNotIn("requests requests", text, text)
+            self.assertNotIn("request request", text, text)
+
+    def test_a_fresh_sample_below_the_cap_states_what_it_said(self):
+        att = attribute(local_store(requests=20, peak=2,
+                                    by_outcome={"client_idle_timeout": 1,
+                                                "admission_timeout": 1}),
+                        account(12, now=quiet_now(in_use=8)), (12, "account"))
+        self.assertEqual(VERDICT_UNKNOWN, att.verdict)
+        self.assertIn("in use 8 of 12 priority concurrent requests", att.headline)
+        self.assertNotIn("gives nothing", att.headline,
+                         "the sample is in the report; it does not give nothing")
+        self._no_doubled_noun(att)
+
+    def test_the_unresolved_branch_counts_its_requests_once(self):
+        att = attribute(local_store(requests=20, peak=2,
+                                    by_outcome={"client_idle_timeout": 2}),
+                        account(12, now=quiet_now()), (12, "account"))
+        self.assertEqual(VERDICT_UNKNOWN, att.verdict)
+        self.assertIn("2 requests refused or stalled", att.headline)
+        self._no_doubled_noun(att)
+
+    def test_a_stall_beside_upstream_failures_counts_them_once(self):
+        att = attribute(local_store(requests=20, peak=2,
+                                    by_outcome={"client_idle_timeout": 1,
+                                                "upstream_unavailable": 2}),
+                        account(12, now=quiet_now()), (12, "account"))
+        self.assertEqual(VERDICT_UNKNOWN, att.verdict)
+        self.assertIn("1 request stalled", att.headline)
+        self.assertIn("2 requests also failed upstream", att.headline)
+        self._no_doubled_noun(att)
+
+    def test_no_usable_sample_keeps_the_fetch_instruction(self):
+        att = attribute(local_store(requests=20, peak=2,
+                                    by_outcome={"client_idle_timeout": 1}),
+                        None, (12, "account"))
+        self.assertEqual(VERDICT_UNKNOWN, att.verdict)
+        self.assertIn("the account half gives nothing", att.headline)
+        self._no_doubled_noun(att)
+
+
     def test_a_declared_width_and_no_account_half_claims_nothing_about_it(self):
         att = attribute(local_store(requests=5, peak=1), None, (4, "declared"))
         self.assertEqual(VERDICT_NOT_CONCURRENCY, att.verdict)
