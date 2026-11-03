@@ -66,6 +66,7 @@ luna-doctor explain --slowest --last 5  # the five longest by duration
 luna-doctor watch             # during an incident: one line per state change, summary on Ctrl-C
 luna-doctor analyze --for-issue  # one redacted, datable block for a support ticket
 luna-doctor capacity          # the account's plan and priority concurrency (cached)
+luna-doctor latency            # latency per model, harness or outcome: a table
 luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # …or one agent at a time (pi | claude-code | codex | swamp)
 luna-doctor chart --since 24h # SVG: one stacked-area graph of concurrent requests
@@ -185,6 +186,29 @@ The row is a count of runs and it never joins a request number: eight subagents
 each issue their own requests, and those requests appear in the traffic section
 because the logs recorded them. `metrics.subagents` in the `--json` envelope
 carries `runs`, `peakInFlight`, `peakAt`, `byAgent`, `byParent` and `failed`.
+
+### Latency, per category
+
+`analyze` carries three bounded lines: the p90 per tier, the slowest model cell
+above the sample floor, and how many cells the floor withheld. The table lives in
+its own command, because a matrix does not belong in a report:
+
+```bash
+luna-doctor latency                    # per model, last 24h
+luna-doctor latency --by harness       # or outcome
+luna-doctor latency --since 7d --tier background
+```
+
+```
+cell                                             n      p50      p90      max
+background / deepseek-4.1-flash-background    1028      7.6     23.0    264.3
+interactive / deepseek-4.1-flash               841      7.3     24.1    166.6
+```
+
+Every number is measured on this machine: the account reports no request
+latency, no first token and no percentile, so nothing here is quoted from it. A
+cell under the floor is counted and left out, never printed, and `--json`
+carries the same cells for a script.
 
 ### `fix`: what to change, with copy-paste you can audit
 

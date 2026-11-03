@@ -2821,6 +2821,11 @@ def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
             "withheld",
             f"{lat['suppressed']} cell(s) held fewer than {lat.get('floor')} sample(s) "
             f"and are not shown (this machine)"))
+    if cells:
+        latency_rows.append(report.Row(
+            "every cell",
+            f"luna-doctor latency --since {human_window(m['window_hours'])} lists each "
+            f"one (this machine)"))
 
     notes: list[report.Row] = []
     if "claude-code" in m["by_harness"]:
@@ -3203,6 +3208,78 @@ def skill_files(path: str) -> list[str]:
             if name.endswith(".md"):
                 out.append(os.path.relpath(os.path.join(base, name), path))
     return sorted(out)
+
+
+def cmd_latency(args) -> int:
+    """The latency table: one row per cell, by the category the caller picks.
+
+    This is the readable form of `metrics.latency_by`. Every number here is
+    measured on this machine, because the account API carries no request
+    latency at all. A cell under the sample floor is counted and left out of
+    the table: it is not a measurement, and printing it invites a decision the
+    data does not support.
+    """
+    try:
+        hours = window_hours(args.since, args.now)
+    except ValueError as e:
+        print(f"luna-doctor: {e}", file=sys.stderr)
+        return 2
+    harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
+    now = time.time()
+    raw_pi = getattr(args, "pi_root", None)
+    raw_claude = getattr(args, "claude_root", None)
+    try:
+        pi_roots = _check_roots(raw_pi, "--pi-root") if raw_pi else None
+        claude_roots = _check_roots(raw_claude, "--claude-root") if raw_claude else None
+    except ValueError as e:
+        print(f"luna-doctor: {e}", file=sys.stderr)
+        return 2
+    reqs = collect(hours, harnesses, pi_roots, claude_roots, now=now)
+    lat = latency_by(timed(reqs))
+    dimension = {"model": "by_tier_model", "harness": "by_tier_harness",
+                 "outcome": "by_tier_outcome"}[args.by]
+    cells = [c for c in (lat.get(dimension) or [])
+             if not args.tier or c["cell"].startswith(args.tier + " /")]
+    payload = {
+        "window_hours": hours,
+        "by": args.by,
+        "tier": args.tier,
+        "floor": lat.get("floor"),
+        "withheld": lat.get("suppressed"),
+        "cells": cells,
+        "measured_by": "this machine",
+    }
+    if args.json:
+        print(json.dumps(envelope("latency", payload, contract=CONTRACT), indent=2))
+        return 0 if cells else 2
+    if not cells:
+        print(f"No cell cleared the {lat.get('floor')} sample floor in the last "
+              f"{human_window(hours)}.", file=sys.stderr)
+        print("Widen the window with --since, or lower nothing: a cell below the "
+              "floor is not a measurement.", file=sys.stderr)
+        return 2
+    width = max(len(c["cell"]) for c in cells)
+    lines = [f"{'cell':<{width}}  {'n':>6}  {'p50':>7}  {'p90':>7}  {'max':>7}"]
+    for c in cells:
+        lines.append(f"{c['cell']:<{width}}  {c['n']:>6}  {c['p50']:>7}  "
+                     f"{c['p90']:>7}  {c['max']:>7}")
+    head = f"latency by {args.by}, last {human_window(hours)}"
+    rows = [report.Row("measured by", "this machine (these logs; the account "
+                                      "reports no request latency)")]
+    if args.tier:
+        rows.append(report.Row("tier", args.tier))
+    rows.append(report.Row("table", chr(10).join(lines)))
+    withheld = lat.get("suppressed") or 0
+    rows.append(report.Row("floor", f"{lat.get('floor')} sample(s) per cell; "
+                                    f"{withheld} cell(s) withheld across all "
+                                    f"dimensions"))
+    rep = report.Report(headline=head, sections=[report.Section("latency", rows)],
+                        adjustments=["A cell below the floor is not a measurement. "
+                                     "Widen the window before reading a number as a rate."],
+                        footnote=f"luna-doctor v{VERSION}")
+    print_report(rep, args)
+    return 0
+
 
 
 def cmd_skill(args) -> int:
@@ -3823,6 +3900,21 @@ def main(argv: list[str] | None = None) -> int:
     # welcome path prints the account line, a short explanation, the
     # one-hour analysis and the chart beside it.
     sub = ap.add_subparsers(dest="cmd", required=False)
+
+    lt = sub.add_parser("latency", help="latency per category: a table, from these logs")
+    lt.add_argument("--since", default=None, help="window, e.g. 24h, 90m, 7d (default 24h)")
+    lt.add_argument("--now", action="store_true", help="last 15 minutes")
+    lt.add_argument("--by", choices=("model", "harness", "outcome"), default="model",
+                    help="the category to split by (default model)")
+    lt.add_argument("--tier", choices=("interactive", "background"), default=None,
+                    help="only cells on this scheduling tier")
+    lt.add_argument("--harness", default="pi,claude-code")
+    lt.add_argument("--pi-root", action="append", default=None, metavar="DIR")
+    lt.add_argument("--claude-root", action="append", default=None, metavar="DIR")
+    lt.add_argument("--json", action="store_true")
+    _add_copy(lt)
+    _add_style(lt)
+    lt.set_defaults(func=cmd_latency)
 
     sk = sub.add_parser("skill", help="where the agent skill is, and where to copy it")
     sk.add_argument("--json", action="store_true")

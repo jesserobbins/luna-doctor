@@ -42,6 +42,7 @@ which that starts belongs to the account. It is not in these logs.
 | command | flags an agent types, and what it can touch |
 |---|---|
 | `luna-doctor` | bare run: account line, `analyze --since 1h`, the chart into cwd. offline, but it writes a run extraction under `~/.luna-doctor/store`. Say so, and use `analyze --no-store` when nothing can persist |
+| `luna-doctor latency` | `--since --now --by model\|harness\|outcome --tier --harness --pi-root --claude-root --json --copy --style`. read-only, offline: the readable table of latency per category, from these logs only |
 | `luna-doctor skill` | `--json`. read-only: prints where the skill lives and the copy line per harness. It never copies |
 | `luna-doctor discover` | `--json --copy --style --swamp-root`. read-only, offline |
 | `luna-doctor explain [ID]` | `--since --now --last N --slowest --blocked --harness --plan --json --copy --style`. read-only, offline |

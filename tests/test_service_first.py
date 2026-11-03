@@ -269,8 +269,10 @@ class LatencyPerCategory(unittest.TestCase):
         report = cli.build_report(m, "headline", [])
         section = [s for s in report.sections if s.title == "latency"]
         self.assertTrue(section, "the latency section belongs in the report")
-        self.assertLessEqual(len(section[0].rows), 3,
+        self.assertLessEqual(len(section[0].rows), 4,
                              "the report carries a bounded summary, not a matrix")
+        self.assertTrue(any("luna-doctor latency" in r.value for r in section[0].rows),
+                        "the summary points at the table it cannot fit")
         self.assertTrue(all("(this machine)" in r.value for r in section[0].rows))
 
     def test_a_zero_request_window_has_no_latency_section(self):
@@ -330,3 +332,41 @@ class TheChartHasTwoPanels(unittest.TestCase):
                                       account=sources.Capacity())
         text = " ".join(getattr(shape, "s", "") for shape in scene.shapes)
         self.assertIn("no admission days", text)
+
+
+class TheLatencyTable(unittest.TestCase):
+    """`luna-doctor latency` is the readable form of metrics.latency_by."""
+
+    def _run(self, *args, store=None):
+        import subprocess
+        import tempfile
+        env = dict(os.environ)
+        env["HOME"] = store or tempfile.mkdtemp()
+        env["LUNA_DOCTOR_STORE"] = os.path.join(env["HOME"], "store")
+        env["LUNA_DOCTOR_CAPACITY"] = os.path.join(env["HOME"], "none.json")
+        env["NO_COLOR"] = "1"
+        return subprocess.run([sys.executable, os.path.join(ROOT, "bin", "luna-doctor"),
+                               "latency", *args],
+                              capture_output=True, text=True, timeout=180,
+                              cwd=ROOT, env=env)
+
+    def test_no_store_is_no_data_and_names_the_floor(self):
+        proc = self._run("--since", "24h", "--pi-root", "/nonexistent-store",
+                         "--claude-root", "/nonexistent-store")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("sample floor", proc.stderr)
+
+    def test_the_json_is_the_matrix(self):
+        import json as _json
+        proc = self._run("--since", "24h", "--json", "--pi-root", "/nonexistent-store",
+                         "--claude-root", "/nonexistent-store")
+        doc = _json.loads(proc.stdout)
+        self.assertEqual(doc["command"], "latency")
+        self.assertEqual(doc["by"], "model")
+        self.assertEqual(doc["measured_by"], "this machine")
+        self.assertIn("floor", doc)
+        self.assertIn("cells", doc)
+
+    def test_an_unknown_dimension_is_a_usage_error(self):
+        proc = self._run("--since", "24h", "--by", "nonsense")
+        self.assertEqual(proc.returncode, 2)
