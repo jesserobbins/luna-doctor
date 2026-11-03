@@ -409,7 +409,7 @@ class DefaultRun(unittest.TestCase):
         # whitespace-normalised text - the sentence, not the line breaks.
         flat = " ".join(out.split())
         self.assertIn("gateway in front of your models", flat)
-        self.assertIn("nothing was sent anywhere", flat)
+        self.assertIn("asked the account for its capacity", flat)
         for word in ("analyze", "chart", "fix", "capacity"):
             self.assertIn(word, out)
         self.assertNotIn("load-test", out,

@@ -12,7 +12,9 @@ When the account is full, the gateway waits. It can also demote the request to a
 
 ## Install
 
-Requirements: Python 3.9+. Everything below, `discover`, `analyze`, `fix`, `chart` and the bare default run, is offline and needs no credentials. `capacity` reads a disk cache the same way. The only fetches in the tool are opt-in. They use the routing key that `lunaroute login` already stored: `capacity --online`, and `analyze --online` / `fix --online` for the model catalog.
+Requirements: Python 3.9+, and a routing key that `lunaroute login` already stored.
+
+The account comes first: `analyze`, `fix`, `chart` and the bare run ask LunaRoute for the account's capacity, because its numbers are what the report explains. The disk cache serves first and the network is touched only past its 5-minute TTL, so a warm run answers at once and a cold one waits once. That is one authenticated GET to `api.lunaroute.com`. `--offline` on any of those commands serves the cache and touches nothing. `discover` and `explain` never fetch, and `capacity` fetches only with `--online`. Nothing else in the tool leaves the machine.
 
 ```bash
 pipx install luna-doctor   # installs the `luna-doctor` command
@@ -326,7 +328,7 @@ exist, or pushes the router past its line and word budget.
 
 ## What it reads
 
-Read-only, and offline by default for `discover` / `analyze` / `fix` / `chart`:
+Read-only, and cached-first for `analyze` / `fix` / `chart`, which make one authenticated GET past the cache TTL unless `--offline` forbids it. `discover` and `explain` never fetch:
 
 | harness | store |
 |---|---|
