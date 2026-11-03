@@ -22,6 +22,12 @@ luna-doctor --version      # prints the installed version
 Every release is an alpha. pipx installs it, because the index holds no final
 release.
 
+The wheel carries the agent skill, so the install is not a bare command:
+
+```bash
+luna-doctor skill          # prints the packaged path and the copy line per harness
+```
+
 To run from a checkout instead:
 
 ```bash
@@ -152,6 +158,31 @@ a number attached.
 
 The section never claims a cause. It places two windows of the same logs side
 by side. The report does not say that your change made the difference.
+
+### Subagents: how many ran at once
+
+pi writes each async subagent's transcript beside the session that launched it,
+at `<store>/<session>/subagent-artifacts/<runId>_<agent>_transcript.jsonl`. No
+record in those files carries `type`, so the request parser reads none of them.
+They are not gateway traffic, and they answer a different question: how many
+subagents this machine ran at the same time.
+
+The report gains one row, and only when subagent runs fall inside the window:
+
+```
+subagents: 113 run(s) · peak 12 in flight · at 2026-11-01T21:53:53Z · widest launch 8 from <session> · 4 exited non-zero
+```
+
+`peak` is the largest number of runs open at the same instant, from a sweep over
+each run's first and last record. `widest launch` is the same peak inside one
+parent session, which is the number behind "is it safe to run eight subagents at
+once". A run is counted once even when it starts before the window and ends
+inside it.
+
+The row is a count of runs and it never joins a request number: eight subagents
+each issue their own requests, and those requests appear in the traffic section
+because the logs recorded them. `metrics.subagents` in the `--json` envelope
+carries `runs`, `peakInFlight`, `peakAt`, `byAgent`, `byParent` and `failed`.
 
 ### `fix`: what to change, with copy-paste you can audit
 
@@ -341,15 +372,14 @@ that concurrency as measured.
 | `luna_doctor/png.py` | the raster renderer over the same scene |
 | `luna_doctor/font.py` | the hand-drawn 5x7 bitmap font and its ASCII folding |
 | `bin/luna-doctor` | launcher for the no-packaging path. It resolves its own symlink and imports the package |
-| `skills/luna-doctor/` | the agent skill: a router, five playbooks, four catalogues |
+| `skills/luna-doctor/` | the agent skill: a router, five playbooks, four catalogues. It lives at `luna_doctor/skills/luna-doctor/` so a wheel carries it, and `skills/luna-doctor` is a symlink to it |
 | `assets/` | the two chart images above, each one written by `luna-doctor chart`, and the social preview, written by `python3 scripts/titlecard.py --moon <screenshot>` |
 
-The package ships `luna_doctor/`, which is the CLI and its sibling modules.
+The package ships `luna_doctor/`, which is the CLI, its sibling modules and the
+agent skill.
 `cli` loads `_fix_block` and `_chart_block` off disk from its own directory, so
-a partial install is the one thing that breaks `fix` and `chart`. The skill, the
-launcher in `bin/` and the chart images stay in the repository. The skill is not
-inside the wheel yet, so an agent that installs the tool from PyPI still reads
-`skills/luna-doctor/SKILL.md` from this repository.
+a partial install is the one thing that breaks `fix` and `chart`. The
+launcher in `bin/` and the chart images stay in the repository.
 
 ## How this project is built
 
@@ -369,7 +399,7 @@ Semantic versioning with prerelease identifiers (`0.1.1-alpha.1`, `0.1.1-beta.1`
 | version number | `VERSION`, mirrored in `luna_doctor/cli.py` |
 | history | `CHANGELOG.md` (Keep a Changelog) |
 | releases | annotated git tags, `vX.Y.Z` and `vX.Y.Z-prerelease` (e.g. `v0.1.1-alpha.1`), published to PyPI by `scripts/publish.sh` |
-| JSON document shape | `"schema": 4` in every `--json` envelope: bumped independently when the shape changes |
+| JSON document shape | `"schema": 5` in every `--json` envelope: bumped independently when the shape changes |
 | measured gateway facts | `"contract": {...}` in every `--json` envelope |
 
 Prereleases publish to PyPI. The index keeps every uploaded file forever, and a bad one is

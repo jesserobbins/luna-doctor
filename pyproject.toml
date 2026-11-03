@@ -41,6 +41,13 @@ luna-doctor = "luna_doctor.cli:main"
 # as a lone script left `fix` and `chart` reporting "support missing".
 packages = ["luna_doctor"]
 
+[tool.setuptools.package-data]
+# The agent skill is a directory of markdown inside the package, so a wheel
+# carries it and `luna-doctor skill` can name it wherever the package is
+# installed. The repository keeps a `skills/luna-doctor` symlink to this path,
+# because that is where the skills tooling looks for one.
+luna_doctor = ["skills/luna-doctor/**/*.md", "skills/luna-doctor/*.md"]
+
 # VERSION holds a semver string (e.g. 0.1.1-alpha.1); normalize to PEP 440 for
 # packaging so `pip install .` does not choke on the hyphenated prerelease.
 # Keep the mapping trivial (alpha.1 -> a1) — `luna-doctor --version` always

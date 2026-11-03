@@ -1,0 +1,5 @@
+# An sdist has to carry the agent skill as well as the wheel: it lives inside
+# the package (see [tool.setuptools.package-data]), and the repository's
+# `skills/luna-doctor` is a symlink to it.
+graft luna_doctor/skills
+include VERSION

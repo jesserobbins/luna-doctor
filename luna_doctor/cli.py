@@ -460,6 +460,157 @@ def iter_pi(roots: list[str], since: float, until: float | None = None,
     })
 
 
+# ---- subagent fan-out -----------------------------------------------------
+# pi writes an async subagent's transcript beside the session that spawned it:
+# <store>/<session>/subagent-artifacts/<runId>_<agent>_transcript.jsonl. Every
+# record carries `recordType: message` and `source: async`, and none carries
+# `type`, so iter_pi skips them - they describe the fan-out, not a request to
+# the gateway. The span of a run is its first and last record, the run is one
+# file, and the parent session in the sibling `_meta.json` groups the children
+# of one launch: that grouping is what answers "how many did I run at once".
+
+SUBAGENT_TRANSCRIPT = "*_transcript.jsonl"
+SUBAGENT_META = "*_meta.json"
+
+
+def _subagent_meta(transcript_path: str) -> dict:
+    """The `_meta.json` beside a transcript, or {} when it is absent.
+
+    Newer stores always write it. It names the parent session and the exit
+    code; neither is in the transcript, and neither is guessed here.
+    """
+    stem = transcript_path[: -len("_transcript.jsonl")]
+    try:
+        with open(stem + "_meta.json", "r", errors="replace") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def iter_subagent_runs(roots: list[str], since: float,
+                       until: float | None = None) -> list[dict]:
+    """Every async subagent run that overlaps the window, one dict per run.
+
+    `start`/`end` are the first and last record of the transcript, `agent` is
+    the subagent kind, `parent` the session that launched it, and `error` the
+    exit code when the meta file has one. A store that archives these keeps the
+    source mtime, so are no file-time prunes here: the records are read.
+    """
+    top = until if until is not None else time.time()
+    runs: list[dict] = []
+    seen: set[str] = set()
+    for root in sorted(os.path.expanduser(r) for r in roots):
+        pattern = os.path.join(glob.escape(root), "**", "subagent-artifacts",
+                               SUBAGENT_TRANSCRIPT)
+        for path in sorted(glob.glob(pattern, recursive=True)):
+            first = last = None
+            agent = None
+            run_id = None
+            records = 0
+            try:
+                with open(path, "r", errors="replace") as fh:
+                    for line in fh:
+                        try:
+                            rec = json.loads(line)
+                        except ValueError:
+                            continue
+                        if rec.get("recordType") != "message" or rec.get("source") != "async":
+                            continue
+                        ts = rec.get("ts")
+                        if not isinstance(ts, (int, float)):
+                            continue
+                        ts = ts / 1000.0
+                        records += 1
+                        first = ts if first is None else min(first, ts)
+                        last = ts if last is None else max(last, ts)
+                        agent = agent or rec.get("agent")
+                        run_id = run_id or rec.get("runId")
+            except OSError:
+                continue
+            if first is None or last is None:
+                continue
+            if first > top or last < since:
+                continue
+            name = os.path.basename(path)
+            stem = name[: -len("_transcript.jsonl")]
+            agent = agent or (stem.split("_")[1] if stem.count("_") >= 1 else "unknown")
+            run_id = run_id or str(stem.split("_")[0])
+            if run_id in seen:
+                continue
+            seen.add(run_id)
+            meta = _subagent_meta(path)
+            runs.append({
+                "runId": run_id,
+                "agent": agent,
+                "start": first,
+                "end": last,
+                "records": records,
+                "parent": meta.get("parentSessionId"),
+                "exitCode": meta.get("exitCode"),
+                "model": meta.get("model"),
+            })
+    return runs
+
+
+def subagent_fanout(runs: list[dict], since: float,
+                    until: float | None = None) -> dict:
+    """The peak number of subagent runs open at the same time.
+
+    A sweep over the run spans: a run counts as open from its first record to
+    its last, and the peak is the largest number open at one instant. That is
+    a measurement of this machine's fan-out, and it is a count of runs, not of
+    requests: each run issues its own requests, and the requests this tool
+    counts elsewhere come from the logs. The two are never added.
+
+    `byParent` carries the widest fan-out per launching session, because one
+    launch of eight is the question a reader usually has.
+    """
+    top = until if until is not None else time.time()
+    in_window = [r for r in runs if r["start"] <= top]
+    if not in_window:
+        return {"runs": 0, "peakInFlight": 0, "peakAt": None, "byAgent": {},
+                "byParent": {}, "failed": 0}
+
+    def peak_of(subset: list[dict]) -> tuple[int, float | None]:
+        events = []
+        for run in subset:
+            events.append((run["start"], 1))
+            events.append((run["end"], -1))
+        events.sort(key=lambda pair: (pair[0], -pair[1]))
+        peak = live = 0
+        when = None
+        for ts, delta in events:
+            live += delta
+            if live > peak:
+                peak, when = live, ts
+        return peak, when
+
+    peak, peak_at = peak_of(in_window)
+    by_parent: dict[str, int] = {}
+    grouped: dict[str, list[dict]] = {}
+    for run in in_window:
+        parent = run.get("parent") or "(unknown parent)"
+        grouped.setdefault(parent, []).append(run)
+    for parent, subset in grouped.items():
+        by_parent[parent] = peak_of(subset)[0]
+    by_agent: dict[str, int] = {}
+    for run in in_window:
+        by_agent[run["agent"]] = by_agent.get(run["agent"], 0) + 1
+    failed = sum(1 for r in in_window
+                 if isinstance(r.get("exitCode"), int) and r["exitCode"] != 0)
+    return {
+        "runs": len(in_window),
+        "peakInFlight": peak,
+        "peakAt": (datetime.fromtimestamp(peak_at, timezone.utc)
+                   .strftime("%Y-%m-%dT%H:%M:%SZ") if peak_at is not None else None),
+        "byAgent": dict(sorted(by_agent.items())),
+        "byParent": dict(sorted(by_parent.items(), key=lambda kv: -kv[1])),
+        "failed": failed,
+    }
+
+
+
 def iter_claude(roots: list[str], since: float, until: float | None = None,
                 prune_mtime: bool = True, catalog=None) -> Requests:
     """claude-code: one response spans several assistant records sharing
@@ -2406,6 +2557,21 @@ def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
     notes.append(report.Row(
         "note", "tiers here are inferred from model names; the served tier is not in these logs; "
                 "only a load test can see it."))
+    sub = m.get("subagents")
+    if sub and sub.get("runs"):
+        # The fan-out is a count of runs, measured from the async transcripts,
+        # and it stays out of every request number: each run issues its own
+        # requests, and those are already counted in the traffic section.
+        bits = [f"{sub['runs']} run(s)",
+                f"peak {sub['peakInFlight']} in flight"]
+        if sub.get("peakAt"):
+            bits.append(f"at {sub['peakAt']}")
+        widest = next(iter((sub.get("byParent") or {}).items()), None)
+        if widest and widest[1] > 1:
+            bits.append(f"widest launch {widest[1]} from {widest[0]}")
+        if sub.get("failed"):
+            bits.append(f"{sub['failed']} exited non-zero")
+        notes.append(report.Row("subagents", " \u00b7 ".join(bits)))
     sw = m.get("swamp")
     if sw and sw.get("present"):
         # Only an in-use swamp reaches here (installed is not in use), and its
@@ -2730,6 +2896,70 @@ def collect(since_hours: float, harnesses: list[str],
         reqs += cc
         reqs.excluded.update(cc.excluded)
     return reqs
+
+
+def skill_dir() -> tuple[str | None, str]:
+    """Where the agent skill is, and which copy it is.
+
+    The packaged copy ships inside the wheel, so a `pipx install` carries the
+    skill with the command. A checkout has it under the package too, and the
+    repository's `skills/luna-doctor` is a symlink to that path.
+    """
+    packaged = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "skills", "luna-doctor")
+    if os.path.isdir(packaged) and os.path.isfile(os.path.join(packaged, "SKILL.md")):
+        return packaged, "package"
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    checkout = os.path.join(root, "skills", "luna-doctor")
+    if os.path.isdir(checkout) and os.path.isfile(os.path.join(checkout, "SKILL.md")):
+        return checkout, "checkout"
+    return None, "absent"
+
+
+def skill_files(path: str) -> list[str]:
+    """Every markdown file in the skill, as paths relative to its root."""
+    out = []
+    for base, _dirs, names in os.walk(path):
+        for name in names:
+            if name.endswith(".md"):
+                out.append(os.path.relpath(os.path.join(base, name), path))
+    return sorted(out)
+
+
+def cmd_skill(args) -> int:
+    """Print where the agent skill lives, and where a harness reads one.
+
+    It prints. It never copies: an agent that installs this did not ask for a
+    file to appear in its configuration directory, and `fix` set the precedent
+    that a diagnostic hands over a command instead of running it.
+    """
+    path, source = skill_dir()
+    if path is None:
+        print("luna-doctor: the agent skill is not in this install", file=sys.stderr)
+        return 2
+    files = skill_files(path)
+    if getattr(args, "json", False):
+        print(json.dumps(envelope("skill", {"path": path, "source": source,
+                                            "files": files,
+                                            "harnesses": SKILL_HARNESS_DIRS}),
+                         indent=2))
+        return 0
+    print(f"skill: {path}")
+    print(f"source: {source} ({len(files)} markdown files)")
+    print("")
+    print("Copy this directory into the skills directory your harness reads:")
+    for harness, target in SKILL_HARNESS_DIRS.items():
+        print(f"  {harness:<12} cp -R {path} {target}/")
+    print("")
+    print("The skill is a router and its playbooks. An agent that loads it reads")
+    print("SKILL.md first, then only the file a symptom names.")
+    return 0
+
+
+SKILL_HARNESS_DIRS = {
+    "pi": "~/.pi/agent/skills",
+    "claude-code": "~/.claude/skills",
+}
 
 
 def cmd_discover(args) -> int:
@@ -3305,6 +3535,10 @@ def main(argv: list[str] | None = None) -> int:
     # welcome path prints the account line, a short explanation, the
     # one-hour analysis and the chart beside it.
     sub = ap.add_subparsers(dest="cmd", required=False)
+
+    sk = sub.add_parser("skill", help="where the agent skill is, and where to copy it")
+    sk.add_argument("--json", action="store_true")
+    sk.set_defaults(func=cmd_skill)
 
     d = sub.add_parser("discover", help="what log stores exist on this machine")
     d.add_argument("--json", action="store_true")
@@ -3903,6 +4137,15 @@ def cmd_analyze(args) -> int:
     # swamp enrichment (additive, never fails; opt-in through --swamp-root, and
     # installed is not in use, so only a swamp with runs in the window lands)
     _swamp_enrich(m, getattr(args, "swamp_root", None), now - hours * 3600, now)
+    # Subagent fan-out: a measurement of this machine, from the async
+    # transcripts pi keeps beside the session that launched them. Additive and
+    # never fatal - a store without them leaves the stanza out.
+    try:
+        sub_runs = iter_subagent_runs(pi_roots or [PI_STORE], now - hours * 3600, now)
+        if sub_runs:
+            m["subagents"] = subagent_fanout(sub_runs, now - hours * 3600, now)
+    except Exception:
+        pass
     # Combined snapshot (additive: metrics.snapshot joins the measured
     # requests, the declared configs and the catalog; analyse()'s own
     # numbers above are unchanged). Offline by default: a cached catalog
