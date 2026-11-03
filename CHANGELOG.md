@@ -17,6 +17,45 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.5.0-alpha.1] - 2026-11-03
+
+### Changed
+
+- The report leads with the account. `SERVICE` comes first: plan and width,
+  the overflow pool with its routing, both live pools with the sample time they
+  were read at, and the admission record with the count of requests denied
+  after waiting. Every number in it carries `(account)`, and a stale payload
+  says in its own row that it describes another moment.
+- `analyze`, `fix`, `chart` and the bare run ask the account for its capacity
+  by default. The cache serves first and the network is touched only past its
+  5-minute TTL, so a warm run answers at once. `--offline` is the escape on all four
+  commands. The bare run gains the flag too, which it never had.
+- Five published claims corrected against the gateway's own documentation: a
+  429 is not always the account's concurrency, other quota dimensions exist,
+  the overflow pool is where overflow traffic runs rather than where a demoted
+  request waits, the 5-minute figure is the server's history cache, and the
+  keep-alive cadence with two response headers are measured here and
+  undocumented by LunaRoute. The 60 s documented park against this machine's
+  measured 120.2 s remains unresolved, and says so.
+
+### Added
+
+- The insufficient-evidence outcome. When the account reports pressure and
+  this machine cannot explain it, the report answers in three parts: the
+  account's claim with its time, which local evidence is absent and why, and
+  the two moves that produce an explanation. `fix` states that it has no
+  concurrency change and why, then prints the config audit. That audit is a
+  question about declared settings, never a guess from account numbers.
+- `metrics.latency_by`: latency per (tier, model), (tier, harness) and (tier,
+  outcome) from local logs only, with a sample floor. Cells below the floor are
+  counted, not printed. The report carries three bounded lines.
+- The chart draws two panels on one time axis: the account's admission record
+  as a step line of denied-after-waiting per complete UTC day, above this
+  machine's concurrency stack.
+- The server's own `generated_at` rides beside the client's fetch time, and the
+  capacity timeout is 90 s: four live samples ran 3.3 s, 9.7 s, 37.8 s and
+  39.3 s, so the old 30 s failed on half the honest responses.
+
 ## [0.4.0-alpha.1] - 2026-11-03
 
 ### Added
