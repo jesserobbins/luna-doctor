@@ -37,8 +37,9 @@ concurrency settings.
    luna-doctor capacity --online
 
    That is one authenticated GET and it needs the key that lunaroute login
-   already stored. If it fails, ask me for my plan name and pass
-   --plan <name> on the next commands. Never state a width you did not read.
+   already stored. If it fails, ask me for my plan name or my priority
+   concurrency number, and pass it as --plan <name or number> on each command
+   in steps 4 to 6. Never state a width you did not read.
 
 4. Show me what my traffic did in the last day, and what to change:
 
