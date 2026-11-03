@@ -125,8 +125,7 @@ def _snapshot(files, requests=(), stale=False, with_catalog=True):
     fetched = time.time() - (sources.CATALOG_TTL_S + 10) if stale else time.time() - 60
     if with_catalog:
         sources._write_catalog_cache(cache, catalog_payload(), fetched)
-    env = {"HOME": home, "LUNAROUTE_API_KEY": "",
-           "SWAMP_ROOT": os.path.join(tmp, "no-such-swamp")}
+    env = {"HOME": home, "LUNAROUTE_API_KEY": ""}
     with mock.patch.dict(os.environ, env):
         with mock.patch.object(sources, "_urlopen", side_effect=_boom):
             configs = sources.read_configs(swamp_repo_dir=os.path.join(tmp, "no-such"))
@@ -700,7 +699,6 @@ def _fake_machine(files):
     cache = os.path.join(tmp, "catalog.json")
     sources._write_catalog_cache(cache, catalog_payload(), time.time())
     env = {"HOME": home, "LUNAROUTE_API_KEY": "",
-           "SWAMP_ROOT": os.path.join(tmp, "no-such-swamp"),
            "LUNAROUTE_KEY": "",
            "LUNA_DOCTOR_CATALOG": cache}
     return env
@@ -714,7 +712,7 @@ class FixAndAnalyzeWiring(unittest.TestCase):
         code, out, err = _run_cli(env, "analyze", "--since", "1h", "--json")
         self.assertIn(code, (0, 1, 2), err)
         doc = json.loads(out)
-        self.assertEqual(doc["schema"], 4, "the sizing block is additive")
+        self.assertEqual(doc["schema"], cli.SCHEMA_VERSION, "the sizing block is additive")
         block = doc["metrics"]["sizing"]
         rules = {r["rule"] for r in block["rows"]}
         self.assertIn(sizing.RULE_UNSET_UNDERUSES, rules)
@@ -761,7 +759,6 @@ class FixAndAnalyzeWiring(unittest.TestCase):
             fh.write(pi_settings(default="deepseek-4.1-flash"))
         env = {"HOME": home, "LUNAROUTE_API_KEY": "",
                "LUNAROUTE_KEY": "",
-               "SWAMP_ROOT": os.path.join(tmp, "no-such-swamp"),
                "LUNA_DOCTOR_CATALOG": os.path.join(tmp, "absent-catalog.json")}
         code, out, err = _run_cli(env, "fix", "--since", "24h", "--agent", "pi",
                                   "--json")
@@ -814,8 +811,7 @@ class NewConfigKeys(unittest.TestCase):
             os.makedirs(os.path.join(home, ".claude"), exist_ok=True)
             with open(os.path.join(home, ".claude/settings.json"), "w") as fh:
                 fh.write(claude_settings(env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8000"}))
-            env = {"HOME": home, "LUNAROUTE_API_KEY": "",
-                   "SWAMP_ROOT": os.path.join(tmp, "no-such")}
+            env = {"HOME": home, "LUNAROUTE_API_KEY": ""}
             with mock.patch.dict(os.environ, env):
                 cfg = sources.read_configs(swamp_repo_dir=os.path.join(tmp, "no-such"))
             fact = cfg.claude_code["env.CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
@@ -831,8 +827,7 @@ class NewConfigKeys(unittest.TestCase):
             os.makedirs(os.path.join(home, ".codex"), exist_ok=True)
             with open(os.path.join(home, ".codex/config.toml"), "w") as fh:
                 fh.write(codex_config(window=262144))
-            env = {"HOME": home, "LUNAROUTE_API_KEY": "",
-                   "SWAMP_ROOT": os.path.join(tmp, "no-such")}
+            env = {"HOME": home, "LUNAROUTE_API_KEY": ""}
             with mock.patch.dict(os.environ, env):
                 cfg = sources.read_configs(swamp_repo_dir=os.path.join(tmp, "no-such"))
             fact = cfg.codex["model_context_window"]

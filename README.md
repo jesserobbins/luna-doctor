@@ -302,15 +302,22 @@ Read-only, and offline by default for `discover` / `analyze` / `fix` / `chart`:
 | pi | `~/.pi/agent/sessions/**/*.jsonl` |
 | claude-code | `~/.claude/projects/**/*.jsonl` |
 | codex | `~/.codex/sessions/**/*.jsonl`: parsed into requests and counted as measured per model in the combined snapshot (compressed `*.jsonl.zst` rollouts are skipped because the Python 3.9 stdlib has no zstd), but not classified into the outcome classes above |
-| swamp | `~/.swamp` / sibling `swamp-tracker` repo: reported only while its activity falls inside the window |
+| swamp | only a repository you name: `--swamp-root DIR` reads that repo's `.swamp/run_tracker.db`, and swamp is reported while a run overlapped the window |
 | agentsview | the local `agentsview` command, when it is installed: `discover` reports how many projects and sessions it holds, through one `agentsview projects --json` query. It is a second view of session history, never a log store, and the reports still read the harness logs. No daemon, no serve, no sync |
 
-Swamp is counted only when it is in use: files under `.swamp/data` or
-`.swamp/workflow-runs` modified inside the window. A populated but idle swamp
-store is installed, not running, and `analyze` says nothing about it. Installed
-is not traffic. When swamp does appear, the report describes its concurrency as
-configured (its extract and verify configuration, and where they came from). It
-never describes that concurrency as measured.
+Swamp is opt-in. Swamp keeps run history per repository, in
+`<repo>/.swamp/run_tracker.db`, and nothing on the machine lists the repositories
+a person uses swamp in: `~/.swamp` holds the toolchain, and
+`~/.config/swamp/workspaces.json` is a list you fill in. So the tool never looks
+for a swamp repo. Name one with `--swamp-root DIR` and that repository's own
+tracker decides: a run that started before the window closed and finished after
+it opened was in flight during the window. A store full of old runs is
+installed, not running, and the report says nothing about it. Installed is not
+traffic. The database is opened read-only, and swamp is never spawned.
+
+When swamp does appear, the report describes its concurrency as configured (its
+extract and verify configuration, and where they came from). It never describes
+that concurrency as measured.
 
 `luna-doctor capacity` serves a disk cache of the account's plan, priority concurrency and overflow capacity by default. The report keeps the two pools apart. The priority pool is the account's main width. The overflow pool holds the requests that a background tier takes, so a demoted request waits there. Each pool has its own occupancy and its own 7-day and 30-day rollups. The report never adds one pool to the other. It serves a cached payload even when that payload is stale, and the network stays untouched. Two flags can fetch, and each one is a single authenticated GET: `capacity --online` refreshes the capacity cache (5 minutes), and `analyze --online` / `fix --online` refresh the 24-hour model catalog at `~/.luna-doctor/catalog.json`. Both use the routing key that `lunaroute login` already stored. Anything that cannot be fetched is reported as unknown, and never as an error.
 

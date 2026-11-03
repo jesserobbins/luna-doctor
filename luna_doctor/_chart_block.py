@@ -866,6 +866,10 @@ def cmd_chart(args) -> int:
     claude_roots = _check_roots(raw_claude, "--claude-root") if raw_claude else None
     reqs = collect(hours, harnesses, pi_roots, claude_roots)
     m = analyse(reqs, hours)
+    # Swamp is opt-in (`--swamp-root`): the footer row states its configured
+    # concurrency only for a repo the caller named.
+    _swamp_enrich(m, getattr(args, "swamp_root", None), time.time() - hours * 3600,
+                  time.time())
     # one scene, two pictures: the PNG is the same scene the SVG serialises,
     # rasterised by the package's own renderer, so the two cannot disagree
     # and no new dependency enters. --no-image suppresses the PNG; the

@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import ssl
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -62,7 +63,7 @@ from luna_doctor.sources import (CLAUDE_STORE, CODEX_STORE, GATEWAY_HOST,
                                  SWAMP_LLM_CONCURRENCY_DEFAULT)
 
 VERSION = "0.3.0-alpha.5"  # keep in sync with ./VERSION and the git tag (scripts/release.sh)
-SCHEMA_VERSION = 4         # 4: capacity fields renamed to the LunaRoute
+SCHEMA_VERSION = 5         # 5: metrics.swamp carries the run tracker
                            #     vocabulary (contract.advised_concurrency,
                            #     findings.priority_concurrency: null until
                            #     the plan pass) and the additive combined
@@ -638,119 +639,152 @@ def _merge_copies(a: dict, b: dict) -> dict:
     }
 
 
-# ---- swamp discovery ------------------------------------------------------
-# Task-1 contract, revised: filesystem only. `swamp workspace list` cost a
-# second per run and reported nothing the filesystem could not, so swamp is
-# resolved by walking directories and never by spawning swamp itself.
-# discover() exports stores.swamp.repoDir for downstream tasks (analyze/fix).
+# ---- swamp: one named repo, and its own run tracker ------------------------
+# Swamp holds run history per repository, in <repo>/.swamp/run_tracker.db.
+# Nothing on the machine lists those repositories: ~/.swamp is the toolchain
+# and a cache, ~/.config/swamp/workspaces.json is a list the user fills in, and
+# swamp reports a central run log only through a `swamp serve` instance, which
+# is not running here. A tool that reads logs cannot find a swamp repo by
+# itself, so the caller names one with `--swamp-root`, and swamp stays out of
+# the report until that happens. Swamp itself is never spawned.
 
-def _swamp_repo_dir() -> str | None:
-    """Resolve one swamp repo dir from the filesystem alone, or None.
+SWAMP_MARKER = ".swamp.yaml"
+SWAMP_TRACKER = os.path.join(".swamp", "run_tracker.db")
 
-    Precedence (highest first):
-      1. $SWAMP_ROOT \u2014 explicit operator override; authoritative, and a
-         dir without the marker still means "no swamp here".
-      2. upward scan for .swamp.yaml, from the cwd and from this checkout.
-      3. ~/.swamp \u2014 swamp's default workspace location.
-      4. a swamp-tracker/swamp sibling of the luna-doctor wrapper.
-    Every candidate must carry the .swamp.yaml marker: ~/.swamp in
-    particular also exists on machines where it holds only swamp's cache.
+
+def _swamp_epoch(value) -> float | None:
+    """Epoch seconds from swamp's ISO-8601 stamps, or None.
+
+    Python 3.9's fromisoformat does not read the trailing `Z` that swamp
+    writes, so the offset becomes explicit first. A stamp that will not parse
+    stays None: an unreadable time is not evidence that a run happened.
     """
-    env_root = os.environ.get("SWAMP_ROOT", "").strip()
-    if env_root:
-        cand = os.path.expanduser(env_root)
-        if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, ".swamp.yaml")):
-            return os.path.abspath(cand)
+    if not isinstance(value, str) or not value.strip():
         return None
-    this_dir = os.path.dirname(os.path.abspath(__file__))
-    cur = os.path.dirname(this_dir)  # repo root (parent of luna_doctor/)
-    for start in (os.getcwd(), cur):
-        found = _scan_for_swamp_yaml(start)
-        if found:
-            return found
-    home_swamp = os.path.expanduser("~/.swamp")
-    if os.path.isfile(os.path.join(home_swamp, ".swamp.yaml")):
-        return os.path.abspath(home_swamp)
-    # wrapper sibling lives one level above the wrapper (luna-doctor wrapper -> GitHub/)
-    wrapper = os.path.dirname(cur)
-    for base in (wrapper, os.path.dirname(wrapper), cur):
-        for name in ("swamp-tracker", "swamp"):
-            cand = os.path.join(base, name)
-            try:
-                if os.path.isfile(os.path.join(cand, ".swamp.yaml")):
-                    return os.path.abspath(cand)
-            except OSError:
-                continue
-    return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
 
-def _scan_for_swamp_yaml(start: str) -> str | None:
-    """Walk upward from start looking for .swamp.yaml; return its dir or None."""
-    cur = os.path.abspath(start)
-    for _ in range(20):
-        candidate = os.path.join(cur, ".swamp.yaml")
-        try:
-            if os.path.isfile(candidate):
-                return cur
-        except OSError:
-            pass
-        parent = os.path.dirname(cur)
-        if parent == cur:
-            break
-        cur = parent
-    return None
+def swamp_tracker(repo_dir: str, since: float | None = None,
+                  until: float | None = None) -> dict:
+    """Read swamp's own run tracker for the window, or say why it cannot.
+
+    `active_runs` holds one row per method and workflow run, with `started_at`,
+    `completed_at` and `status`. `pending_runs` holds the queue swamp has not
+    started. A run is inside the window when it was in flight at some point in
+    the window: it started before the window closed, and it finished after the
+    window opened or has not finished. The database is opened read-only, and a
+    missing or unreadable tracker says so. File times are not a substitute: a
+    run writes its snapshot once, and an idle store still holds hundreds.
+    """
+    out = {"available": False, "reason": "no run_tracker.db", "overlapping": 0,
+           "in_flight": 0, "pending": 0, "last_started": None}
+    path = os.path.join(repo_dir, SWAMP_TRACKER)
+    if not os.path.isfile(path):
+        return out
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    except sqlite3.Error as exc:
+        out["reason"] = "unreadable: %s" % exc
+        return out
+    try:
+        runs = conn.execute(
+            "select started_at, completed_at, status from active_runs").fetchall()
+        pending = conn.execute("select created_at from pending_runs").fetchall()
+    except sqlite3.Error as exc:
+        out["reason"] = "unreadable: %s" % exc
+        return out
+    finally:
+        conn.close()
+    end = until if until is not None else time.time()
+    overlapping = 0
+    in_flight = 0
+    last_started = None
+    for started_at, completed_at, status in runs:
+        started = _swamp_epoch(started_at)
+        if started is None:
+            continue
+        if last_started is None or started > last_started:
+            last_started = started
+        if started > end:
+            continue
+        done = _swamp_epoch(completed_at)
+        if done is not None and since is not None and done < since:
+            continue
+        overlapping += 1
+        if done is None and (status or "").strip().lower() == "running":
+            in_flight += 1
+    queued = 0
+    for (created_at,) in pending:
+        created = _swamp_epoch(created_at)
+        if created is None or created > end:
+            continue
+        if since is not None and created < since:
+            continue
+        queued += 1
+    out.update({"available": True, "reason": None, "overlapping": overlapping,
+                "in_flight": in_flight, "pending": queued,
+                "last_started": last_started})
+    return out
 
 
-def _count_swamp_activity(root: str, filename_globs: tuple, since: float | None) -> int:
-    """Count files under `root` whose mtime falls at or after `since` (epoch).
+def _swamp_file_count(root: str, filename_globs: tuple) -> int:
+    """Count the files under `root` that match, whatever their age.
 
-    mtime, not content: the question is whether swamp is being *used*, and one
-    stat per file is the cheapest honest answer. `since` None counts all
-    activity regardless of age.
+    This is the size of the history swamp holds, never a claim about use.
     """
     if not os.path.isdir(root):
         return 0
-    n = 0
+    total = 0
     for pat in filename_globs:
-        for path in glob.glob(os.path.join(root, "**", pat), recursive=True):
-            try:
-                if since is not None and os.stat(path).st_mtime < since:
-                    continue
-            except OSError:
-                continue
-            n += 1
-    return n
+        try:
+            total += len(glob.glob(os.path.join(root, "**", pat), recursive=True))
+        except OSError:
+            continue
+    return total
 
 
-def swamp_state(repo_dir: str | None = None, since: float | None = None) -> dict:
-    """Is swamp installed, and is it actually running inside the window?
+def swamp_state(repo_dir: str | None = None, since: float | None = None,
+                until: float | None = None) -> dict:
+    """Is swamp installed in the named repo, and did it run in the window?
 
-    Installed is not in use: `in_use` requires files under `.swamp/data` or
-    `.swamp/workflow-runs` modified at or after `since` (epoch seconds; None
-    counts all activity). A populated but stale store is installed, not in
-    use, and an idle install must cost luna-doctor nothing beyond the marker
-    check. Resolution is filesystem-only; swamp itself is never spawned.
+    The repo comes from `--swamp-root` and is never discovered. `in_use` comes
+    from swamp's own run tracker, so an idle store reads idle however much
+    history it holds, and a repository without a tracker reads
+    `installed, no run tracker` rather than as activity.
     """
-    repo = repo_dir if repo_dir is not None else _swamp_repo_dir()
-    if not repo or not os.path.isdir(repo) or not os.path.isfile(os.path.join(repo, ".swamp.yaml")):
-        return {"installed": False, "in_use": False, "repo": None,
-                "behaviors": 0, "workflow_runs": 0, "evidence": "no marker"}
-    behaviors = _count_swamp_activity(os.path.join(repo, ".swamp", "data"),
-                                      ("metadata.yaml",), since)
-    workflow_runs = _count_swamp_activity(os.path.join(repo, ".swamp", "workflow-runs"),
-                                           ("*.yaml", "*.yml"), since)
-    in_use = bool(behaviors or workflow_runs)
-    if in_use:
-        parts = []
-        if behaviors:
-            parts.append(f"{behaviors} behavior record(s)")
-        if workflow_runs:
-            parts.append(f"{workflow_runs} workflow run(s)")
-        evidence = ", ".join(parts) + " in window"
+    empty = {"installed": False, "in_use": False, "repo": None, "behaviors": 0,
+             "workflow_runs": 0, "runs": None}
+    if not repo_dir:
+        return {**empty, "evidence": "not requested"}
+    repo = os.path.abspath(os.path.expanduser(repo_dir))
+    if not os.path.isdir(repo) or not os.path.isfile(os.path.join(repo, SWAMP_MARKER)):
+        return {**empty, "evidence": "no marker"}
+    tracker = swamp_tracker(repo, since, until)
+    behaviors = _swamp_file_count(os.path.join(repo, ".swamp", "data"),
+                                  ("metadata.yaml",))
+    workflow_runs = _swamp_file_count(os.path.join(repo, ".swamp", "workflow-runs"),
+                                      ("*.yaml", "*.yml"))
+    in_use = bool(tracker["overlapping"] or tracker["pending"])
+    if not tracker["available"]:
+        evidence = "installed, no run tracker"
+    elif in_use:
+        parts = ["%d run(s) in window" % tracker["overlapping"]]
+        if tracker["in_flight"]:
+            parts.append("%d in flight now" % tracker["in_flight"])
+        if tracker["pending"]:
+            parts.append("%d queued" % tracker["pending"])
+        evidence = ", ".join(parts)
     else:
-        evidence = "installed, no activity"
-    return {"installed": True, "in_use": in_use, "repo": os.path.abspath(repo),
-            "behaviors": behaviors, "workflow_runs": workflow_runs, "evidence": evidence}
+        evidence = "installed, no runs in window"
+    return {"installed": True, "in_use": in_use, "repo": repo,
+            "behaviors": behaviors, "workflow_runs": workflow_runs,
+            "runs": tracker, "evidence": evidence}
 
 
 def _swamp_store_info(repo_dir: str | None) -> dict:
@@ -825,8 +859,6 @@ def iter_swamp(repoDir: str | None, since: float | None = None, until: float | N
     Each yielded dict has {source, status, ts, path}.
     Walks .swamp/data/**/metadata.yaml (behavior) and .swamp/workflow-runs/**/*.yaml
     """
-    if repoDir is None:
-        repoDir = _swamp_repo_dir()
     if not repoDir or not os.path.isdir(repoDir):
         return
         yield  # make it a generator
@@ -921,7 +953,7 @@ def _collect_swamp_metrics(repoDir: str | None, since: float | None, until: floa
             pass
         disc = {"present": True, "repoDir": os.path.abspath(repoDir), "files": {"behaviorHistory": files_bh, "workflowRuns": files_wr}, "bundleFingerprint": bundle_fp, "envPresence": env_presence}
     else:
-        disc = _swamp_store_info(_swamp_repo_dir())
+        disc = _swamp_store_info(repoDir)
     if not disc.get("present"):
         return {"present": False}
     repo = disc.get("repoDir")
@@ -954,10 +986,31 @@ def _collect_swamp_metrics(repoDir: str | None, since: float | None, until: floa
         "behaviors": sorted(names),
         "knobs": knobs,
         "configuredConcurrency": cfg,
+        "runTracker": swamp_tracker(repo, since, until),
     }
 
 
-def discover(verbose: bool = False) -> dict:
+def _swamp_enrich(m: dict, swamp_root: str | None, since: float, until: float) -> None:
+    """Put swamp into the metrics, for a repo the caller named and no other.
+
+    Swamp is opt-in (`--swamp-root`): without a named repo nothing is read, so a
+    machine that happens to run swamp elsewhere contributes nothing. The stanza
+    is additive and never throws, and it carries the run tracker so `fix` judges
+    the same numbers the report prints.
+    """
+    if not swamp_root:
+        return
+    try:
+        state = swamp_state(swamp_root, since=since, until=until)
+        if not state["in_use"]:
+            return
+        m["swamp"] = _collect_swamp_metrics(state["repo"], since, until)
+        m["_swamp_configured_concurrency"] = m["swamp"].get("configuredConcurrency")
+    except Exception:
+        return
+
+
+def discover(verbose: bool = False, swamp_root: str | None = None) -> dict:
 
     """What stores exist, how big, over what range. Never modifies them."""
     found = {}
@@ -985,9 +1038,10 @@ def discover(verbose: bool = False) -> dict:
         }
     found["lunaroute_config"] = {"path": os.path.expanduser(LR_CONFIG),
                                  "present": os.path.isfile(os.path.expanduser(LR_CONFIG))}
-    # Installed is not in use: the report shows swamp only with activity in
-    # the window, while --json keeps the stores.swamp stanza for compatibility.
-    sw_state = swamp_state(since=time.time() - 24 * 3600)
+    # Swamp is opt-in: it appears only for a repo the caller named with
+    # --swamp-root, and installed is not in use. The gate is swamp's own run
+    # tracker, so an idle store reads idle however much history it holds.
+    sw_state = swamp_state(swamp_root, since=time.time() - 24 * 3600)
     sw = _swamp_store_info(sw_state["repo"])
     sw["inUse"] = sw_state["in_use"]
     sw["evidence"] = sw_state["evidence"]
@@ -2679,7 +2733,7 @@ def collect(since_hours: float, harnesses: list[str],
 
 
 def cmd_discover(args) -> int:
-    d = discover()
+    d = discover(swamp_root=getattr(args, "swamp_root", None))
     if args.json:
         print(json.dumps(envelope("discover", {"stores": d}, contract=CONTRACT), indent=2))
     else:
@@ -3093,6 +3147,19 @@ def _add_style(sp) -> None:
                          "terminal and plain otherwise (default)")
 
 
+def _add_swamp_root(sp) -> None:
+    """The swamp opt-in: one repo the caller names, and nothing else.
+
+    Swamp keeps run history per repository, and no file on the machine lists
+    the repositories a person uses swamp in, so the tool cannot find one on
+    its own. Without this flag swamp enters no report at all.
+    """
+    sp.add_argument("--swamp-root", default=None, metavar="DIR",
+                    help="include a swamp repository: its own run tracker at "
+                         ".swamp/run_tracker.db says whether swamp ran in the window. "
+                         "Swamp is never discovered, so nothing appears without this flag")
+
+
 def _add_copy(sp) -> None:
     """The clipboard opt-in for the commands whose stdout is a pasteable artifact.
 
@@ -3243,6 +3310,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--json", action="store_true")
     _add_copy(d)
     _add_style(d)
+    _add_swamp_root(d)
     d.set_defaults(func=cmd_discover)
 
     ex = sub.add_parser("explain",
@@ -3312,6 +3380,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_copy(a)
     _add_network(a)
     _add_style(a)
+    _add_swamp_root(a)
     a.set_defaults(func=cmd_analyze)
 
     # Out of the advertised surfaces on purpose: this command opens real
@@ -3337,6 +3406,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_copy(f)
     _add_network(f)
     plan.add_plan_arg(f)
+    _add_swamp_root(f)
     f.set_defaults(func=None)
 
     ch = sub.add_parser("chart", help="write the chart as a standalone SVG, plus a pasteable PNG")
@@ -3358,6 +3428,7 @@ def main(argv: list[str] | None = None) -> int:
     plan.add_plan_arg(ch)
     ch.add_argument("--json", action="store_true")
     _add_style(ch)
+    _add_swamp_root(ch)
     ch.set_defaults(func=None)
 
     cp = sub.add_parser("capacity",
@@ -3829,15 +3900,9 @@ def cmd_analyze(args) -> int:
     # override of it: attribution.resolve_priority_concurrency decides which
     # one leads, and the report says which it used.
     m["declared_plan"] = getattr(args, "plan", None)
-    # swamp enrichment (additive, never fails; installed is not in use, so
-    # only a swamp with activity in the window contributes anything)
-    try:
-        sw_state = swamp_state(since=now - hours * 3600)
-        if sw_state["in_use"]:
-            m["swamp"] = _collect_swamp_metrics(sw_state["repo"], now - hours * 3600, now)
-            m["_swamp_configured_concurrency"] = m["swamp"].get("configuredConcurrency")
-    except Exception:
-        pass
+    # swamp enrichment (additive, never fails; opt-in through --swamp-root, and
+    # installed is not in use, so only a swamp with runs in the window lands)
+    _swamp_enrich(m, getattr(args, "swamp_root", None), now - hours * 3600, now)
     # Combined snapshot (additive: metrics.snapshot joins the measured
     # requests, the declared configs and the catalog; analyse()'s own
     # numbers above are unchanged). Offline by default: a cached catalog
@@ -3846,7 +3911,8 @@ def cmd_analyze(args) -> int:
     snap = None
     try:
         snap = sources.build_snapshot(reqs, since=now - hours * 3600, until=now,
-                                      allow_network=bool(getattr(args, "online", False)))
+                                      allow_network=bool(getattr(args, "online", False)),
+                                      swamp_repo_dir=(m.get("swamp") or {}).get("repoDir"))
         m["snapshot"] = snap.to_dict()
     except Exception as e:
         m["snapshot"] = {"provenance": sources.PROV_UNKNOWN,

@@ -27,6 +27,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "bin", "luna-doctor")
 SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")  # semver, prerelease allowed (0.1.1-alpha.1)
 
+# The envelope's schema number, read from the package rather than restated here:
+# a deliberate bump should not also mean editing eight assertions. A bump still
+# has to be deliberate, which is what the CHANGELOG entry records.
+SCHEMA = int(re.search(r"^SCHEMA_VERSION = (\d+)",
+                       open(os.path.join(ROOT, "luna_doctor", "cli.py"),
+                            encoding="utf-8").read(), re.M).group(1))
+
 
 # Every CLI invocation in this suite gets its own store directory: the real
 # ~/.luna-doctor/store is the user's repeat history, not a test artifact.
@@ -110,7 +117,7 @@ class JsonEnvelope(unittest.TestCase):
         code, out, err = run(*args)
         self.assertIn(code, (0, 1, 2), f"unexpected exit {code}: {err}")
         doc = json.loads(out)          # must be pure JSON on stdout
-        self.assertEqual(doc["schema"], 4)
+        self.assertEqual(doc["schema"], SCHEMA)
         self.assertRegex(doc["version"], SEMVER)
         self.assertIn("command", doc)
         return code, doc
@@ -187,7 +194,7 @@ class Chart(unittest.TestCase):
         self.assertEqual(code, 0)
         doc = json.loads(stdout)
         self.assertEqual(doc["command"], "chart")
-        self.assertEqual(doc["schema"], 4)
+        self.assertEqual(doc["schema"], SCHEMA)
         self.assertEqual(doc["path"], out)
         self.assertIn("contract", doc)
 
@@ -788,7 +795,7 @@ class ChartAccountRule(unittest.TestCase):
                                    capacity=_capacity_payload())
             self.assertEqual(code, 0, err)
             doc = json.loads(stdout)
-            self.assertEqual(doc["schema"], 4)
+            self.assertEqual(doc["schema"], SCHEMA)
             self.assertEqual(doc["plan"]["source"], "account")
             self.assertEqual(doc["plan"]["priority"], 12)
             self.assertEqual(doc["plan"]["account_plan"], "apex")
@@ -1062,7 +1069,7 @@ class CapacityCommand(unittest.TestCase):
         code, out, err = run("capacity", "--json", capacity=_capacity_payload())
         self.assertEqual(code, 0, err)
         doc = json.loads(out)
-        self.assertEqual(doc["schema"], 4)
+        self.assertEqual(doc["schema"], SCHEMA)
         self.assertEqual(doc["command"], "capacity")
         self.assertIn("contract", doc)
         cap = doc["capacity"]
@@ -1162,7 +1169,6 @@ class InstallShape(unittest.TestCase):
         env = dict(os.environ)
         env["LUNA_DOCTOR_STORE"] = _TEST_STORE
         env.pop("PYTHONPATH", None)
-        env["SWAMP_ROOT"] = os.path.join(_TEST_STORE, "no-such-swamp")
         env.update(extra)
         return env
 
@@ -1671,7 +1677,7 @@ class ExtractionStore(unittest.TestCase):
             self.assertTrue(os.path.isfile(first["path"]))
             with open(first["path"]) as fh:
                 doc = json.load(fh)
-            self.assertEqual(doc["schema"], 4)
+            self.assertEqual(doc["schema"], SCHEMA)
             with open(first["ledger"]) as fh:
                 lines = [json.loads(x) for x in fh if x.strip()]
                 events = self.m.ledger_rows(m, "stores:default")
@@ -1688,7 +1694,7 @@ class EnvelopeSchema(unittest.TestCase):
         code, out, err = run("analyze", "--since", "1h", "--json")
         self.assertIn(code, (0, 1, 2), err)
         doc = json.loads(out)
-        self.assertEqual(doc["schema"], 4)
+        self.assertEqual(doc["schema"], SCHEMA)
         self.assertNotIn("admission_deadline_s", doc["contract"],
                          "per-model deadlines replace the borrowed constant")
         for key in ("pre_header_wait_s", "client_idle_timeout_s", "interactive_burst_cap",
@@ -3013,7 +3019,7 @@ class CopyToClipboard(unittest.TestCase):
         self.assertEqual(copied, proc.stdout)
         doc = json.loads(copied)               # the whole document, nothing more
         self.assertEqual(doc["command"], "analyze")
-        self.assertEqual(doc["schema"], 4)
+        self.assertEqual(doc["schema"], SCHEMA)
 
 
 class DemotionReason(unittest.TestCase):

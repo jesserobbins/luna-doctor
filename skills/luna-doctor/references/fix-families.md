@@ -63,7 +63,8 @@ headline.
 
 - width: `globalConcurrencyLimit`, `env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`,
   `agents.max_concurrent_threads_per_session`, and the swamp split, which appears
-  only when swamp is in use in the window.
+  only when the run named a swamp repo with `--swamp-root`, and that repo's own
+  run tracker shows a run in the window.
 - idle budget: `httpIdleTimeoutMs`, and `env.CLAUDE_STREAM_IDLE_TIMEOUT_MS` with
   `env.API_TIMEOUT_MS`, raised to 900000 only when too short.
 - tier routing: `subagents.defaultModel`, `env.CLAUDE_CODE_SUBAGENT_MODEL`,

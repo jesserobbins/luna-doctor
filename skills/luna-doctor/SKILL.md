@@ -42,12 +42,12 @@ which that starts belongs to the account. It is not in these logs.
 | command | flags an agent types, and what it can touch |
 |---|---|
 | `luna-doctor` | bare run: account line, `analyze --since 1h`, the chart into cwd. offline, but it writes a run extraction under `~/.luna-doctor/store`. Say so, and use `analyze --no-store` when nothing can persist |
-| `luna-doctor discover` | `--json --copy --style`. read-only, offline |
+| `luna-doctor discover` | `--json --copy --style --swamp-root`. read-only, offline |
 | `luna-doctor explain [ID]` | `--since --now --last N --slowest --blocked --harness --plan --json --copy --style`. read-only, offline |
 | `luna-doctor watch` | `--since --now --interval --count --once --json --style`. read-only, offline |
-| `luna-doctor analyze` | `--since --now --harness --pi-root --claude-root --plan --baseline prev --for-issue --json --copy --style --online\|--offline`. offline unless `--online` |
-| `luna-doctor fix` | `--since --now --harness --agent --plan --json --copy --online\|--offline`. prints advice, never edits a file |
-| `luna-doctor chart` | `--since --now --harness --out --no-image --width --height --open --plan --json --style`. writes the SVG and PNG, offline |
+| `luna-doctor analyze` | `--since --now --harness --pi-root --claude-root --plan --baseline prev --for-issue --json --copy --style --swamp-root --online\|--offline`. offline unless `--online` |
+| `luna-doctor fix` | `--since --now --harness --agent --plan --json --copy --swamp-root --online\|--offline`. prints advice, never edits a file |
+| `luna-doctor chart` | `--since --now --harness --out --no-image --width --height --open --plan --json --style --swamp-root`. writes the SVG and PNG, offline |
 | `luna-doctor capacity` | `--json --copy --style --online\|--offline`. offline unless `--online` |
 
 Exit codes, once: `0` no pressure, `1` pressure found, `2` no data (usage errors are also `2`).
