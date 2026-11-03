@@ -26,7 +26,14 @@ concurrency settings.
 
    pipx install "luna-doctor @ git+https://github.com/jesserobbins/luna-doctor.git"
 
-2. Check that it runs and that it finds my logs:
+2. Copy the agent skill where you read skills, then check that the tool runs
+   and finds my logs:
+
+   luna-doctor skill
+
+   That prints the packaged skill path and the copy line for each harness. Put
+   the directory where this agent reads skills, so the next diagnosis starts
+   with the skill loaded. Then confirm that the tool runs and finds my logs:
 
    luna-doctor --version
    luna-doctor discover

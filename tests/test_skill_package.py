@@ -28,7 +28,7 @@ PLAYBOOKS_DIR = os.path.join(REFERENCES_DIR, "playbooks")
 # Every subcommand the skill's command index speaks for. The bare run (no
 # subcommand) is the tenth target and is spelled "".
 COMMANDS = ("discover", "explain", "watch", "analyze", "fix", "chart",
-            "capacity")
+            "capacity", "skill")
 
 # argparse's own help pair: present everywhere, documented nowhere.
 IGNORED_FLAGS = ("-h", "--help")
@@ -92,6 +92,63 @@ def documented_invocations(path):
                 for flag in FLAG.findall(rest):
                     found.append((no, command, flag))
     return found
+
+
+class TheWheelCarriesIt(unittest.TestCase):
+    """The skill ships inside the package, so an install is not CLI-only.
+
+    A wheel can only carry files inside the package, so the skill lives at
+    `luna_doctor/skills/luna-doctor/` and `[tool.setuptools.package-data]`
+    declares it. The repository keeps `skills/luna-doctor` as a symlink to that
+    path, because that is where the skills tooling looks for one. Nothing is
+    copied by hand, so the two cannot drift.
+    """
+
+    def test_the_skill_lives_inside_the_package(self):
+        packaged = os.path.join(ROOT, "luna_doctor", "skills", "luna-doctor")
+        self.assertTrue(os.path.isfile(os.path.join(packaged, "SKILL.md")),
+                        "the package does not hold the skill, so a wheel cannot")
+        self.assertTrue(os.path.isdir(os.path.join(packaged, "references")),
+                        "the skill ships without its references")
+
+    def test_the_repository_path_resolves_into_the_package(self):
+        self.assertTrue(os.path.islink(SKILL_DIR) or os.path.samefile(
+            SKILL_DIR, os.path.join(ROOT, "luna_doctor", "skills", "luna-doctor")),
+            "skills/luna-doctor is a second copy: one of the two will go stale")
+
+    def test_package_data_covers_every_skill_file(self):
+        """A glob that misses a file is a wheel that is quietly incomplete."""
+        import fnmatch
+        try:
+            import tomllib
+        except ModuleNotFoundError:      # Python 3.9 and 3.10: no stdlib TOML
+            self.skipTest("tomllib needs Python 3.11 or newer")
+
+        with open(os.path.join(ROOT, "pyproject.toml"), "rb") as fh:
+            data = tomllib.load(fh)
+        patterns = data["tool"]["setuptools"]["package-data"]["luna_doctor"]
+        packaged = os.path.join(ROOT, "luna_doctor", "skills", "luna-doctor")
+        missing = []
+        for base, _dirs, names in os.walk(packaged):
+            for name in names:
+                if not name.endswith(".md"):
+                    continue
+                rel = os.path.relpath(os.path.join(base, name), os.path.join(ROOT, "luna_doctor"))
+                if not any(fnmatch.fnmatch(rel, pattern) for pattern in patterns):
+                    missing.append(rel)
+        self.assertEqual(missing, [], f"package-data does not match: {missing}")
+
+    def test_the_command_names_the_packaged_path(self):
+        proc = subprocess.run([sys.executable, CLI, "skill", "--json"],
+                              capture_output=True, text=True, timeout=120,
+                              cwd=ROOT, env={**os.environ, "NO_COLOR": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        import json as _json
+        doc = _json.loads(proc.stdout)
+        self.assertTrue(doc["path"].endswith(os.path.join("luna_doctor", "skills", "luna-doctor")),
+                        doc["path"])
+        self.assertIn("SKILL.md", doc["files"])
+        self.assertIn(doc["source"], ("package", "checkout"))
 
 
 class SkillPackage(unittest.TestCase):

@@ -17,6 +17,30 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- The wheel carries the agent skill. `pipx install luna-doctor` used to give a
+  command and nothing an agent could load: the wheel held `luna_doctor/` and
+  stopped there, and `tests/test_skill_package.py` read the checkout, so the
+  guard passed while the artifact was incomplete. The skill now lives at
+  `luna_doctor/skills/luna-doctor/` and `[tool.setuptools.package-data]`
+  declares it, so it ships by construction rather than by a build step. The
+  repository keeps `skills/luna-doctor` as a symlink to that path, which is
+  where the skills tooling looks for one.
+
+- `luna-doctor skill` prints the packaged path and the copy line per harness.
+  It prints and never copies, the same contract `fix` keeps.
+
+- How many subagents ran at once is measured. pi writes each async subagent's transcript at
+  `<store>/<session>/subagent-artifacts/<runId>_<agent>_transcript.jsonl`, and
+  no record there carries `type`, so the request parser read none of them. The
+  report gains a `subagents` row with the count of runs, the peak number open
+  at one instant, the widest single launch, and how many runs exited non-zero.
+  `metrics.subagents` carries `runs`, `peakInFlight`, `peakAt`, `byAgent`,
+  `byParent` and `failed`. It is a count of runs and it never joins a request
+  number, because eight subagents each issue their own requests and those are
+  already counted from the logs.
+
 ## [0.3.0-alpha.6] - 2026-11-03
 
 ### Changed
