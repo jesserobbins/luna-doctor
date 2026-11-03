@@ -337,9 +337,12 @@ never describes that concurrency as measured.
 | `skills/luna-doctor/` | the agent skill: a router, five playbooks, four catalogues |
 | `assets/` | the two chart images above, each one written by `luna-doctor chart`, and the social preview, written by `python3 scripts/titlecard.py --moon <screenshot>` |
 
-These files ship together as the package. `cli` loads `_fix_block` and
-`_chart_block` off disk from its own directory, so a partial install is the one
-thing that breaks `fix` and `chart`.
+The package ships `luna_doctor/`, which is the CLI and its sibling modules.
+`cli` loads `_fix_block` and `_chart_block` off disk from its own directory, so
+a partial install is the one thing that breaks `fix` and `chart`. The skill, the
+launcher in `bin/` and the chart images stay in the repository. The skill is not
+inside the wheel yet, so an agent that installs the tool from PyPI still reads
+`skills/luna-doctor/SKILL.md` from this repository.
 
 ## How this project is built
 
@@ -358,9 +361,16 @@ Semantic versioning with prerelease identifiers (`0.1.1-alpha.1`, `0.1.1-beta.1`
 |---|---|
 | version number | `VERSION`, mirrored in `luna_doctor/cli.py` |
 | history | `CHANGELOG.md` (Keep a Changelog) |
-| releases | annotated git tags, `vX.Y.Z` and `vX.Y.Z-prerelease` (e.g. `v0.1.1-alpha.1`) |
+| releases | annotated git tags, `vX.Y.Z` and `vX.Y.Z-prerelease` (e.g. `v0.1.1-alpha.1`), published to PyPI by `scripts/publish.sh` |
 | JSON document shape | `"schema": 4` in every `--json` envelope: bumped independently when the shape changes |
 | measured gateway facts | `"contract": {...}` in every `--json` envelope |
+
+Prereleases publish to PyPI. The index keeps every uploaded file forever, and a bad one is
+yanked rather than deleted, so pin an exact version in automation.
+
+Publishing needs a PyPI token in `PYPI_TOKEN`, or in `~/.config/luna-doctor/pypi-token`.
+`scripts/publish.sh` builds the tagged release, uploads it and reads the index back to
+confirm that the version is live. It publishes nothing without a tag and a clean tree.
 
 Every `--json` document carries `schema`, `version`, and `command`. The reporting commands (`discover`, `analyze`, `fix`, `chart`, `capacity`) also carry `contract`, so a saved report stays readable after the tool moves on. While the project is prerelease, `schema` is bumped freely, because the envelope has no stable consumers to protect yet. Usage errors print to stderr and exit `2` with no JSON document.
 
