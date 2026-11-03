@@ -16,12 +16,15 @@ your declaration.
 Install luna-doctor on this machine and use it to configure my agent
 concurrency settings.
 
-1. Install it. It is not published on PyPI, so install it from the repository:
+1. Install it:
 
-   pipx install "luna-doctor @ git+https://github.com/jesserobbins/luna-doctor.git"
+   pipx install luna-doctor
 
    If pipx is missing, install it (brew install pipx) and run pipx ensurepath.
-   Open a new shell after that.
+   Open a new shell after that. To install the newest commit instead of the
+   newest release:
+
+   pipx install "luna-doctor @ git+https://github.com/jesserobbins/luna-doctor.git"
 
 2. Check that it runs and that it finds my logs:
 
@@ -73,14 +76,13 @@ While you work:
 
 | step | what it costs | what it can touch |
 |---|---|---|
-| `pipx install` | one download and build from the repository | a new venv under pipx's home |
+| `pipx install` | one download and build from PyPI | a new venv under pipx's home |
 | `discover` | nothing | reads only |
 | `capacity --online` | one authenticated GET to `api.lunaroute.com` | refreshes the 5-minute disk cache |
 | `analyze`, `fix`, `analyze --baseline prev` | nothing | reads the local harness logs |
 
 Every command except `capacity --online` runs offline. No step opens a session,
 so the run does not add to the pressure it reports.
-
 ## After the install
 
 The wheel installs the command, not the skill. The skill that an agent reads is

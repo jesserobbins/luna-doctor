@@ -15,10 +15,19 @@ When the account is full, the gateway waits. It can also demote the request to a
 Requirements: Python 3.9+. Everything below, `discover`, `analyze`, `fix`, `chart` and the bare default run, is offline and needs no credentials. `capacity` reads a disk cache the same way. The only fetches in the tool are opt-in. They use the routing key that `lunaroute login` already stored: `capacity --online`, and `analyze --online` / `fix --online` for the model catalog.
 
 ```bash
+pipx install luna-doctor   # installs the `luna-doctor` command
+luna-doctor --version      # prints the installed version
+```
+
+Every release is an alpha. pipx installs it, because the index holds no final
+release.
+
+To run from a checkout instead:
+
+```bash
 git clone https://github.com/jesserobbins/luna-doctor.git
 cd luna-doctor
-pipx install .        # installs the `luna-doctor` command
-luna-doctor --version # prints the version in VERSION (0.3.0-alpha.4)
+pipx install .
 ```
 
 Give the install to your agent instead: [`docs/install-with-an-agent.md`](https://github.com/jesserobbins/luna-doctor/blob/main/docs/install-with-an-agent.md)

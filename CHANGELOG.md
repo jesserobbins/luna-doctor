@@ -17,6 +17,20 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/publish.sh` builds the tagged release, uploads it with the token
+  from `~/.config/luna-doctor/pypi-token`, and then reads the index back to
+  confirm that the version is live. It refuses a dirty tree and a missing tag,
+  so an upload cannot describe a commit that nobody can find.
+
+### Changed
+
+- The install is one command. `pipx install luna-doctor` resolves from PyPI,
+  and the checkout path stays as the way to run an unreleased commit. The
+  README no longer prints a version number in the install block, because the
+  number drifted from `VERSION` twice.
+
 ## [0.3.0-alpha.5] - 2026-11-03
 
 ### Added
