@@ -1654,6 +1654,48 @@ def _bands_for(sub: list[Request], peaks: dict[int, int], min_top_n: int,
                 f"top band has {top['n']} sample(s); {min_top_n} needed before claiming a gradient")}
 
 
+def latency_by(reqs: list) -> dict:
+    """Latency per category, from this machine's own logs.
+
+    The account API carries no request latency at all - no first token, no
+    duration, no percentile - so every number here is measured locally and
+    labelled that way. Cells are (tier, model), (tier, harness) and (tier,
+    outcome). A cell below the sample floor is counted, not printed: three
+    samples are a coincidence with a number attached. Blocked and stalled
+    durations stay in their own spans and never enter a completed cell.
+    """
+    done = [r for r in timed(reqs) if r.outcome == "completed"]
+
+    def cell(row):
+        return {"tier": row.tier, "n": 1, "p50": None, "p90": None, "max": None}
+
+    def group(keyfn) -> tuple[list, int]:
+        buckets: dict = {}
+        for r in done:
+            buckets.setdefault(keyfn(r), []).append(r.duration)
+        rows, suppressed = [], 0
+        for key, durs in sorted(buckets.items(), key=lambda kv: (-len(kv[1]), str(kv[0]))):
+            n = len(durs)
+            if n < BAND_MIN_TOP_SAMPLES:
+                suppressed += 1
+                continue
+            label = key if isinstance(key, str) else " / ".join(str(k) for k in key)
+            rows.append({"cell": label, "n": n, "p50": pct(durs, 50),
+                         "p90": pct(durs, 90), "max": round(max(durs), 1)})
+        return rows, suppressed
+
+    by_tier_model, s1 = group(lambda r: (r.tier, r.model or "(unknown)"))
+    by_tier_harness, s2 = group(lambda r: (r.tier, r.harness))
+    by_tier_outcome, s3 = group(lambda r: (r.tier, r.outcome))
+    return {
+        "floor": BAND_MIN_TOP_SAMPLES,
+        "suppressed": s1 + s2 + s3,
+        "by_tier_model": by_tier_model,
+        "by_tier_harness": by_tier_harness,
+        "by_tier_outcome": by_tier_outcome,
+    }
+
+
 def saturation_bands(reqs: list[Request], min_top_n: int = BAND_MIN_TOP_SAMPLES,
                      inflation: float = BAND_INFLATION) -> dict:
     """Latency against load, compared only among requests to the same model on
@@ -2069,6 +2111,7 @@ def analyse(reqs: list[Request], window_hours: float) -> dict:
         "per_model_deadlines": per_model_deadlines(reqs),
         "timeout_storms": timeout_storms(reqs),
         "saturation_bands": saturation_bands(ok),
+        "latency_by": latency_by(ok),
         "unknown_errors": unknown_errors(reqs),
         "unknown_error_bursts": unknown_error_bursts(reqs),
         # Counted over every request, like by_outcome: `done` is the latency
@@ -2756,6 +2799,29 @@ def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
             f"{c['admission_timeout']} blocked at admission)",
             "bad" if c["admission_timeout"] else "good"))
 
+    lat = m.get("latency_by") or {}
+    latency_rows: list[report.Row] = []
+    tiers = m.get("latency_s") or {}
+    if any((tiers.get(t) or {}).get("n") for t in ("interactive", "background")):
+        bits = []
+        for tier in ("interactive", "background"):
+            cell = tiers.get(tier) or {}
+            if cell.get("n"):
+                bits.append(f"{tier} p90 {cell['p90']}s (n={cell['n']})")
+        latency_rows.append(report.Row("by tier", " \u00b7 ".join(bits)
+                                       + " (this machine)"))
+    cells = [c for c in (lat.get("by_tier_model") or []) if c.get("p90") is not None]
+    if cells:
+        worst = max(cells, key=lambda c: c["p90"])
+        latency_rows.append(report.Row(
+            "slowest model cell",
+            f"{worst['cell']} p90 {worst['p90']}s (n={worst['n']}) (this machine)"))
+    if lat.get("suppressed"):
+        latency_rows.append(report.Row(
+            "withheld",
+            f"{lat['suppressed']} cell(s) held fewer than {lat.get('floor')} sample(s) "
+            f"and are not shown (this machine)"))
+
     notes: list[report.Row] = []
     if "claude-code" in m["by_harness"]:
         notes.append(report.Row(
@@ -2807,8 +2873,8 @@ def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
                      + setting))
 
     sections = [report.Section(title, rows)
-                for title, rows in (("traffic", traffic), ("pressure", pressure),
-                                    ("notes", notes)) if rows]
+                for title, rows in (("traffic", traffic), ("latency", latency_rows),
+                                    ("pressure", pressure), ("notes", notes)) if rows]
     if att is not None:
         rows = [report.Row("the wall you hit", _VERDICT_WORDS.get(att.verdict, att.verdict), "bad"
                            if att.verdict in ("you", "your-org") else "normal"),

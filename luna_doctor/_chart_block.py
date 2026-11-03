@@ -109,7 +109,10 @@ agent had timed traffic still draws the one plot area over the requested
 window -- empty axes and the honest footer, never a bare message.
 """
 
+from datetime import datetime, timezone
+
 from luna_doctor.plan import PLAN_PRIORITY, resolve_capacity
+from luna_doctor import sources
 from luna_doctor.png import png_from
 from luna_doctor.scene import Circle, Line, Rect, Scene, Text, svg_from
 
@@ -379,7 +382,88 @@ def _panel_series(reqs, bands, band_of, t0, t1, n_cols):
     return means, colmax, state["peak"], state["peak_t"]
 
 
-def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
+def _account_panel(shapes, *, days, t0, t1, px, plot_w, y0, y1, span):
+    """The account's own blocked counts, as a step line over the same axis.
+
+    Two panels, one time axis: the top says what the service recorded, the
+    bottom what this machine contributed, and neither is summed or compared
+    across the two. `days` are complete UTC days and their counts are the
+    account's; a window shorter than a day has no daily point to plot, so the
+    panel says so rather than inventing a line between two days.
+
+    The line is `denied_after_wait` - parked and then refused - because that is
+    the moment the system blocked. `denied` rides beneath it in a lighter tone.
+    """
+    height = y1 - y0
+    if not days:
+        shapes.append(Text(px, y0 + 14,
+                           "the account reports no admission days for this window "
+                           "(a window under a day has no daily point to plot)",
+                           size=10, fill="#6b7280"))
+        return False
+    # Only the days the window covers set the scale, and only one scale is
+    # drawn: a 467-request day a month away must not flatten this week's line
+    # against the baseline.
+    inside = []
+    for day, entry in days:
+        try:
+            epoch = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        except (TypeError, ValueError):
+            continue
+        centre = epoch + 43200
+        # A daily count covers the whole UTC day, so a window that touches any
+        # part of that day may use it. The point is placed at the day's centre
+        # and clamped into the visible span, because a one-hour window inside a
+        # day still has one day to report.
+        if epoch <= t1 and epoch + 86400 >= t0:
+            inside.append((day, entry, min(max(centre, t0), t1)))
+    if not inside:
+        shapes.append(Text(px, y0 + 14,
+                           "the account reports no complete UTC day that touches this "
+                           "window, so it has no daily point to plot here (account)",
+                           size=10, fill="#6b7280"))
+        return False
+    values = []
+    for _day, entry, _centre in inside:
+        daw = entry.get("denied_after_wait")
+        if isinstance(daw, int) and not isinstance(daw, bool):
+            values.append(daw)
+    if not any(values):
+        shapes.append(Text(px, y0 + 14,
+                           "the account recorded no request denied after waiting on "
+                           "the days inside this window (account)",
+                           size=10, fill="#6b7280"))
+        return False
+    top = max(values + [1])
+    shapes.append(Text(px, y0 + 11, "the account's blocked requests, per complete UTC day",
+                       size=10.5, fill="#374151"))
+    shapes.append(Text(px, y0 + 25, "denied after waiting (account)", size=9.5, fill="#dc2626"))
+    # baseline
+    shapes.append(Line(px, y1, px + plot_w, y1, stroke="#e5e7eb"))
+    prev = None
+    for day, entry, centre in inside:
+        frac = (centre - t0) / span
+        if frac < 0 or frac > 1:
+            continue
+        x = px + frac * plot_w
+        daw = entry.get("denied_after_wait")
+        value = daw if isinstance(daw, int) and not isinstance(daw, bool) else 0
+        y = y1 - (value / top) * (height - 34)
+        if prev is not None:
+            shapes.append(Line(prev[0], prev[1], x, prev[1], stroke="#dc2626",
+                               stroke_width=1.4))
+            shapes.append(Line(x, prev[1], x, y, stroke="#dc2626", stroke_width=1.4))
+        shapes.append(Circle(x, y, 2.2, fill="#dc2626"))
+        prev = (x, y)
+    if prev is not None:
+        shapes.append(Line(prev[0], prev[1], px + plot_w, prev[1], stroke="#dc2626",
+                           stroke_width=1.4))
+    shapes.append(Text(px - 8, y0 + 34, str(top), size=9, fill="#6b7280", anchor="end"))
+    return True
+
+
+def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None,
+                      account=None):
     """Collect the chart as an ordered list of shapes.
 
     `m` is the metrics dict from analyse(); `reqs` the raw requests, because
@@ -433,7 +517,15 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
     # ---- geometry ---------------------------------------------------------
     pad_l, pad_r = 56, 18
     title_y, sub_y, key_y = 30, 53, 74
-    top = 98
+    # Two panels, one time axis. The service panel is fixed height and sits
+    # above; the stack below keeps its own scale and its own unit.
+    acct_days = []
+    try:
+        acct_days = sources.capacity_admission_days(account)
+    except Exception:
+        acct_days = []
+    account_panel_h = 104
+    top = 98 + account_panel_h
     bot = max(top + 100, height - 132)
     xlab_y = bot + 20
 
@@ -489,6 +581,14 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
 
     shapes = []
     add = shapes.append
+
+    # The account panel first, so the picture reads service then contribution.
+    # It shares the time axis and nothing else: its own unit, its own scale.
+    drew_account = _account_panel(shapes, days=acct_days, t0=t0, t1=t1, px=px,
+                                  plot_w=plot_w, y0=98,
+                                  y1=98 + account_panel_h - 14, span=span)
+    if drew_account:
+        add(Line(px, top - 8, px + plot_w, top - 8, stroke="#e5e7eb"))
 
     # ---- title block ------------------------------------------------------
     add(Text(pad_l, title_y, "luna-doctor \u00b7 last %s" % human_window(hours),
@@ -831,8 +931,9 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None):
     return Scene(width, height, C["bg"], shapes, font=CHART_FONT)
 
 
-def svg_chart(reqs, m, hours, width=1120, height=640, capacity=None):
-    return svg_from(build_chart_scene(reqs, m, hours, width, height, capacity))
+def svg_chart(reqs, m, hours, width=1120, height=640, capacity=None, account=None):
+    return svg_from(build_chart_scene(reqs, m, hours, width, height, capacity,
+                                      account=account))
 
 
 def cmd_chart(args) -> int:
@@ -876,7 +977,8 @@ def cmd_chart(args) -> int:
     # default writes it beside the SVG under the same stem because the
     # raster is the one a chat, a note or a doc can paste inline.
     scene = build_chart_scene(reqs, m, hours, width=args.width,
-                              height=args.height, capacity=capacity)
+                              height=args.height, capacity=capacity,
+                              account=account_payload)
     svg = svg_from(scene)
 
     out = args.out

@@ -224,3 +224,109 @@ class TheInsufficientEvidenceOutcome(unittest.TestCase):
         # the account's pressure, and it keeps its own findings.
         self.assertNotIn("concurrency allowance", proc.stdout.lower().replace(
             "priority concurrent", ""))
+
+
+class LatencyPerCategory(unittest.TestCase):
+    """Latency is measured here, because the account carries none.
+
+    The API has no first-token time, no duration and no percentile for any
+    request, so every number in this section is this machine's, and a cell
+    below the sample floor is counted rather than printed.
+    """
+
+    def _reqs(self, n, model="glm-5.3", tier="interactive", duration=10.0,
+              harness="pi", outcome="completed"):
+        return [cli.Request(harness=harness, session="s", model=model,
+                            tier=tier,
+                            start=1_700_000_000.0 + i * 60,
+                            end=1_700_000_000.0 + i * 60 + duration,
+                            outcome=outcome)
+                for i in range(n)]
+
+    def test_cells_by_tier_model_harness_and_outcome(self):
+        m = cli.analyse(self._reqs(6) + self._reqs(6, model="x-background", tier="background", duration=20.0),
+                        window_hours=24)
+        lat = m["latency_by"]
+        self.assertEqual(lat["floor"], cli.BAND_MIN_TOP_SAMPLES)
+        tier_model = {c["cell"]: c for c in lat["by_tier_model"]}
+        self.assertIn("interactive / glm-5.3", tier_model)
+        self.assertIn("background / x-background", tier_model)
+        self.assertEqual(tier_model["interactive / glm-5.3"]["n"], 6)
+        self.assertEqual(lat["by_tier_harness"][0]["n"], 6)
+        self.assertTrue(lat["by_tier_outcome"])
+
+    def test_a_cell_below_the_floor_is_counted_not_printed(self):
+        m = cli.analyse(self._reqs(6) + self._reqs(2, model="rare"), window_hours=24)
+        lat = m["latency_by"]
+        cells = [c["cell"] for c in lat["by_tier_model"]]
+        self.assertNotIn("interactive / rare", cells,
+                         "two samples are a coincidence with a number attached")
+        self.assertGreaterEqual(lat["suppressed"], 1)
+
+    def test_the_report_shows_three_lines_and_no_matrix(self):
+        reqs = self._reqs(6) + self._reqs(6, model="x-background", tier="background", duration=20.0)
+        m = cli.analyse(reqs, window_hours=24)
+        report = cli.build_report(m, "headline", [])
+        section = [s for s in report.sections if s.title == "latency"]
+        self.assertTrue(section, "the latency section belongs in the report")
+        self.assertLessEqual(len(section[0].rows), 3,
+                             "the report carries a bounded summary, not a matrix")
+        self.assertTrue(all("(this machine)" in r.value for r in section[0].rows))
+
+    def test_a_zero_request_window_has_no_latency_section(self):
+        m = cli.analyse([], window_hours=1)
+        report = cli.build_report(m, "headline", [])
+        self.assertEqual([s for s in report.sections if s.title == "latency"], [])
+
+    def test_blocked_durations_never_enter_a_completed_cell(self):
+        m = cli.analyse(self._reqs(6) + self._reqs(6, outcome="admission_timeout",
+                                                   duration=60.3),
+                        window_hours=24)
+        cells = {c["cell"]: c for c in m["latency_by"]["by_tier_model"]}
+        self.assertEqual(cells["interactive / glm-5.3"]["n"], 6)
+        self.assertLess(cells["interactive / glm-5.3"]["p90"], 60.0)
+
+
+class TheChartHasTwoPanels(unittest.TestCase):
+    """Two panels, one time axis: the account's blocking above, this
+    machine's concurrency below, each with its own unit and scale."""
+
+    def _scene_text(self, days):
+        from datetime import datetime, timedelta, timezone
+        from luna_doctor import sources
+        now = datetime.now(timezone.utc)
+        # Spread across days, because the account reports per UTC day: a window
+        # inside one day has exactly one daily point to draw.
+        step = 4 * 86400 / 8
+        reqs = [cli.Request(harness="pi", session="s", model="glm-5.3", tier="interactive",
+                            start=now.timestamp() - 4 * 86400 + i * step,
+                            end=now.timestamp() - 4 * 86400 + i * step + 20,
+                            outcome="completed")
+                for i in range(8)]
+        m = cli.analyse(reqs, window_hours=7)
+        entries = [{"day": (now - timedelta(days=i + 1)).strftime("%Y-%m-%d"),
+                    "accepted": 10, "deferred": 0, "denied": 0,
+                    "denied_after_wait": daw} for i, daw in enumerate(days)]
+        cap = sources.Capacity(admission=sources.CapacityAdmission(last_7d=entries))
+        scene = cli.build_chart_scene(reqs, m, 24 * 7, capacity=None, account=cap)
+        return " ".join(getattr(shape, "s", "") for shape in scene.shapes)
+
+    def test_the_account_panel_names_what_it_draws(self):
+        text = self._scene_text([0, 6, 0, 12])
+        self.assertIn("blocked requests, per complete UTC day", text)
+        self.assertIn("denied after waiting (account)", text)
+
+    def test_a_quiet_week_says_so_instead_of_drawing_a_flat_line(self):
+        text = self._scene_text([0, 0, 0])
+        self.assertIn("no request denied after waiting", text)
+
+    def test_no_admission_days_says_the_account_has_none(self):
+        from luna_doctor import sources
+        reqs = [cli.Request(harness="pi", session="s", model="glm-5.3", tier="interactive",
+                            start=1_700_000_000.0, end=1_700_000_020.0,
+                            outcome="completed")]
+        m = cli.analyse(reqs, window_hours=7)
+        scene = cli.build_chart_scene(reqs, m, 168, capacity=None,
+                                      account=sources.Capacity())
+        text = " ".join(getattr(shape, "s", "") for shape in scene.shapes)
+        self.assertIn("no admission days", text)
