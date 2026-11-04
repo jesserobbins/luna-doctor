@@ -498,3 +498,42 @@ class TheArchiveIsRead(unittest.TestCase):
         self.assertTrue(out["readable"])
         self.assertEqual(out["reason"], "no closed hour inside the window")
         self.assertEqual(out["buckets"], [])
+
+
+class TheTrendSurvivesOddWindows(unittest.TestCase):
+    """A request that started before the window's first completion.
+
+    A long request can begin well before the earliest completion in the window,
+    so its span begins left of column zero. Clamping only the right end put a
+    negative index into the in-flight list and the report died with an
+    IndexError. Jesse hit this on a real run.
+    """
+
+    def test_a_request_starting_before_the_window_does_not_crash(self):
+        reqs = [cli.Request(harness="pi", session="s", model="glm-5.3",
+                            tier="interactive", start=1_700_000_000.0,
+                            end=1_700_009_000.0, outcome="completed")]
+        for i in range(12):
+            reqs.append(cli.Request(harness="pi", session="s", model="glm-5.3",
+                                    tier="interactive",
+                                    start=1_700_008_000.0 + i * 5,
+                                    end=1_700_008_100.0 + i * 5,
+                                    outcome="completed"))
+        m = cli.analyse(reqs, 1)
+        text, worst = cli.trend_summary(m, reqs)      # must not raise
+        self.assertTrue(text)
+        report = cli.build_report(m, "headline", [], reqs=reqs)
+        self.assertTrue([s for s in report.sections if s.title == "trend"])
+
+    def test_a_broken_trend_degrades_and_never_kills_the_report(self):
+        from unittest import mock
+        reqs = [cli.Request(harness="pi", session="s", model="glm-5.3",
+                            tier="interactive", start=1_700_000_000.0,
+                            end=1_700_000_060.0, outcome="completed")]
+        m = cli.analyse(reqs, 1)
+        with mock.patch.object(cli, "trend_summary", side_effect=RuntimeError("boom")):
+            report = cli.build_report(m, "headline", [], reqs=reqs)
+        trend = [s for s in report.sections if s.title == "trend"][0]
+        self.assertIn("the trend could not be read in this window", trend.rows[0].value)
+        self.assertTrue([s for s in report.sections if s.title == "traffic"],
+                        "the rest of the report must still be there")

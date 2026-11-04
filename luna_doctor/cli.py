@@ -2801,7 +2801,15 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
             "bad" if c["admission_timeout"] else "good"))
 
     trend_rows: list[report.Row] = []
-    trend_text, worst = trend_summary(m, reqs or [])
+    # The trend is additive enrichment, so a failure in it must degrade and
+    # never take the report with it. The IndexError of 2026-11-04 was one
+    # unclamped column index; a report that dies on that teaches the reader
+    # less than a report that says it could not read the trend.
+    try:
+        trend_text, worst = trend_summary(m, reqs or [])
+    except Exception as e:
+        trend_text, worst = (f"the trend could not be read in this window "
+                             f"({type(e).__name__}). The rest of the report stands."), []
     spark = duration_sparkline(m, reqs or [])
     if spark:
         trend_rows.append(report.Row("shape", spark))
@@ -4232,17 +4240,25 @@ def trend_summary(m: dict, reqs: list) -> tuple[str, list]:
     n_cols = max(3, min(60, int((hi - lo) // 10) or 3))
     per_col: list[list[float]] = [[] for _ in range(n_cols)]
     inflight = [0] * n_cols
+    def column(when: float) -> int:
+        """The column for an instant, clamped to the grid at both ends.
+
+        A long request can start before the earliest completion in the window,
+        which lands left of column zero. Clamping only the right end put a
+        negative index into the list and killed the report.
+        """
+        k = int((when - lo) / max(1e-9, (hi - lo)) * n_cols)
+        return min(n_cols - 1, max(0, k))
+
     for r in done:
-        k = int((r.end - lo) / max(1e-9, (hi - lo)) * n_cols)
-        per_col[min(n_cols - 1, k)].append(r.duration)
+        per_col[column(r.end)].append(r.duration)
     for r in timed(reqs):
         if r.start is None:
             continue
         end = r.end if r.end is not None else r.start
         t = r.start
         while t <= end:
-            k = int((t - lo) / max(1e-9, (hi - lo)) * n_cols)
-            inflight[min(n_cols - 1, k)] += 1
+            inflight[column(t)] += 1
             t += max(10.0, (hi - lo) / n_cols)
     p90s = [pct(v, 90) if len(v) >= 3 else None for v in per_col]
     third = max(1, n_cols // 3)
