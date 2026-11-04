@@ -263,7 +263,31 @@ The tool redacts home paths, email addresses, and long opaque tokens before it
 writes the block. You can put the block in a support ticket or an issue, and the
 block does not carry the layout of your machine.
 
-### `chart`: one picture
+### `chart`: three panels, one time axis
+
+The picture is built to answer one question per panel, and each panel carries
+its own unit:
+
+| panel | what it shows | the question |
+|---|---|---|
+| top | what happened to each request, counted per column: served, demoted, refused at admission, refused at the account's limit | did the account refuse me, and when |
+| middle | request duration as a heatmap: log-scale rows, time columns at the measurement resolution, colour as the count per cell, with p50 and p90 traced over it and a completion bar beneath | when did it go wrong, and in what shape |
+| bottom | concurrent requests in flight, split by model and scheduling class, with the priority-concurrency rule | how far over the width did this machine go |
+
+A percentile line alone cannot separate "everything got three times slower"
+from "one percent started taking twenty minutes". Those are different faults
+with different fixes. The heatmap separates them: a vertical stripe is a change at
+one moment, a horizontal band is several modes of behaviour, a diagonal drift is
+a slow shift. The completion bar is not decoration, because a heatmap with no
+sample count invites reading noise as structure.
+
+Only completed requests enter the duration distribution. A refusal that fails in
+200 ms pulls the percentiles down, an admission timeout that fails after 120 s
+pulls them up, and neither is a statement about how slow the served traffic was.
+
+The account's own counters are day-granular, so they read as a sentence in the
+footer instead of a step line: a daily count drawn on an hourly axis asserts a
+step function the data does not contain.
 
 ![Seven days of concurrent requests: the stack peaks above the dashed
 priority-concurrency rule, and red flare ticks mark requests the gateway

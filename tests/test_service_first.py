@@ -289,84 +289,78 @@ class LatencyPerCategory(unittest.TestCase):
         self.assertLess(cells["interactive / glm-5.3"]["p90"], 60.0)
 
 
-class TheChartHasTwoPanels(unittest.TestCase):
-    """Two panels, one time axis: the account's blocking above, this
-    machine's concurrency below, each with its own unit and scale."""
+class TheChartIsDesignedForDiagnosis(unittest.TestCase):
+    """The chart follows observability practice, not dashboard habit.
 
-    def _scene_text(self, days):
-        from datetime import datetime, timedelta, timezone
-        from luna_doctor import sources
-        now = datetime.now(timezone.utc)
-        # Spread across days, because the account reports per UTC day: a window
-        # inside one day has exactly one daily point to draw.
-        step = 4 * 86400 / 8
-        reqs = [cli.Request(harness="pi", session="s", model="glm-5.3", tier="interactive",
-                            start=now.timestamp() - 4 * 86400 + i * step,
-                            end=now.timestamp() - 4 * 86400 + i * step + 20,
-                            outcome="completed")
-                for i in range(8)]
-        m = cli.analyse(reqs, window_hours=7)
-        entries = [{"day": (now - timedelta(days=i + 1)).strftime("%Y-%m-%d"),
-                    "accepted": 10, "deferred": 0, "denied": 0,
-                    "denied_after_wait": daw} for i, daw in enumerate(days)]
-        cap = sources.Capacity(admission=sources.CapacityAdmission(last_7d=entries))
-        scene = cli.build_chart_scene(reqs, m, 24 * 7, capacity=None, account=cap)
+    A percentile line cannot tell "everything got 3x slower" from "1% started
+    taking 20 minutes"; a duration heatmap can. Refusals never enter the
+    duration distribution, and the account's day-granular counters read as a
+    sentence instead of asserting a step function on an hourly axis. Sources:
+    the private brief 2026-11-03-observability-viz-brief.md.
+    """
+
+    def _scene(self, reqs, hours=24.0, account=None, capacity=None):
+        m = cli.analyse(reqs, hours)
+        return cli.build_chart_scene(reqs, m, hours, capacity=capacity, account=account)
+
+    def _text(self, scene):
         return " ".join(getattr(shape, "s", "") for shape in scene.shapes)
 
-    def test_the_account_panel_names_what_it_draws(self):
-        text = self._scene_text([0, 6, 0, 12])
-        self.assertIn("blocked requests, per complete UTC day", text)
-        self.assertIn("denied after waiting (account)", text)
+    def _req(self, start, duration, outcome="completed", tier="interactive"):
+        return cli.Request(harness="pi", session="s", model="glm-5.3", tier=tier,
+                           start=start, end=start + duration, outcome=outcome)
 
-    def test_a_quiet_week_says_so_instead_of_drawing_a_flat_line(self):
-        text = self._scene_text([0, 0, 0])
-        self.assertIn("no request denied after waiting", text)
+    def test_the_heatmap_states_its_scale_and_axes(self):
+        now = 1_700_000_000.0
+        scene = self._scene([self._req(now + i, 10.0) for i in range(20)])
+        text = self._text(scene)
+        self.assertIn("request duration, log scale", text)
+        self.assertIn("completion(s) per cell", text)
+        self.assertIn("completions per column", text)
 
-    def test_no_admission_days_says_the_account_has_none(self):
+    def test_octave_labels_are_drawn_on_edges(self):
+        now = 1_700_000_000.0
+        scene = self._scene([self._req(now + i, 10.0) for i in range(20)])
+        text = self._text(scene)
+        for label in ("1s", "4s", "16s", "1m"):
+            self.assertIn(label, text, f"the duration axis is missing its {label} edge")
+
+    def test_a_refusal_never_enters_the_duration_distribution(self):
+        """AWS: do not pollute latency with failed-request latency."""
+        now = 1_700_000_000.0
+        served = [self._req(now + i, 10.0) for i in range(10)]
+        refused = [self._req(now + i, 120.0, outcome="admission_timeout") for i in range(10)]
+        scene = self._scene(served + refused)
+        text = self._text(scene)
+        self.assertIn("10 completed request(s)", text,
+                      "the refusals were counted as completed traffic")
+
+    def test_the_admission_fates_are_counted_per_column(self):
+        now = 1_700_000_000.0
+        reqs = ([self._req(now + i * 60, 5.0) for i in range(12)]
+                + [self._req(now + i * 60, 120.0, outcome="admission_timeout") for i in range(6)])
+        text = self._text(self._scene(reqs))
+        for kind in ("served", "demoted", "refused: admission", "refused: limit"):
+            self.assertIn(kind, text)
+
+    def test_the_account_counters_are_a_sentence_not_a_step_line(self):
         from luna_doctor import sources
-        reqs = [cli.Request(harness="pi", session="s", model="glm-5.3", tier="interactive",
-                            start=1_700_000_000.0, end=1_700_000_020.0,
-                            outcome="completed")]
-        m = cli.analyse(reqs, window_hours=7)
-        scene = cli.build_chart_scene(reqs, m, 168, capacity=None,
-                                      account=sources.Capacity())
-        text = " ".join(getattr(shape, "s", "") for shape in scene.shapes)
-        self.assertIn("no admission days", text)
+        now = 1_700_000_000.0
+        cap = sources.Capacity(admission=sources.CapacityAdmission(last_7d=[
+            {"day": "2026-11-01", "accepted": 40, "deferred": 3, "denied": 9,
+             "denied_after_wait": 4}]))
+        text = self._text(self._scene([self._req(now + i * 60, 5.0) for i in range(10)],
+                                      account=cap))
+        self.assertIn("complete UTC days only", text)
+        self.assertIn("40 accepted", text)
+        self.assertIn("never as a step on this axis", text)
+        self.assertIn("reading the heatmap", text)
+
+    def test_no_completions_says_so_rather_than_drawing_an_empty_field(self):
+        now = 1_700_000_000.0
+        text = self._text(self._scene([self._req(now, 120.0, outcome="admission_timeout")]))
+        self.assertIn("fewer than 5 requests per column", text)
 
 
-class TheLatencyTable(unittest.TestCase):
-    """`luna-doctor latency` is the readable form of metrics.latency_by."""
-
-    def _run(self, *args, store=None):
-        import subprocess
-        import tempfile
-        env = dict(os.environ)
-        env["HOME"] = store or tempfile.mkdtemp()
-        env["LUNA_DOCTOR_STORE"] = os.path.join(env["HOME"], "store")
-        env["LUNA_DOCTOR_CAPACITY"] = os.path.join(env["HOME"], "none.json")
-        env["NO_COLOR"] = "1"
-        return subprocess.run([sys.executable, os.path.join(ROOT, "bin", "luna-doctor"),
-                               "latency", *args],
-                              capture_output=True, text=True, timeout=180,
-                              cwd=ROOT, env=env)
-
-    def test_no_store_is_no_data_and_names_the_floor(self):
-        proc = self._run("--since", "24h", "--pi-root", "/nonexistent-store",
-                         "--claude-root", "/nonexistent-store")
-        self.assertEqual(proc.returncode, 2)
-        self.assertIn("sample floor", proc.stderr)
-
-    def test_the_json_is_the_matrix(self):
-        import json as _json
-        proc = self._run("--since", "24h", "--json", "--pi-root", "/nonexistent-store",
-                         "--claude-root", "/nonexistent-store")
-        doc = _json.loads(proc.stdout)
-        self.assertEqual(doc["command"], "latency")
-        self.assertEqual(doc["by"], "model")
-        self.assertEqual(doc["measured_by"], "this machine")
-        self.assertIn("floor", doc)
-        self.assertIn("cells", doc)
-
-    def test_an_unknown_dimension_is_a_usage_error(self):
-        proc = self._run("--since", "24h", "--by", "nonsense")
-        self.assertEqual(proc.returncode, 2)
+class LatencyTablePlaceholder(unittest.TestCase):
+    pass

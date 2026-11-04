@@ -382,87 +382,211 @@ def _panel_series(reqs, bands, band_of, t0, t1, n_cols):
     return means, colmax, state["peak"], state["peak_t"]
 
 
-def _account_panel(shapes, *, days, t0, t1, px, plot_w, y0, y1, span):
-    """The account's own blocked counts, as a step line over the same axis.
 
-    Two panels, one time axis: the top says what the service recorded, the
-    bottom what this machine contributed, and neither is summed or compared
-    across the two. `days` are complete UTC days and their counts are the
-    account's; a window shorter than a day has no daily point to plot, so the
-    panel says so rather than inventing a line between two days.
 
-    The line is `denied_after_wait` - parked and then refused - because that is
-    the moment the system blocked. `denied` rides beneath it in a lighter tone.
+DURATION_FLOOR_S = 1.0
+DURATION_CEIL_S = 2048.0
+
+RAMP_LO = (243, 246, 251)     # #f3f6fb, an empty cell reads as paper
+RAMP_HI = (23, 63, 143)       # #173f8f, the priority hue
+
+
+def _ramp(t: float) -> str:
+    """One hue, linear in count: t in [0, 1] -> #rrggbb."""
+    t = max(0.0, min(1.0, t))
+    r, g, b = (round(RAMP_LO[i] + (RAMP_HI[i] - RAMP_LO[i]) * t) for i in range(3))
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+def _column_seconds(span: float) -> int:
+    """The column width, in whole seconds, at the measurement resolution.
+
+    Concurrency is reconstructed per minute, so a finer column would draw
+    interpolation as if it were data. Longer windows widen the column and the
+    axis says which width it used.
     """
-    height = y1 - y0
-    if not days:
-        shapes.append(Text(px, y0 + 14,
-                           "the account reports no admission days for this window "
-                           "(a window under a day has no daily point to plot)",
-                           size=10, fill="#6b7280"))
-        return False
-    # Only the days the window covers set the scale, and only one scale is
-    # drawn: a 467-request day a month away must not flatten this week's line
-    # against the baseline.
-    inside = []
-    for day, entry in days:
-        try:
-            epoch = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
-        except (TypeError, ValueError):
-            continue
-        centre = epoch + 43200
-        # A daily count covers the whole UTC day, so a window that touches any
-        # part of that day may use it. The point is placed at the day's centre
-        # and clamped into the visible span, because a one-hour window inside a
-        # day still has one day to report.
-        if epoch <= t1 and epoch + 86400 >= t0:
-            inside.append((day, entry, min(max(centre, t0), t1)))
-    if not inside:
-        shapes.append(Text(px, y0 + 14,
-                           "the account reports no complete UTC day that touches this "
-                           "window, so it has no daily point to plot here (account)",
-                           size=10, fill="#6b7280"))
-        return False
-    values = []
-    for _day, entry, _centre in inside:
-        daw = entry.get("denied_after_wait")
-        if isinstance(daw, int) and not isinstance(daw, bool):
-            values.append(daw)
-    if not any(values):
-        shapes.append(Text(px, y0 + 14,
-                           "the account recorded no request denied after waiting on "
-                           "the days inside this window (account)",
-                           size=10, fill="#6b7280"))
-        return False
-    top = max(values + [1])
-    shapes.append(Text(px, y0 + 11, "the account's blocked requests, per complete UTC day",
-                       size=10.5, fill="#374151"))
-    shapes.append(Text(px, y0 + 25, "denied after waiting (account)", size=9.5, fill="#dc2626"))
-    # baseline
-    shapes.append(Line(px, y1, px + plot_w, y1, stroke="#e5e7eb"))
-    prev = None
-    for day, entry, centre in inside:
-        frac = (centre - t0) / span
-        if frac < 0 or frac > 1:
-            continue
-        x = px + frac * plot_w
-        daw = entry.get("denied_after_wait")
-        value = daw if isinstance(daw, int) and not isinstance(daw, bool) else 0
-        y = y1 - (value / top) * (height - 34)
-        if prev is not None:
-            shapes.append(Line(prev[0], prev[1], x, prev[1], stroke="#dc2626",
-                               stroke_width=1.4))
-            shapes.append(Line(x, prev[1], x, y, stroke="#dc2626", stroke_width=1.4))
-        shapes.append(Circle(x, y, 2.2, fill="#dc2626"))
-        prev = (x, y)
-    if prev is not None:
-        shapes.append(Line(prev[0], prev[1], px + plot_w, prev[1], stroke="#dc2626",
-                           stroke_width=1.4))
-    shapes.append(Text(px - 8, y0 + 34, str(top), size=9, fill="#6b7280", anchor="end"))
-    return True
+    if span <= 6 * 3600:
+        return 60
+    if span <= 48 * 3600:
+        return 300
+    return 900
 
 
-def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None,
+def _buckets():
+    """Log2 duration edges, two per octave, 1 s to 2048 s."""
+    edges, v = [], DURATION_FLOOR_S
+    step = 2 ** 0.5
+    while v < DURATION_CEIL_S:
+        edges.append(v)
+        v *= step
+    edges.append(DURATION_CEIL_S)
+    return edges
+
+
+def _latency_heatmap(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols,
+                     col_s):
+    """Latency as a field, not a line: rows are duration, columns are time.
+
+    Only completed requests enter the distribution. A refusal that fails in
+    200 ms and an admission timeout that fails after 120 s would otherwise move
+    the percentiles for reasons that have nothing to do with how slow the
+    served traffic was. Returns (drawn_cells, count_by_column, p50, p90).
+    """
+    edges = _buckets()
+    rows = len(edges) - 1
+    counts = [[0] * rows for _ in range(n_cols)]
+    per_column: list[list[float]] = [[] for _ in range(n_cols)]
+    used = 0
+    for r in reqs:
+        if getattr(r, "outcome", "") != "completed":
+            continue
+        start, end = getattr(r, "start", None), getattr(r, "end", None)
+        if start is None or end is None or end <= start:
+            continue
+        k = int((end - t0) / max(1e-9, (t1 - t0)) * n_cols)
+        if not 0 <= k < n_cols:
+            continue
+        d = end - start
+        per_column[k].append(d)
+        used += 1
+        for i in range(rows):
+            if edges[i] <= d < edges[i + 1]:
+                counts[k][i] += 1
+                break
+        else:
+            counts[k][rows - 1] += 1
+    peak = max([c for col in counts for c in col] or [0])
+    row_h = (y1 - y0) / rows
+    drawn = 0
+    for k in range(n_cols):
+        x = px + plot_w * k / n_cols
+        w = max(1.0, plot_w / n_cols - 0.4)
+        for i in range(rows):
+            n = counts[k][i]
+            if not n:
+                continue
+            y = y1 - (i + 1) * row_h
+            shapes.append(Rect(x, y, w, row_h - 0.3, fill=_ramp(n / peak)))
+            drawn += 1
+    # Every fourth edge is a factor of four: 1s, 4s, 16s, 64s, 4m, 17m, 1h.
+    # A label per sqrt(2) step is unreadable at 13 px, and a label that is not
+    # on an edge misstates where the boundary is.
+    for i in range(0, rows + 1, 4):
+        y = y1 - i * row_h
+        shapes.append(Text(px - 8, y + 3, _duration_label(edges[min(i, rows)]),
+                           size=9, fill=C["muted"], anchor="end"))
+    shapes.append(Text(px, y0 - 8,
+                       f"request duration, log scale \u00b7 {used} completed "
+                       f"request(s) \u00b7 p50 and p90 over the same column \u00b7 "
+                       f"colour: 0 to {peak} completion(s) per cell",
+                       size=10.5, fill=C["text"]))
+    p50 = [pct(v, 50) if len(v) >= 3 else None for v in per_column]
+    p90 = [pct(v, 90) if len(v) >= 3 else None for v in per_column]
+    for series, colour in ((p50, "#111827"), (p90, "#dc2626")):
+        prev = None
+        for k, value in enumerate(series):
+            if value is None:
+                prev = None
+                continue
+            if value < DURATION_FLOOR_S or value > DURATION_CEIL_S:
+                prev = None
+                continue
+            pos = (value / DURATION_FLOOR_S) ** 0.5
+            o = 1.0
+            while o * o < pos:
+                o *= 2 ** 0.5
+            frac = 0.0
+            y = y1 - min(rows, max(0.0, _log2_index(value, edges))) * row_h
+            x = px + plot_w * (k + 0.5) / n_cols
+            if prev is not None:
+                shapes.append(Line(prev[0], prev[1], x, y, stroke=colour,
+                                   stroke_width=1.2))
+            prev = (x, y)
+    shapes.append(Text(px, y0 + 6, "p50", size=9, fill="#111827"))
+    shapes.append(Text(px + 26, y0 + 6, "p90", size=9, fill="#dc2626"))
+    return drawn, [len(v) for v in per_column]
+
+
+def _log2_index(value: float, edges: list) -> float:
+    """Fractional row index for a duration, so the line lands between rows."""
+    if value <= edges[0]:
+        return 0.0
+    for i in range(len(edges) - 1):
+        if edges[i] <= value < edges[i + 1]:
+            span = edges[i + 1] - edges[i]
+            return i + (value - edges[i]) / span
+    return float(len(edges) - 1)
+
+
+def _duration_label(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.0f}h"
+
+
+def _admission_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols):
+    """What happened to each request, counted per column: the local fate rows.
+
+    Served, demoted to background, refused at admission, refused at the
+    account's limit. Counts, not rates, because the denominator per column is
+    small. This panel works at any window width, which is what the account's
+    day-granular counters cannot do.
+    """
+    kinds = ("served", "demoted", "refused: admission", "refused: limit")
+    counts = {k: [0] * n_cols for k in kinds}
+    for r in reqs:
+        start, end = getattr(r, "start", None), getattr(r, "end", None)
+        if start is None and end is None:
+            continue
+        t = end if end is not None else start
+        k = int((t - t0) / max(1e-9, (t1 - t0)) * n_cols)
+        if not 0 <= k < n_cols:
+            continue
+        outcome = getattr(r, "outcome", "")
+        if outcome in ("admission_timeout",):
+            counts["refused: admission"][k] += 1
+        elif outcome in ("org_concurrency_limit",):
+            counts["refused: limit"][k] += 1
+        elif getattr(r, "demoted", False):
+            counts["demoted"][k] += 1
+        elif outcome == "completed":
+            counts["served"][k] += 1
+    totals = {k: sum(v) for k, v in counts.items()}
+    peak = max([sum(counts[k][i] for k in kinds) for i in range(n_cols)] or [0])
+    colour_of = {"served": "#cfe2fb", "demoted": "#a78bfa",
+                 "refused: admission": "#dc2626", "refused: limit": "#991b1b"}
+    if peak < 5:
+        shapes.append(Text(px, y0 + 12,
+                           "fewer than 5 requests per column here \u00b7 totals: "
+                           + " \u00b7 ".join(f"{k} {totals[k]}" for k in kinds),
+                           size=10, fill=C["muted"]))
+        shapes.append(Line(px, y1, px + plot_w, y1, stroke=C["grid"]))
+        return
+    shapes.append(Text(px, y0 - 6, "what happened to each request, per column "
+                                   "(this machine)", size=10.5, fill=C["text"]))
+    shapes.append(Line(px, y1, px + plot_w, y1, stroke=C["grid"]))
+    for i in range(n_cols):
+        stack = 0
+        x = px + plot_w * i / n_cols
+        w = max(1.0, plot_w / n_cols - 0.4)
+        for kind in kinds:
+            n = counts[kind][i]
+            if not n:
+                continue
+            h = (n / peak) * (y1 - y0 - 14)
+            shapes.append(Rect(x, y1 - stack - h, w, h, fill=colour_of[kind]))
+            stack += h
+    shapes.append(Text(px + plot_w, y0 + 4, f"peak {peak}/column", size=9,
+                       fill=C["muted"], anchor="end"))
+    x = px
+    for kind in kinds:
+        shapes.append(Text(x, y0 + 10, kind, size=9, fill=colour_of[kind]))
+        x += 22 + 5.2 * len(kind)
+
+
+def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
                       account=None):
     """Collect the chart as an ordered list of shapes.
 
@@ -524,8 +648,12 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None,
         acct_days = sources.capacity_admission_days(account)
     except Exception:
         acct_days = []
-    account_panel_h = 104
-    top = 98 + account_panel_h
+    fate_panel_h = 92
+    heat_y0 = 98 + fate_panel_h + 30
+    heat_y1 = heat_y0 + 210
+    count_y0 = heat_y1 + 6
+    count_y1 = count_y0 + 22
+    top = count_y1 + 26
     bot = max(top + 100, height - 132)
     xlab_y = bot + 20
 
@@ -534,9 +662,8 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None,
     plot_w = max(120.0, width - pad_l - pad_r - gutter)
     px = pad_l
 
-    n_cols = max(48, min(480, round(span / 240)))
-    n_cols = max(24, min(n_cols, int(plot_w)))
-    col_s = span / n_cols
+    col_s = float(_column_seconds(span))
+    n_cols = max(24, min(int(plot_w), int(span / col_s)))
 
     # one series for the whole machine: the stack's height is the account
     # total, and one sweep computes every band's share of it
@@ -582,13 +709,32 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None,
     shapes = []
     add = shapes.append
 
-    # The account panel first, so the picture reads service then contribution.
-    # It shares the time axis and nothing else: its own unit, its own scale.
-    drew_account = _account_panel(shapes, days=acct_days, t0=t0, t1=t1, px=px,
-                                  plot_w=plot_w, y0=98,
-                                  y1=98 + account_panel_h - 14, span=span)
-    if drew_account:
-        add(Line(px, top - 8, px + plot_w, top - 8, stroke="#e5e7eb"))
+    # Top: what happened to each request in the same columns. Counts, from
+    # these logs, at a resolution the axis can carry - the account's own
+    # counters are day-granular and read as a sentence in the footer instead.
+    _admission_panel(shapes, reqs=reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
+                     y0=98, y1=98 + fate_panel_h - 16, n_cols=n_cols)
+    add(Line(px, 98 + fate_panel_h - 8, px + plot_w, 98 + fate_panel_h - 8,
+             stroke=C["grid"]))
+
+    # Middle: the latency field. Rows are duration on a log scale, columns are
+    # time, colour is how many completions landed in that cell, and the count
+    # bar underneath says how much evidence each column holds.
+    _drawn, per_col_counts = _latency_heatmap(
+        shapes, reqs=timed_reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
+        y0=heat_y0, y1=heat_y1, n_cols=n_cols, col_s=col_s)
+    col_peak = max(per_col_counts or [0])
+    shapes.append(Text(px, count_y0 - 4, "completions per column", size=9,
+                       fill=C["muted"]))
+    for k, n in enumerate(per_col_counts):
+        if not n:
+            continue
+        h = (n / max(1, col_peak)) * (count_y1 - count_y0)
+        x = px + plot_w * k / n_cols
+        shapes.append(Rect(x, count_y1 - h, max(1.0, plot_w / n_cols - 0.4), h,
+                           fill="#9ca3af"))
+    shapes.append(Line(px, count_y1, px + plot_w, count_y1, stroke=C["axis"]))
+    add(Line(px, top - 10, px + plot_w, top - 10, stroke=C["grid"]))
 
     # ---- title block ------------------------------------------------------
     add(Text(pad_l, title_y, "luna-doctor \u00b7 last %s" % human_window(hours),
@@ -917,8 +1063,26 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None,
     # (many models' measured deadlines, a long declared-plan note) extends
     # the canvas downward instead of clipping. The plot above keeps its
     # geometry; only the footer band moves.
+    acct_line = ""
+    try:
+        days = sources.capacity_admission_days(account)
+    except Exception:
+        days = []
+    if days:
+        denied = sum((d.get("denied") or 0) for _day, d in days if isinstance(d.get("denied"), int))
+        daw = sum((d.get("denied_after_wait") or 0) for _day, d in days
+                  if isinstance(d.get("denied_after_wait"), int))
+        acc = sum((d.get("accepted") or 0) for _day, d in days if isinstance(d.get("accepted"), int))
+        acct_line = (f"account, complete UTC days only: {acc} accepted, {denied} denied, "
+                     f"{daw} denied after waiting \u2014 a day-granular count, so it reads "
+                     f"as a sentence here and never as a step on this axis")
+    key_line = ("reading the heatmap: a vertical stripe is a change at one time, a "
+                "horizontal band is several modes at once, a diagonal drift is a "
+                "slow shift")
     rows = []
-    for line in (line1, line2, line3, line4):
+    for line in (line1, line2, line3, line4, acct_line, key_line):
+        if not line:
+            continue
         rows.extend(_wrap_to_width(line, width - pad_l - pad_r, 10))
     need = xlab_y + 16 + (len(rows) - 1) * 16 + 24
     if need > height:
@@ -931,7 +1095,7 @@ def build_chart_scene(reqs, m, hours, width=1120, height=640, capacity=None,
     return Scene(width, height, C["bg"], shapes, font=CHART_FONT)
 
 
-def svg_chart(reqs, m, hours, width=1120, height=640, capacity=None, account=None):
+def svg_chart(reqs, m, hours, width=1120, height=780, capacity=None, account=None):
     return svg_from(build_chart_scene(reqs, m, hours, width, height, capacity,
                                       account=account))
 

@@ -4033,7 +4033,7 @@ def main(argv: list[str] | None = None) -> int:
     ch.add_argument("--no-image", action="store_true",
                     help="do not write the PNG beside the SVG")
     ch.add_argument("--width", type=int, default=1120)
-    ch.add_argument("--height", type=int, default=640)
+    ch.add_argument("--height", type=int, default=780)
     ch.add_argument("--open", action="store_true", help="open the SVG when it is written")
     ch.add_argument("--pi-root", action="append", default=None, metavar="DIR",
                     help="pi-format store to read instead of the default (repeatable)")
