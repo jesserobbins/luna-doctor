@@ -17,6 +17,31 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.2] - 2026-11-04
+
+### Changed
+
+- The chart was rebuilt on observability practice. The p90 line is replaced by a
+  duration heatmap: log-scale rows labelled on octave edges, columns at the
+  measurement resolution, colour as the count in each cell, p50 and p90 traced
+  over it, and a completion bar beneath. A percentile line cannot separate
+  "everything got three times slower" from "one percent started taking twenty
+  minutes", and those need different fixes.
+
+- Only completed requests enter the duration distribution. Refusals used to
+  enter it, so a 200 ms 429 pulled the percentile down and a 120 s admission
+  timeout pulled it up, and neither said anything about the served traffic.
+
+- The account's day-granular counters read as a sentence in the footer instead
+  of a step line, because a daily count on an hourly axis asserts a step
+  function the data does not contain. The top panel now counts what happened to
+  each request in the same columns: served, demoted, refused at admission,
+  refused at the account's limit.
+
+- The footer carries the heatmap reading key: a vertical stripe is a change at
+  one moment, a horizontal band is several modes at once, a diagonal drift is a
+  slow shift.
+
 ## [0.6.0-alpha.1] - 2026-11-03
 
 ### Added
