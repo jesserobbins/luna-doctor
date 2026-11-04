@@ -444,7 +444,7 @@ class ClaudeCodeRules(unittest.TestCase):
         rows = rows_of(snap)
         out = find(rows, sizing.RULE_OUTPUT_EXCEEDS_MAX, status="informational")
         self.assertEqual(len(out), 1)
-        self.assertIn("CLAUDE_CODE_MAX_OUTPUT_TOKENS unset; the shipped default "
+        self.assertIn("CLAUDE_CODE_MAX_OUTPUT_TOKENS unset. The shipped default "
                       "is unverified", out[0]["detail"])
         self.assertEqual(findings(rows), [])
 
@@ -557,7 +557,7 @@ class CodexRules(unittest.TestCase):
         rows = rows_of(snap)
         win = find(rows, sizing.RULE_CODEX_WINDOW, "glm-5.3", "informational")
         self.assertEqual(len(win), 1)
-        self.assertIn("model_context_window unset; the shipped default is "
+        self.assertIn("model_context_window unset. The shipped default is "
                       "unverified", win[0]["detail"])
 
     def test_absent_codex_config_is_silent(self):

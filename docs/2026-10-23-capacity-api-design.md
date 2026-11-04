@@ -1,170 +1,165 @@
-# Capacity API — design (short)
+# Capacity API design (short)
 
 Date: 2026-10-23
-Status: implemented (the capacity-api branch; the precedence below reflects the
-owner's later call: the capacity API is the first authority, `--plan` is the fallback)
-Owner: Jesse (decisions marked "Jesse's call" below were settled in conversation)
+Status: implemented on the capacity-api branch. The precedence below reflects the
+owner's later call: the capacity API is the first authority, and `--plan` is the fallback.
+Owner: Jesse. A decision marked "Jesse's call" below was settled in conversation.
 
 ## Intent
 
-LunaRoute now serves `GET https://api.lunaroute.com/v1/capacity` (documented
-at docs.lunaroute.com/api/capacity/): the account's effective capacity —
-plan, priority lanes, background lanes, overflow routing — plus live
-occupancy, 7d/30d occupancy rollups, and per-day admission outcomes
-(accepted / deferred / denied / denied_after_wait). luna-doctor currently
-*fakes* the one number that matters most: the user types `--plan max` and the
-chart draws 4, a declaration. The API makes the real number available
-(verified live: this account is `apex`, 12 priority / 12 background lanes,
-`overflow_routing: enabled`).
+LunaRoute serves `GET https://api.lunaroute.com/v1/capacity`, documented at
+docs.lunaroute.com/api/capacity/. It reports the account's effective capacity: the plan,
+the priority lane count, the background lane count, and the overflow routing. It also
+reports live occupancy, 7-day and 30-day occupancy rollups, and per-day admission outcomes
+(accepted, deferred, denied, denied_after_wait).
 
-Approach **B**, settled in conversation: capacity enters through the sources
-layer and wires the three highest-value consumers; it does not become a
-dependency of every command.
+Before this change, luna-doctor invented the number that matters most. The user typed
+`--plan max`, and the chart drew 4, which is a declaration. The API makes the real number
+available. This account was verified live: plan `apex`, 12 priority lanes, 12 background
+lanes, `overflow_routing: enabled`.
+
+The approach is B, settled in conversation. Capacity enters through the sources layer and
+wires the three consumers that gain most from it. It does not become a dependency of every
+command.
 
 ## Goals
 
-1. `fetch_capacity()` in `sources.py` beside the existing fetchers, cached to
-   disk, provenance-carrying, degrading to unknown — never zero, never a
+1. `fetch_capacity()` in `sources.py`, beside the existing fetchers. It caches to disk, it
+   carries provenance, and it degrades to unknown. It never degrades to zero and never to a
    default.
-2. The chart's priority rule draws from the account's real `priority_lanes`
-   when a capacity payload is cached or fetchable; the capacity API is the
-   first authority, and `--plan` remains as the fallback declaration for
-   when the API is unreachable.
-3. `analyze` reports the server-side capacity facts next to the local ones —
-   "server limit 12 · local peak 17" — and surfaces `denied_after_wait` as
-   corroboration for the park-deadline class of rejections.
-4. A `capacity` subcommand renders the API's own story (now / config /
-   history / admission) as a first-class report.
+2. The chart's priority rule draws from the account's real `priority_lanes` when a payload is
+   cached or fetchable. The capacity API is the first authority. `--plan` stays as the
+   declaration of last resort for the time when the API is unreachable.
+3. `analyze` reports the server-side capacity facts beside the local ones, in the form
+   "server limit 12 and local peak 17". It also surfaces `denied_after_wait` as
+   corroboration for the park-deadline class of rejection.
+4. A `capacity` subcommand renders the API's own story (now, config, history, admission) as a
+   first-class report.
 
 ## Non-goals
 
-- No rewrite of `analyze`'s verdict model in this pass. Server-side numbers
-  are reported *alongside* local ones; which one leads a headline is Jesse's
-  open call (see Open questions).
-- No new JSON-schema break. `metrics.capacity` is additive; schema stays 4.
+- This pass does not rewrite the verdict model in `analyze`. Server-side numbers are
+  reported beside local ones. The choice of which number leads a headline belongs to Jesse,
+  and the open question below records it.
+- No new JSON schema break. `metrics.capacity` is additive, and the schema stays 4.
 - No polling, no daemon, no webhook. One fetch, one cache.
 
-## Constraints (from the docs, verified against the live endpoint)
+## Constraints, from the docs and verified against the live endpoint
 
-- Host is `api.lunaroute.com` — the account surface, not the inference
-  gateway. Header: `LUNAROUTE-API-KEY: <lr_…>` (documented form; Bearer also
-  works but the doc form is canonical). `lr_platform_` keys are rejected.
-- Rate limit 60/min per key; observed latency 4–17s. **Never fetch
-  per-render.** Cache to disk like the catalog.
-- `now` and `admission` are computed per call; `history` is cached ~5 min
-  server-side. Our own cache TTL: 5 minutes for the whole payload (matches
-  the server's own history cadence; `now` staleness is labelled by
-  `sampled_at`, which we surface rather than hide).
-- **The null contract is load-bearing.** Degraded blocks arrive HTTP 200 with
-  `null` — `config: null`, `now` fields null with `ledger: "unknown"`,
-  `history.tail: null`. `priority_lanes: null` means unknown, not zero;
-  `background_lanes: 0` is a real value (entitled to no overflow). Only a
-  history failure is a hard 500. Every absent value renders as unknown with
-  its reason; the provenance model (`PROV_UNKNOWN` with a reason) already
-  specifies this.
-- `now` covers the priority pool only — overflow traffic does not appear in
-  `in_use`. `admission` covers everything that contends for the shared pool.
-  The report must not present `in_use` as "all traffic".
-- One entry per complete UTC day; today is never included in `admission`
-  (a bursty afternoon must not read as a collapse). Render the date window
-  honestly.
+- The host is `api.lunaroute.com`, which is the account surface and not the inference
+  gateway. The header is `LUNAROUTE-API-KEY: <lr_...>`. That is the documented form. Bearer
+  also works, and the documented form is canonical. A key that starts with `lr_platform_` is
+  rejected.
+- The rate limit is 60 requests per minute per key, and the observed latency is 4 to 17
+  seconds. Never fetch for one render. Cache to disk the way the catalog does.
+- `now` and `admission` are computed on every call. `history` is cached for about 5 minutes
+  on the server. Our cache TTL is 5 minutes for the whole payload, which matches the history
+  cadence of the server. A stale `now` is labelled by `sampled_at`, which we surface rather
+  than hide.
+- The null contract is load-bearing. A degraded block arrives with HTTP 200 and a `null`
+  value: `config: null`, `now` fields null with `ledger: "unknown"`, `history.tail: null`.
+  `priority_lanes: null` means unknown, not zero. `background_lanes: 0` is a real value,
+  which means the account is entitled to no overflow. Only a history failure returns a hard
+  500. Every absent value renders as unknown with its reason, and the provenance model
+  (`PROV_UNKNOWN` with a reason) already specifies this.
+- `now` covers the priority pool only. Overflow traffic does not appear in `in_use`.
+  `admission` covers everything that contends for the shared pool. The report must not
+  present `in_use` as all traffic.
+- `admission` holds one entry per complete UTC day, and it never includes today. A bursty
+  afternoon must not read as a collapse. Render the date window honestly.
 
 ## Provenance mapping
 
 | API fact | provenance |
 |---|---|
-| `config.priority_lanes` etc. | `catalog`-class: fetched, cached — new word **`account`**? No: reuse `catalog` is wrong. Use **`configured`** for plan defaults and a new **`account`** state for fetched-account values. |
+| `config.priority_lanes` and its siblings | new state `account`: fetched from api.lunaroute.com and served from the disk cache |
 
-Jesse's rule from the combined-sources design: five words, no more. But
-"configured" (documented constant) and a fetched account value are genuinely
-different states, and conflating them reintroduces exactly the
-borrowed-constant problem. Add **`account`** ("fetched from
-api.lunaroute.com, served from disk cache") as a sixth word; update
-`PROVENANCE_LEGEND`. This is the one contract addition.
+Jesse's rule from the combined-sources design allows five words and no more. A configured
+constant and a fetched account value are different states, and merging them reintroduces the
+borrowed-constant problem. Add `account` as a sixth word and update `PROVENANCE_LEGEND`.
+This is the one contract addition.
 
 ## What gets wired
 
 ### `sources.py`
 
-- `CAPACITY_URL = "https://api.lunaroute.com/v1/capacity"`, cache at
-  `~/.luna-doctor/capacity.json`, TTL 5 min (overridable like the catalog).
-- `fetch_capacity(allow_network, *, key=None, ttl=None, now=None)` →
-  `Capacity | None`, mirroring `fetch_catalog`'s cache-first shape:
-  fresh cache serves without network; stale serves marked stale when
-  offline; network refresh only when `allow_network` and stale/missing.
-- `@dataclass Capacity` with `now`, `config`, `history`, `admission`
-  sub-objects — fields verbatim from the API, `None`-preserving; plus
-  `fetched_at`, `stale`. No derived convenience getters beyond
-  `priority_lanes` / `background_lanes` / `plan` / `overflow_routing`
-  passthroughs on `config`.
-- The `--online/--offline` flag semantics extend naturally: capacity is
-  fetched only under the same rules as the catalog.
+- `CAPACITY_URL = "https://api.lunaroute.com/v1/capacity"`. The cache sits at
+  `~/.luna-doctor/capacity.json` with a TTL of 5 minutes, which the caller can override the
+  way the catalog allows.
+- `fetch_capacity(allow_network, *, key=None, ttl=None, now=None)` returns `Capacity | None`
+  and mirrors the cache-first shape of `fetch_catalog`. A fresh cache serves without the
+  network. A stale cache serves and is marked stale when the run is offline. A network
+  refresh happens only when `allow_network` is set and the cache is stale or missing.
+- A `@dataclass Capacity` holds `now`, `config`, `history` and `admission` as sub-objects.
+  The fields are verbatim from the API and they preserve `None`. It also holds `fetched_at`
+  and `stale`. There are no derived getters beyond the passthroughs for `priority_lanes`,
+  `background_lanes`, `plan` and `overflow_routing` on `config`.
+- The `--online` and `--offline` flags extend to capacity without a new rule. Capacity is
+  fetched under the same rules as the catalog.
 
 ### `chart`
 
-- Rule line resolution order: cached/fetched `config.priority_lanes` (the
-  capacity API, the first authority) → `--plan` (a user declaration, the
-  fallback for when the API is unreachable or reports no number) → none
-  drawn. Label states which: "priority concurrency 12 (account, plan
-  apex)" vs "(declared via --plan max)" vs "not established; no rule
-  drawn".
-- `--plan` conflicting with the account value is not an error — the
-  account wins, and the report notes that the declaration was ignored
-  because the account reports otherwise.
+- The rule line resolves in this order. First the cached or fetched `config.priority_lanes`
+  from the capacity API, which is the first authority. Second `--plan`, a declaration for
+  the time when the API is unreachable or reports no number. Third nothing, and no rule is
+  drawn. The label states which case applies: "priority concurrency 12 (account, plan apex)",
+  or "(declared via --plan max)", or "not established, no rule drawn".
+- A `--plan` value that conflicts with the account is not an error. The account wins, and
+  the report says that it ignored the declaration because the account reports otherwise.
 
 ### `analyze`
 
-- Additive `metrics.capacity` block: plan, lanes, overflow routing, and —
-  when the window overlaps the API's day range — the server-side admission
-  counts for those days (accepted/deferred/denied/denied_after_wait) next to
-  the local outcome counts.
-- One new adjustment line when `denied_after_wait > 0` in the window's days:
-  the server confirms requests parked and were refused after waiting —
-  this corroborates the 60s park-deadline rejection class locally
-  classified from log strings. Cross-check, don't merge: local and server
-  counts come from different vantage points and may differ.
-- Local peak vs server limit, both shown: "local peak 17 concurrent requests
-  (a lower bound — other machines invisible) · account limit 12 priority".
+- An additive `metrics.capacity` block holds the plan, the lanes, and the overflow routing.
+  When the window overlaps the day range of the API, it also holds the server-side admission
+  counts for those days (accepted, deferred, denied, denied_after_wait) beside the local
+  outcome counts.
+- One adjustment line appears when `denied_after_wait` is above zero in the days of the
+  window. It states that the server confirms requests parked and were refused after waiting,
+  which corroborates the 60-second park-deadline rejection class that the local logs
+  classify from error strings. It is a cross-check and not a merge. Local and server counts
+  come from different vantage points, and they can differ.
+- The local peak and the server limit are both shown, in the form "local peak 17 concurrent
+  requests, a lower bound because other machines are invisible, and account limit 12
+  priority".
 
-### `capacity` subcommand (new)
+### `capacity` subcommand, new
 
-- Renders now / config / 7d / 30d / admission as a report: live occupancy
-  (with `saturated` and `ledger` health shown), plan and lanes, the occupancy
-  rollups, and the admission table with `avg_queue_wait_ms` (null rendered
-  as "no waiting that day", not 0).
-- `--json` envelope like every other command, `contract` included.
-- It is the one command that may fetch live under the normal online rules;
-  everything else consumes the cache.
+- It renders now, config, 7 days, 30 days and admission as one report. The report holds the
+  live occupancy with `saturated` and `ledger` health, the plan and the lanes, the occupancy
+  rollups, and the admission table with `avg_queue_wait_ms`. A null wait renders as "no
+  waiting that day" and never as 0.
+- It takes a `--json` envelope like every other command, and the envelope carries `contract`.
+- It is the one command that can fetch live under the normal online rules. Every other
+  command consumes the cache.
 
 ## Approaches considered
 
-- **A — full wiring everywhere:** rejected for now; makes a slow (4–17s) API
-  a dependency of every surface and needs an offline story per command. The
+- A, full wiring everywhere: rejected for now. It makes a slow API of 4 to 17 seconds a
+  dependency of every surface, and it needs an offline story for every command. The
   consumers above are the ones with a use for the facts today.
-- **B — sources layer + three consumers + a subcommand:** chosen. The
-  layer exists for exactly this; provenance already models the states;
-  `--plan` stops being the only way to get a real number without becoming
-  forbidden.
-- **C — subcommand only:** rejected. Leaves `--plan` declaring numbers the
-  API knows, which is the worst of both once the API exists.
+- B, sources layer plus three consumers plus a subcommand: chosen. The layer exists for this
+  purpose, provenance already models the states, and `--plan` stops being the only way to
+  get a real number without becoming forbidden.
+- C, subcommand only: rejected. It leaves `--plan` declaring numbers that the API already
+  knows, which is the worst of both now that the API exists.
 
 ## Left to the builder
 
-- Exact report layout of the `capacity` subcommand (plain + `--json`).
-- Whether `analyze`'s capacity line sits in `headline` or `adjustments`
-  (builder's call: adjustments — the headline is the local story, the
-  server block is corroboration).
-- Test fixtures: a canned live payload (real one captured 2026-10-23, with
-  null-`avg_queue_wait_ms` days) plus synthetic degraded shapes (null
-  config, null tail, ledger unknown). Every network test monkeypatched; the
-  suite stays offline.
-- The success test: on this machine, `chart --since 24h` with a cached
-  capacity payload draws the rule at 12 labelled account/apex without
-  `--plan`; `analyze --since 7d` shows `denied_after_wait: 16` on Oct 20.
+- The exact report layout of the `capacity` subcommand, in plain text and in `--json`.
+- Whether the capacity line in `analyze` sits in the headline or in the adjustments. The
+  builder's call is the adjustments, because the headline carries the local story and the
+  server block is corroboration.
+- Test fixtures: a canned live payload captured on 2026-10-23, with days whose
+  `avg_queue_wait_ms` is null, plus synthetic degraded shapes (null config, null tail, ledger
+  unknown). Every network test is monkeypatched, and the suite stays offline.
+- The success test: on this machine, `chart --since 24h` with a cached capacity payload draws
+  the rule at 12, labelled account and apex, without `--plan`. `analyze --since 7d` shows
+  `denied_after_wait: 16` on Oct 20.
 
-## Open question for Jesse (does not block the build)
+## Open question for Jesse, which does not block the build
 
-When both exist, which number leads "are you over capacity" — the server's
-`now.in_use`/`limit` (authoritative, priority pool only) or the local
-reconstructed peak (whole story, lower bound)? This pass reports both;
-the headline-ordering choice is deliberately not made.
+When both numbers exist, which one leads the answer to "are you over capacity"? The
+candidates are `now.in_use` and `limit` from the server, which are authoritative and cover
+the priority pool only, and the local reconstructed peak, which covers the whole story and
+is a lower bound. This pass reports both. The ordering of the headline is deliberately not
+decided here.

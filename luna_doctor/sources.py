@@ -240,7 +240,7 @@ class Catalog:
         return sorted(self.models)
 
     def describe(self) -> str:
-        return f"GET {MODELS_URL} ({self.served_from}; fetched {_age_str(self.age_s)} ago)"
+        return f"GET {MODELS_URL} ({self.served_from}. Fetched {_age_str(self.age_s)} ago)"
 
     def to_dict(self) -> dict:
         return {
@@ -450,7 +450,7 @@ def _catalog_with_note(allow_network: bool, *, cache_path: str | None = None,
     path = cache_path or catalog_cache_path()
     cached, cache_err = _read_catalog_cache(path, now, ttl)
     if cached is not None and not cached.stale:
-        cached.note = f"served from cache; fetched {_age_str(cached.age_s)} ago"
+        cached.note = f"served from cache. Fetched {_age_str(cached.age_s)} ago"
         return cached, cached.note
     if not allow_network:
         if cached is not None:
@@ -655,8 +655,8 @@ class Capacity:
     raw: dict = field(default_factory=dict)
 
     def describe(self) -> str:
-        return (f"GET {CAPACITY_URL} ({self.served_from}; "
-                f"fetched {_age_str(self.age_s)} ago)")
+        return (f"GET {CAPACITY_URL} ({self.served_from}. "
+                f"Fetched {_age_str(self.age_s)} ago)")
 
     def to_dict(self) -> dict:
         def block(b):
@@ -817,7 +817,7 @@ def _capacity_with_note(allow_network: bool, *, cache_path: str | None = None,
     path = cache_path or capacity_cache_path()
     cached, cache_err = _read_capacity_cache(path, now, ttl)
     if cached is not None and not cached.stale:
-        cached.note = f"served from cache; fetched {_age_str(cached.age_s)} ago"
+        cached.note = f"served from cache. Fetched {_age_str(cached.age_s)} ago"
         return cached, cached.note
     if not allow_network:
         if cached is not None:

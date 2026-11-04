@@ -17,6 +17,9 @@ construction inside the checker, not here.
 
 import importlib.util
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +32,24 @@ _spec.loader.exec_module(checker)
 README = os.path.join(ROOT, "README.md")
 CHANGELOG = os.path.join(ROOT, "CHANGELOG.md")
 SKILL_DIR = os.path.join(ROOT, "skills", "luna-doctor")
+CLI = os.path.join(ROOT, "bin", "luna-doctor")
+
+
+_HOME = tempfile.mkdtemp(prefix="luna-doctor-copy-")
+
+
+def run(*args, timeout=180):
+    """Run the CLI offline in a throwaway home, so no scan reads real state.
+
+    A capacity cache left by another test changes what a run prints, so each
+    scan gets its own $HOME and no cache at all.
+    """
+    env = dict(os.environ, NO_COLOR="1", LUNA_DOCTOR_QUIET="1", HOME=_HOME,
+               LUNA_DOCTOR_STORE=os.path.join(_HOME, "store"),
+               LUNA_DOCTOR_CAPACITY=os.path.join(_HOME, "no-capacity.json"))
+    proc = subprocess.run([sys.executable, CLI, *args], capture_output=True,
+                          text=True, timeout=timeout, cwd=ROOT, env=env)
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def newest_changelog_section():
@@ -93,3 +114,39 @@ class SimpleEnglish(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheRestOfTheSurface(unittest.TestCase):
+    """Every surface a reader sees follows the same rules.
+
+    The README, the skill and the newest changelog section were the first
+    surfaces because they are the ones a person reads before installing. What a
+    run prints, and the documents beside it, are read just as closely, so they
+    are scanned here with the same checker.
+    """
+
+    def test_docs_are_simple_english(self):
+        folder = os.path.join(ROOT, "docs")
+        files = sorted(os.path.join(folder, n) for n in os.listdir(folder)
+                       if n.endswith(".md"))
+        self.assertTrue(files, "no document under docs: the scan proves nothing")
+        broken = {}
+        for path in files:
+            with open(path, encoding="utf-8") as fh:
+                found = violations(fh.read())
+            if found:
+                broken[os.path.relpath(path, ROOT)] = found[:6]
+        self.assertEqual(broken, {}, f"documents break Simple English: {broken!r}")
+
+    def test_what_a_run_prints_is_simple_english(self):
+        broken = {}
+        for args in (("analyze", "--since", "1h", "--style", "plain", "--offline"),
+                     ("capacity", "--style", "plain", "--offline"),
+                     ("latency", "--since", "24h"),
+                     ("fix", "--since", "1h")):
+            code, out, err = run(*args)
+            self.assertIn(code, (0, 1, 2), f"{args[0]} exited {code}: {err}")
+            found = violations(out)
+            if found:
+                broken[" ".join(args)] = found[:6]
+        self.assertEqual(broken, {}, f"printed copy breaks Simple English: {broken!r}")

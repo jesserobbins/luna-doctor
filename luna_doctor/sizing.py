@@ -552,7 +552,7 @@ def _claude_rows(snap, usable, why_unusable, rows):
             RULE_OUTPUT_EXCEEDS_MAX, "claude-code", routed,
             "env.CLAUDE_CODE_MAX_OUTPUT_TOKENS", sources.CLAUDE_SETTINGS,
             "informational", "V key / U default",
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS unset; the shipped default is "
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS unset. The shipped default is "
             "unverified - informational, never a finding",
             values={"declared": None}))
     elif routed is None:
@@ -609,7 +609,7 @@ def _claude_rows(snap, usable, why_unusable, rows):
         cw = _catalog_window(cat)
         if cw is not None:
             detail += f" vs catalog context_window {_fmt(cw)} for {routed}"
-    detail += ("; the key's default and semantics are unverified (U) - "
+    detail += (". The key's default and semantics are unverified (U) - "
                "informational only, never a finding")
     rows.append(_row(
         RULE_CLAUDE_WINDOW, "claude-code", routed,
@@ -667,7 +667,7 @@ def _codex_rows(snap, usable, why_unusable, rows):
         rows.append(_row(
             RULE_CODEX_WINDOW, "codex", routed, "model_context_window",
             sources.CODEX_CONFIG, "informational", "V-declared-only",
-            "model_context_window unset; the shipped default is unverified (U) - "
+            "model_context_window unset. The shipped default is unverified (U) - "
             "informational, never a finding",
             values={"declared": None}))
         return

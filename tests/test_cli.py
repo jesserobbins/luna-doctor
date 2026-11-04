@@ -3078,7 +3078,7 @@ class DemotionReason(unittest.TestCase):
     def test_demotion_note_hedges_without_a_measured_tier(self):
         m = _load_cli()
         note = m.demotion_note("", "glm-5.3-background")
-        self.assertIn("may be running on priority concurrency", note)
+        self.assertIn("can be running on priority concurrency", note)
         self.assertIn("only a load test can see", note.lower())
 
 

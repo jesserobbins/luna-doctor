@@ -157,7 +157,7 @@ def recommendations_swamp(m: dict, agents: list[str], width=None) -> list:
                         f"Defaults: {SWAMP_CITATION_DEFAULT} extract={SWAMP_DEFAULT_EXTRACT}, llm={SWAMP_DEFAULT_LLM}."),
                 "instruction": (f"Your swamp setup already fits the combined budget. No change needed. Tell your agent: keep swamp at extract {extract_n} / verify {llm_n}. "
                                 f"If you retune, keep pi + swamp ≤ {cap}."),
-                "impact": "no change needed; swamp is already within the combined budget.",
+                "impact": "no change needed. Swamp is already within the combined budget.",
             }],
         }]
     pi_rec, extract_rec, llm_rec = _swamp_split(cap)
@@ -389,7 +389,7 @@ def _sizing_informational_change(row) -> dict:
                     "this line to a rule."),
         "instruction": (f"No change prescribed from an unverified default - recorded so "
                         f"the sizing verdict is not silent: {row['detail']}"),
-        "impact": "recorded, not actionable; the line says what was not checked and why.",
+        "impact": "recorded, not actionable. The line says what was not checked and why.",
     }
 
 
@@ -462,7 +462,7 @@ def demotion_note(reason: str, model: str) -> str:
         return (f"`{model}` is being served on priority concurrency: this account has no background "
                 f"entitlement, so its `-background` requests are downgraded into the priority pool "
                 f"and count against interactive headroom.")
-    return (f"your `-background` traffic may be running on priority concurrency: if this account has "
+    return (f"your `-background` traffic can be running on priority concurrency: if this account has "
             f"no background entitlement, `{model}` requests are downgraded into the priority pool, "
             f"which is why a background model can still be squeezed. Only a load test can see the "
             f"served tier.")
@@ -486,7 +486,7 @@ LUNAROUTE_ROUTING_PREFACE = (
     "Routing: by default, non-interactive work (subagents, background tasks) "
     "belongs on the background tier. It is slower but admits more concurrent requests. "
     "Interactive work (the session you are watching) rides the priority tier. "
-    "Every non-interactive call should use the background variant of your model (e.g. "
+    "Send every non-interactive call to the background variant of your model (e.g. "
     "`glm-5.3-background` rather than `glm-5.3`). If your account has no background "
     "entitlement, background requests are downgraded into the priority pool and still "
     "count against the same budget. A load test shows the served tier either way."
@@ -618,7 +618,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                             "The default lets one run hold 20 concurrent requests, well past the interactive "
                             f"admission width - {CAP_COPY}."),
                 "instruction": (f"Ask your agent: in {PI_SUBAGENT_CFG} set globalConcurrencyLimit to {target}. "
-                                f"The current default (20) will keep overflowing the interactive tier under load; lower it. "
+                                f"The current default (20) will keep overflowing the interactive tier under load. Lower it. "
                                 f"Have the agent read the existing file first, preserve other keys, then apply the change." + start_note),
                 "impact": _impact(peak, target, width_known),
             })
@@ -648,7 +648,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                             "Already `0`, which means the idle budget is disabled - as permissive as this"
                             " setting gets. No change needed."),
                 "instruction": "No change needed. httpIdleTimeoutMs is already disabled (0), and that is the correct posture for background-heavy traffic.",
-                "impact": "nothing to do; recorded so the verdict is not silent about it.",
+                "impact": "nothing to do. Recorded so the verdict is not silent about it.",
             })
 
         if bg and wide:
@@ -681,9 +681,9 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
         cc_cfg = configs.claude_code
         changes, note = [], None
         if not _declared(cc_cfg.get("env.ANTHROPIC_BASE_URL")):
-            note = ("This settings file has no ANTHROPIC_BASE_URL, so claude-code may not be reaching"
-                    " LunaRoute at all. Run `lunaroute setup claude-code` (or `npx @lunaroute/cli setup claude-code`) "
-                    "first; the tier advice below only matters once traffic is routed.")
+            note = ("This settings file has no ANTHROPIC_BASE_URL, so claude-code can be reaching"
+                    " something other than LunaRoute. Run `lunaroute setup claude-code` (or `npx @lunaroute/cli setup claude-code`) "
+                    "first. The tier advice below only matters once traffic is routed.")
 
         subs = _declared(cc_cfg.get("env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"))
 
@@ -798,7 +798,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                     "to": desired,
                     "why": _why(evidence,
                                 "Codex has no verified request-timeout knob, so it cannot defend itself"
-                                " against a 600s first token; keep concurrent requests under the"
+                                " against a 600s first token. Keep concurrent requests under the"
                                 " advised width instead.",
                                 bg_note),
                     "instruction": (f"Ask your agent: in {CODEX_CONFIG} set {pretty_keys} to {desired}. "

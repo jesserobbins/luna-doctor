@@ -100,7 +100,7 @@ ADVISED_CONCURRENCY = 8         # our recommendation: below the cap, with headro
 # from these logs, so copy points at the number it sits next to ("roughly
 # this many") and says so - it never tells the reader to go measure.
 # INTERACTIVE_BURST_CAP stays for arithmetic, never prose.
-CAP_COPY = ("the gateway admits roughly this many interactive requests at once; "
+CAP_COPY = ("the gateway admits roughly this many interactive requests at once. "
             "the admitted width is specific to the account and cannot be read "
             "from these logs")
 
@@ -1651,7 +1651,7 @@ def _bands_for(sub: list[Request], peaks: dict[int, int], min_top_n: int,
             "top_inflation_flagged": flagged,
             "top_first": top_span.get("first"), "top_last": top_span.get("last"),
             "note": None if top["n"] >= min_top_n else (
-                f"top band has {top['n']} sample(s); {min_top_n} needed before claiming a gradient")}
+                f"top band has {top['n']} sample(s). {min_top_n} are needed before claiming a gradient")}
 
 
 def latency_by(reqs: list) -> dict:
@@ -2750,7 +2750,7 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
         busy = max(bm, key=lambda x: (x["max_concurrent"], x["started"]))
         traffic.append(report.Row(
             "minute-level",
-            f"{len(bm)} active minute(s); busiest {busy['minute']} "
+            f"{len(bm)} active minute(s). Busiest {busy['minute']} "
             f"(max {busy['max_concurrent']} in flight, {busy['started']} started)"))
     for tier in ("interactive", "background"):
         l = m["latency_s"][tier]
@@ -2846,7 +2846,7 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
             "note", "claude-code span starts are inferred from record gaps; treat its\n"
                     "concurrency as a lower bound."))
     notes.append(report.Row(
-        "note", "tiers here are inferred from model names; the served tier is not in these logs; "
+        "note", "tiers here are inferred from model names. The served tier is not in these logs. "
                 "only a load test can see it."))
     av = m.get("agentsview")
     if av and av.get("buckets"):
@@ -2856,14 +2856,14 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
         if av.get("cost_usd"):
             bits.append(f"reported model spend ${av['cost_usd']:.2f}")
         if av.get("unpriced_rows"):
-            bits.append(f"{av['unpriced_rows']} row(s) the archive could not price")
+            bits.append(f"{av['unpriced_rows']} row(s) the archive did not price")
         top = (av.get("by_model") or [None])[0]
         if top:
             bits.append(f"top model {top['model']}")
         notes.append(report.Row(
             "archive",
-            " \u00b7 ".join(bits) + " (agentsview, this machine's session archive; "
-            "closed hours only, so the current hour is not in it)"))
+            " \u00b7 ".join(bits) + " (agentsview, this machine's session archive. Closed "
+            "hours only, so the current hour is not in it)"))
 
     sub = m.get("subagents")
     if sub and sub.get("runs"):
@@ -3296,13 +3296,13 @@ def cmd_latency(args) -> int:
         lines.append(f"{c['cell']:<{width}}  {c['n']:>6}  {c['p50']:>7}  "
                      f"{c['p90']:>7}  {c['max']:>7}")
     head = f"latency by {args.by}, last {human_window(hours)}"
-    rows = [report.Row("measured by", "this machine (these logs; the account "
+    rows = [report.Row("measured by", "this machine (these logs. The account "
                                       "reports no request latency)")]
     if args.tier:
         rows.append(report.Row("tier", args.tier))
     rows.append(report.Row("table", chr(10).join(lines)))
     withheld = lat.get("suppressed") or 0
-    rows.append(report.Row("floor", f"{lat.get('floor')} sample(s) per cell; "
+    rows.append(report.Row("floor", f"{lat.get('floor')} sample(s) per cell. "
                                     f"{withheld} cell(s) withheld across all "
                                     f"dimensions"))
     rep = report.Report(headline=head, sections=[report.Section("latency", rows)],
@@ -3496,7 +3496,7 @@ def _cap_overflow(value) -> str:
         return "unknown (not reported)"
     if value == "enabled":
         return ("enabled - automatic spill applies to eligible managed "
-                "text-generation requests only; requests explicitly marked "
+                "text-generation requests only. Requests explicitly marked "
                 "background reach overflow capacity by their own marking, "
                 "not through this switch")
     return str(value)
@@ -3611,13 +3611,13 @@ def build_capacity_report(cap, note: str = "") -> report.Report:
             adjustments=[],
             footnote=(f"{note or 'not established'}\n"
                       "pass --online to fetch it now (api.lunaroute.com, one "
-                      "authenticated GET, cached 5 minutes); what cannot be "
-                      "fetched is reported unknown, never an error"))
+                      "authenticated GET, cached for 5 minutes). What cannot be "
+                      "fetched is reported as unknown, never as an error"))
 
     n, cfg, h, adm = cap.now, cap.config, cap.history, cap.admission
     now_rows = [report.Row(
-        "covers", "the priority pool only - overflow traffic does not appear "
-        "in in_use; the overflow pool is the row below, and the admission "
+        "covers", "the priority pool only. Overflow traffic does not appear "
+        "in in_use. The overflow pool is the row below, and the admission "
         "counts cover both pools")]
     if n is None:
         now_rows.append(report.Row("now", "not reported by the account (unknown)"))
@@ -3712,7 +3712,7 @@ def build_capacity_report(cap, note: str = "") -> report.Report:
     foot = note or cap.describe()
     if cap.generated_at:
         foot += f" \u00b7 assembled by the server at {cap.generated_at}"
-    foot += (" \u00b7 history is cached \u22485 minutes server-side; now and "
+    foot += (" \u00b7 history is cached \u22485 minutes server-side. Now and "
              "admission are computed per call \u00b7 rate limit 60/min per key")
     if cap.stale:
         foot += (" \u00b7 the cache is past its 5-minute TTL: run with "
@@ -3911,7 +3911,7 @@ def _default_run(ap, args) -> int:
     try:
         _run(chart_args)
     except Exception as e:
-        print("luna-doctor: the chart could not be drawn: %s: %s"
+        print("luna-doctor: the chart was not drawn: %s: %s"
               % (type(e).__name__, e), file=sys.stderr)
     _open_png_quietly(getattr(chart_args, "_png_path", None))
     return code
@@ -4184,8 +4184,8 @@ CAPACITY_COUNTS_EXCLUDE = (
     "server counts cover only traffic contending for the shared pool: requests "
     "routed on your own provider keys (BYOK), embeddings, and dedicated-capacity "
     "traffic are always excluded (System One decision requests count only without "
-    "a dedicated System One allocation); the local counts are not so filtered, so "
-    "the two may differ for those reasons and are never reconciled")
+    "a dedicated System One allocation). The local counts are not filtered this "
+    "way, so the two can differ for those reasons and are never reconciled")
 
 
 def _utc_days(since: float, until: float) -> list:
@@ -4268,10 +4268,10 @@ def trend_summary(m: dict, reqs: list) -> tuple[str, list]:
         else:
             bits.append(f"duration does not track how many were in flight "
                         f"(r={r_value:+.2f}), so look at the model and the account")
-    bits.append("no first-token time is recorded in these logs, so a slower first "
+    bits.append("no first-token time is recorded in these logs. A slower first "
                 "byte and slower generation look alike here")
     worst = sorted(done, key=lambda r: -r.duration)[:3]
-    return "; ".join(bits), worst
+    return ". ".join(b[0].upper() + b[1:] for b in bits if b) + ".", worst
 
 
 def duration_sparkline(m: dict, reqs: list, width: int = 40) -> str:
@@ -4908,7 +4908,7 @@ def cmd_analyze(args) -> int:
                                  sources=_source_id(harnesses, pi_roots, claude_roots))
         except (OSError, ValueError, OverflowError) as e:
             # A read-only or unwritable store must not lose the report.
-            print(f"luna-doctor: could not persist run: {e}", file=sys.stderr)
+            print(f"luna-doctor: the run was not persisted: {e}", file=sys.stderr)
     render(m, head, adj, args.json, stored=stored, args=args, att=att, reqs=reqs)
     return code
 
