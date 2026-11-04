@@ -17,6 +17,25 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.5] - 2026-11-04
+
+### Added
+
+- `luna-doctor 15m` is the command: a leading duration is rewritten to
+  `analyze --since 15m`, and flags after it still work.
+
+- A working notice on stderr when stderr is a terminal, so a run that waits a
+  minute on the account does not read as broken. Nothing is printed to a pipe,
+  and `LUNA_DOCTOR_QUIET=1` turns it off on a terminal too.
+
+- The window's shape in one line: a sparkline of each column's p90 with the
+  range beside it, in the report's `TREND` section, because the picture is a
+  file and a file has to be opened.
+
+### Changed
+
+- The bare run prints the answer first and the pointer lines after.
+
 ## [0.6.0-alpha.4] - 2026-11-04
 
 ### Changed
