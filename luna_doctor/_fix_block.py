@@ -951,6 +951,8 @@ def cmd_fix(args) -> int:
         return 2
     harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
     now = time.time()
+    notice(f"reading {', '.join(harnesses)} logs for the last "
+           f"{human_window(hours)}, and the account's capacity")
     reqs = collect(hours, harnesses, getattr(args, "pi_root", None),
                    getattr(args, "claude_root", None), now=now)
     m = analyse(reqs, hours)

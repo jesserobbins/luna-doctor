@@ -2802,6 +2802,9 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
 
     trend_rows: list[report.Row] = []
     trend_text, worst = trend_summary(m, reqs or [])
+    spark = duration_sparkline(m, reqs or [])
+    if spark:
+        trend_rows.append(report.Row("shape", spark))
     trend_rows.append(report.Row("moving", trend_text))
     if worst:
         trend_rows.append(report.Row(
@@ -3870,9 +3873,9 @@ def _default_run(ap, args) -> int:
     net = ["--offline"] if getattr(args, "offline", False) else (
         ["--online"] if getattr(args, "online", False) else [])
     print(_account_line(allow_network=_account_network(args)))
+    code = _run(ap.parse_args(["analyze", "--since", "1h"] + net))
     print()
     print(WELCOME)
-    code = _run(ap.parse_args(["analyze", "--since", "1h"] + net))
     if code == 2:
         # Nothing was measured, so there is nothing to draw: a picture and a
         # "this run read the last hour of your logs" claim on a machine with
@@ -3892,10 +3895,28 @@ def _default_run(ap, args) -> int:
     return code
 
 
+BARE_DURATION = re.compile(r"^[0-9]+(?:\.[0-9]+)?[smhdwy]?$")
+
+
+def _bare_duration(argv: list[str]) -> list[str]:
+    """`luna-doctor 15m` means `analyze --since 15m`.
+
+    The window is the one thing a person types most and the flag is pure
+    ceremony, so a lone duration is accepted as the command. Anything else -
+    including no argument at all, which is the friendly bare run - is untouched.
+    """
+    if argv and BARE_DURATION.match(argv[0]):
+        return ["analyze", "--since", argv[0]] + list(argv[1:])
+    return argv
+
+
 def main(argv: list[str] | None = None) -> int:
     # The gate is not resolved yet when argparse builds help text, so the
     # prerelease banner decides inline: no ANSI when NO_COLOR is set or
     # stdout is not a terminal someone is reading.
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = _bare_duration(list(argv))
     desc = DESCRIPTION
     if PRERELEASE_NOTE and not os.environ.get("NO_COLOR", "") and sys.stdout.isatty():
         desc += f"\n\n\033[33m⚠ This is a prerelease ({PRERELEASE_NOTE}). Not recommended for production.\033[0m"
@@ -4231,6 +4252,41 @@ def trend_summary(m: dict, reqs: list) -> tuple[str, list]:
     return "; ".join(bits), worst
 
 
+def duration_sparkline(m: dict, reqs: list, width: int = 40) -> str:
+    """The window's duration trend as a row of blocks, for a terminal.
+
+    The picture is a file, which means opening it. This is the same series in
+    one line: each block is one column's p90, low to high, so a rise is visible
+    without leaving the pane. It carries no units, and the row beside it does.
+    """
+    done = [r for r in timed(reqs) if r.outcome == "completed"]
+    if len(done) < 10:
+        return ""
+    lo = min(r.end for r in done)
+    hi = max(r.end for r in done)
+    if hi <= lo:
+        return ""
+    cols = max(12, min(width, len(done) // 3 or 12))
+    buckets = [[] for _ in range(cols)]
+    for r in done:
+        k = int((r.end - lo) / (hi - lo) * cols)
+        buckets[min(cols - 1, k)].append(r.duration)
+    values = [pct(v, 90) if len(v) >= 3 else None for v in buckets]
+    known = [v for v in values if v]
+    if not known:
+        return ""
+    low, high = min(known), max(known)
+    blocks = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+    out = []
+    for v in values:
+        if v is None:
+            out.append(" ")
+            continue
+        span = (high - low) or 1.0
+        out.append(blocks[min(len(blocks) - 1, int((v - low) / span * (len(blocks) - 1)))])
+    return "".join(out) + f"   p90 {low:.0f}s to {high:.0f}s"
+
+
 def pearson(xs: list, ys: list) -> float | None:
     n = len(xs)
     if n < 3:
@@ -4243,6 +4299,28 @@ def pearson(xs: list, ys: list) -> float | None:
     if dx == 0 or dy == 0:
         return None
     return num / (dx * dy)
+
+
+def notice(message: str) -> None:
+    """Say what the run is doing, on stderr, when a person is watching.
+
+    The account fetch can take seconds to a minute, and a command that sits
+    silent for forty seconds reads as broken. Nothing is written when stderr is
+    a pipe, so a script or a test never has to filter it, and
+    LUNA_DOCTOR_QUIET=1 turns it off on a terminal too.
+    """
+    if os.environ.get("LUNA_DOCTOR_QUIET"):
+        return
+    try:
+        if not sys.stderr.isatty():
+            return
+    except Exception:
+        return
+    print(f"luna-doctor: {message}", file=sys.stderr, flush=True)
+
+
+def _window_word(hours: float) -> str:
+    return human_window(hours)
 
 
 def _account_network(args) -> bool:
@@ -4609,6 +4687,8 @@ def cmd_analyze(args) -> int:
     pi_roots = _check_roots(raw_pi, "--pi-root") if raw_pi else None
     claude_roots = _check_roots(raw_claude, "--claude-root") if raw_claude else None
     now = time.time()
+    notice(f"reading {', '.join(harnesses)} logs for the last "
+           f"{_window_word(hours)}, and the account's capacity")
     reqs = collect(hours, harnesses, pi_roots, claude_roots, now=now)
     m = analyse(reqs, hours)
     # The account's width bills the priority tier, so the attribution needs that

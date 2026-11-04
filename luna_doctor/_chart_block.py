@@ -1402,6 +1402,8 @@ def cmd_chart(args) -> int:
     # answer a question they did not ask.
     pi_roots = _check_roots(raw_pi, "--pi-root") if raw_pi else None
     claude_roots = _check_roots(raw_claude, "--claude-root") if raw_claude else None
+    notice(f"drawing the last {human_window(hours)} of "
+           f"{', '.join(harnesses)} logs")
     reqs = collect(hours, harnesses, pi_roots, claude_roots)
     m = analyse(reqs, hours)
     # Swamp is opt-in (`--swamp-root`): the footer row states its configured

@@ -364,3 +364,43 @@ class TheChartIsDesignedForDiagnosis(unittest.TestCase):
 
 class LatencyTablePlaceholder(unittest.TestCase):
     pass
+
+
+class Ergonomics(unittest.TestCase):
+    """Fewer keystrokes, and a sign of life while the account answers."""
+
+    def test_a_lone_duration_is_the_command(self):
+        self.assertEqual(cli._bare_duration(["15m"]), ["analyze", "--since", "15m"])
+        self.assertEqual(cli._bare_duration(["1h", "--offline"]),
+                         ["analyze", "--since", "1h", "--offline"])
+        self.assertEqual(cli._bare_duration([]), [])
+        self.assertEqual(cli._bare_duration(["chart"]), ["chart"])
+
+    def test_the_notice_stays_off_a_pipe(self):
+        import contextlib
+        import io as _io
+        buf = _io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            cli.notice("reading the logs")
+        self.assertEqual(buf.getvalue(), "", "a piped run must not print a notice")
+
+    def test_the_sparkline_shows_the_shape_in_one_line(self):
+        now = 1_700_000_000.0
+        reqs = []
+        for i in range(60):
+            dur = 10.0 if i < 30 else 40.0
+            reqs.append(cli.Request(harness="pi", session="s", model="glm-5.3",
+                                    tier="interactive", start=now + i * 60,
+                                    end=now + i * 60 + dur, outcome="completed"))
+        m = cli.analyse(reqs, 2)
+        spark = cli.duration_sparkline(m, reqs)
+        self.assertTrue(spark, "a window with enough completions earns a sparkline")
+        self.assertIn("p90", spark)
+        self.assertNotIn("None", spark)
+
+    def test_no_sparkline_without_enough_evidence(self):
+        now = 1_700_000_000.0
+        reqs = [cli.Request(harness="pi", session="s", model="glm-5.3",
+                            tier="interactive", start=now, end=now + 5,
+                            outcome="completed")]
+        self.assertEqual(cli.duration_sparkline(cli.analyse(reqs, 1), reqs), "")
