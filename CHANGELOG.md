@@ -17,6 +17,25 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.7] - 2026-11-04
+
+### Added
+
+- `analyze` reads the local agentsview archive, when it is installed:
+  `agentsview export hour` gives one closed UTC hour at a time with 5-minute
+  buckets carrying how many agents were in flight, split interactive, subagent
+  and automated, with output tokens and reported model spend. That is every
+  agent the archive holds, not only the two log stores this tool parses.
+
+  It stops at the last closed hour, so the live hour stays this tool's own
+  reading of the logs. A missing binary, a failed query or an empty window reads
+  as unavailable with a reason, never as zeros. `metrics.agentsview` carries
+  the closed hours, buckets, peak agents, cost, per-model usage and the count of
+  rows the archive did not price.
+
+  Its spend is model spend for traffic on your own keys and is never summed with
+  a LunaRoute number, which bills concurrency.
+
 ## [0.6.0-alpha.6] - 2026-11-04
 
 ### Fixed
