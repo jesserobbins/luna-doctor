@@ -109,6 +109,7 @@ agent had timed traffic still draws the one plot area over the requested
 window -- empty axes and the honest footer, never a bare message.
 """
 
+import math
 from datetime import datetime, timezone
 
 from luna_doctor.plan import PLAN_PRIORITY, resolve_capacity
@@ -586,6 +587,263 @@ def _admission_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols):
         x += 22 + 5.2 * len(kind)
 
 
+# ---- the two forms, chosen by the question the window asks ----------------
+# A fifteen-minute or one-hour question is "what happened, request by request".
+# At ~1.5 requests a minute that is a few dozen bars, and every one of them can
+# be drawn: a timeline answers it exactly, with no aggregation to hide behind.
+# A longer window is a distribution question - how much of the time was this
+# machine busy, and which model owns the tail - so an occupancy histogram and a
+# ranked tail answer it, and a time series of an idle machine answers nothing.
+
+SHORT_WINDOW_S = 2 * 3600
+TIMELINE_ROWS = 36
+
+
+def _timeline_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, max_rows, add):
+    """One bar per request, sorted by start. The fifteen-minute question.
+
+    When the window holds more requests than the panel can draw, the slowest
+    are kept and the count of the rest is printed: a picture that silently drops
+    rows is worse than one that says how many it dropped.
+    """
+    rows = [r for r in reqs if getattr(r, "start", None) is not None]
+    rows.sort(key=lambda r: (r.start, getattr(r, "end", None) or r.start))
+    total = len(rows)
+    shown = rows
+    note = ""
+    if total > max_rows:
+        shown = sorted(rows, key=lambda r: -r.duration)[:max_rows]
+        shown.sort(key=lambda r: (r.start, getattr(r, "end", None) or r.start))
+        note = f" · the slowest {max_rows} of {total} are drawn"
+    row_h = max(5.0, min(14.0, (max_rows * 1.0 and 420.0 / max(1, len(shown)))))
+    shapes.append(Text(px, y0 - 8,
+                       f"one bar per request, sorted by start · bar length is "
+                       f"duration · {len(shown)} of {total}{note}",
+                       size=10.5, fill=C["text"]))
+    for i, r in enumerate(shown):
+        y = y0 + 6 + i * row_h
+        x0 = px + (r.start - t0) / max(1e-9, (t1 - t0)) * plot_w
+        end = getattr(r, "end", None) or r.start
+        x1 = px + (end - t0) / max(1e-9, (t1 - t0)) * plot_w
+        outcome = getattr(r, "outcome", "")
+        if outcome in ("admission_timeout", "org_concurrency_limit"):
+            colour = C["flare"]
+        elif getattr(r, "tier", "") == "background":
+            colour = "#5b21b6"
+        else:
+            colour = "#173f8f"
+        shapes.append(Rect(x0, y, max(1.5, x1 - x0), max(2.0, row_h - 2),
+                           fill=colour))
+        # the label rides the right gutter: duration, then what it was
+        label = f"{r.duration:6.1f}s  {(r.model or '?')[:26]}"
+        if outcome != "completed":
+            label += f"  {outcome}"
+        shapes.append(Text(px + plot_w + 10, y + max(2.0, row_h - 2),
+                           label, size=8.5, fill=C["muted"]))
+    below = y0 + 6 + len(shown) * row_h
+    for k in range(0, 7):
+        x = px + plot_w * k / 6
+        shapes.append(Line(x, y0, x, below + 2, stroke=C["grid"]))
+        shapes.append(Text(x, below + 16,
+                           datetime.fromtimestamp(t0 + (t1 - t0) * k / 6,
+                                                  timezone.utc).strftime("%H:%M:%S"),
+                           size=9, fill=C["muted"], anchor="middle"))
+    shapes.append(Text(px, y0 - 24, "navy interactive \u00b7 violet background "
+                                    "\u00b7 red refused", size=9.5, fill=C["muted"]))
+    return below + 26
+
+
+def _occupancy_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1):
+    """Share of the window's minutes at each concurrency level.
+
+    The long-window question in one glance: was this machine ever busy, and how
+    often did it reach the width. Distinct levels are grouped because a 30-day
+    window holds over a hundred of them and a label per level is unreadable.
+    """
+    per_minute: dict = {}
+    for r in reqs:
+        start, end = getattr(r, "start", None), getattr(r, "end", None)
+        if start is None:
+            continue
+        end = end if end is not None else start
+        t = start
+        while t <= end:
+            k = int(t // 60)
+            per_minute[k] = per_minute.get(k, 0) + 1
+            t += 60
+    if not per_minute:
+        shapes.append(Text(px, y0 + 12, "no timed request in this window",
+                           size=10, fill=C["muted"]))
+        return
+    lo, hi = min(per_minute), max(per_minute)
+    total = hi - lo + 1
+    bands = [("0", 0, 0), ("1-2", 1, 2), ("3-4", 3, 4), ("5-8", 5, 8),
+             ("9-12", 9, 12), ("13-16", 13, 16), ("17+", 17, 10 ** 9)]
+    counts = {label: 0 for label, _a, _b in bands}
+    for k in range(lo, hi + 1):
+        v = per_minute.get(k, 0)
+        for label, a, b in bands:
+            if a <= v <= b:
+                counts[label] += 1
+                break
+    shapes.append(Text(px, y0 - 8,
+                       f"how much of the {total} minute window this machine held "
+                       f"requests at all (this machine)", size=10.5, fill=C["text"]))
+    peak = max(counts.values())
+    bw = plot_w / len(bands)
+    base = y1
+    for i, (label, _a, _b) in enumerate(bands):
+        n = counts[label]
+        h = (n / peak) * (base - y0 - 16)
+        hot = label in ("9-12", "13-16", "17+")
+        fill = C["flare"] if hot else ("#3b82f6" if label != "0" else "#cfe2fb")
+        shapes.append(Rect(px + i * bw + 10, base - h, bw - 20, h, fill=fill))
+        shapes.append(Text(px + i * bw + bw / 2, base + 16, label, size=10,
+                           fill=C["text"], anchor="middle"))
+        shapes.append(Text(px + i * bw + bw / 2, base - h - 7,
+                           f"{100.0 * n / total:.1f}%", size=9, fill=C["muted"],
+                           anchor="middle"))
+    shapes.append(Line(px, base, px + plot_w, base, stroke=C["axis"]))
+
+
+def _tail_rank_panel(shapes, *, reqs, px, plot_w, y0, y1):
+    """Which model owns the tail: p50, p90, p99 and max per model and tier.
+
+    Sorted by worst max, on a log duration axis. This is the long-window
+    reading that a percentile line cannot give, because it puts every category
+    side by side with its own sample size.
+    """
+    done = [r for r in reqs if getattr(r, "outcome", "") == "completed"
+            and getattr(r, "start", None) is not None
+            and getattr(r, "end", None) is not None and r.end > r.start]
+    groups: dict = {}
+    for r in done:
+        groups.setdefault((r.model or "?", getattr(r, "tier", "")),
+                          []).append(r.end - r.start)
+    rows = []
+    for key, durs in groups.items():
+        if len(durs) < BAND_MIN_TOP_SAMPLES_MIRROR:
+            continue
+        durs.sort()
+        rows.append((key, len(durs), pct(durs, 50), pct(durs, 90),
+                     pct(durs, 99) or durs[-1], durs[-1]))
+    if not rows:
+        shapes.append(Text(px, y0 + 14,
+                           "no model holds enough completed requests to rank",
+                           size=10, fill=C["muted"]))
+        return
+    rows.sort(key=lambda row: -row[5])
+    rows = rows[:10]
+    shapes.append(Text(px, y0 - 8, "which model owns the tail, completed requests "
+                                   "only (this machine)", size=10.5, fill=C["text"]))
+    lo, hi = 1.0, max(2.0, max(r[5] for r in rows))
+    gx0 = px + min(260.0, plot_w * 0.32)
+    gx1 = px + plot_w - 60
+
+    def xpos(v):
+        v = max(lo, min(hi, v))
+        span = (math.log10(hi) - math.log10(lo)) or 1.0
+        return gx0 + (math.log10(v) - math.log10(lo)) / span * (gx1 - gx0)
+
+    step = max(18.0, (y1 - y0) / max(1, len(rows)))
+    y = y0 + 12
+    for key, n, p50, p90, p99, mx in rows:
+        label = key[0] + (" (bg)" if key[1] == "background" else "")
+        shapes.append(Text(px, y + 3, f"{label[:30]} n={n}", size=9.5, fill=C["text"]))
+        shapes.append(Line(xpos(p50), y, xpos(mx), y, stroke=C["grid"], stroke_width=6))
+        for value, colour, rad in ((p50, "#173f8f", 3.6), (p90, "#3b82f6", 3.2),
+                                   (p99, C["flare"], 2.8), (mx, C["text"], 2.2)):
+            shapes.append(Circle(xpos(value), y, rad, fill=colour))
+        shapes.append(Text(gx1 + 8, y + 3, f"{mx:.0f}s", size=9, fill=C["muted"]))
+        y += step
+    for tick in (1, 10, 60, 300, 1200):
+        if tick > hi:
+            continue
+        shapes.append(Text(xpos(tick), y + 12, f"{tick:g}s", size=9,
+                           fill=C["muted"], anchor="middle"))
+    shapes.append(Text(px, y + 30, "navy p50 \u00b7 blue p90 \u00b7 red p99 \u00b7 "
+                                   "black max", size=9.5, fill=C["muted"]))
+
+
+def _trend_verdict(reqs, t0, t1, n_cols):
+    """Is latency rising, and what does it track? One sentence, measured.
+
+    The p90 of the first third against the p90 of the last third says whether it
+    rose. The correlation between a column's in-flight count and that column's
+    p90 says whether the rise tracks load. The account carries no latency at
+    all, so everything here is this machine's.
+
+    It also says what it cannot see: these logs hold a start time and the time
+    the record was written, never a first-token time, so a slower first byte and
+    slower generation look alike in every number below.
+    """
+    done = [r for r in reqs if getattr(r, "outcome", "") == "completed"
+            and getattr(r, "start", None) is not None
+            and getattr(r, "end", None) is not None and r.end > r.start]
+    if len(done) < 10:
+        return ("too few completed requests to say whether latency moves "
+                f"({len(done)} here)")
+    per_col = [[] for _ in range(n_cols)]
+    inflight = [0] * n_cols
+    for r in done:
+        k = int((r.end - t0) / max(1e-9, (t1 - t0)) * n_cols)
+        if 0 <= k < n_cols:
+            per_col[k].append(r.end - r.start)
+    step = max(60.0, (t1 - t0) / n_cols)
+    for r in reqs:
+        start = getattr(r, "start", None)
+        if start is None:
+            continue
+        end = getattr(r, "end", None) or start
+        t = start
+        while t <= end:
+            k = int((t - t0) / max(1e-9, (t1 - t0)) * n_cols)
+            if 0 <= k < n_cols:
+                inflight[k] += 1
+            t += step
+    p90s = [pct(v, 90) if len(v) >= 3 else None for v in per_col]
+    third = max(1, n_cols // 3)
+    early = [v for v in p90s[:third] if v is not None]
+    late = [v for v in p90s[-third:] if v is not None]
+    pairs = [(inflight[k], p90s[k]) for k in range(n_cols) if p90s[k] is not None]
+    r_value = _pearson([a for a, _ in pairs], [b for _, b in pairs]) if len(pairs) >= 5 else None
+    bits = []
+    if early and late:
+        a, b = pct(sorted(early), 50), pct(sorted(late), 50)
+        if a and b:
+            change = 100.0 * (b - a) / a
+            verb = "rose" if change >= 5 else ("fell" if change <= -5 else "held flat")
+            bits.append(f"duration p90 {verb} from {a:.0f}s to {b:.0f}s "
+                        f"({change:+.0f}%, first third to last third)")
+    if r_value is not None:
+        if r_value >= 0.4:
+            bits.append(f"duration rises with how many were in flight (r={r_value:+.2f}), "
+                        f"which is the shape of a queue")
+        elif r_value <= -0.4:
+            bits.append(f"duration is lower when more were in flight (r={r_value:+.2f}), "
+                        f"which is long requests running alone rather than a queue")
+        else:
+            bits.append(f"it does not track how many were in flight (r={r_value:+.2f}), "
+                        f"so look at the model and the account, not at how many ran at once")
+    bits.append("no first-token time is recorded in these logs, so a slower first "
+                "byte and slower generation look alike here")
+    return "; ".join(bits)
+
+
+def _pearson(xs, ys):
+    n = len(xs)
+    if n < 3:
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    if dx == 0 or dy == 0:
+        return None
+    return num / (dx * dy)
+
+
 def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
                       account=None):
     """Collect the chart as an ordered list of shapes.
@@ -709,31 +967,45 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
     shapes = []
     add = shapes.append
 
-    # Top: what happened to each request in the same columns. Counts, from
-    # these logs, at a resolution the axis can carry - the account's own
-    # counters are day-granular and read as a sentence in the footer instead.
-    _admission_panel(shapes, reqs=reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
-                     y0=98, y1=98 + fate_panel_h - 16, n_cols=n_cols)
-    add(Line(px, 98 + fate_panel_h - 8, px + plot_w, 98 + fate_panel_h - 8,
-             stroke=C["grid"]))
+    # A short window asks "what happened, request by request": at a few dozen
+    # requests the timeline can draw every one of them, which is the only form
+    # that needs no aggregation. A long window asks a distribution question, so
+    # it gets the occupancy histogram and the ranked tail instead.
+    short_window = hours * 3600 <= SHORT_WINDOW_S
+    if short_window:
+        _timeline_panel(shapes, reqs=reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
+                        y0=132, max_rows=TIMELINE_ROWS, add=add)
+        add(Line(px, top - 12, px + plot_w, top - 12, stroke=C["grid"]))
+    else:
+        # Top: what happened to each request in the same columns. Counts, from
+        # these logs, at a resolution the axis can carry - the account's own
+        # counters are day-granular and read as a sentence in the footer.
+        _admission_panel(shapes, reqs=reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
+                         y0=98, y1=98 + fate_panel_h - 16, n_cols=n_cols)
+        add(Line(px, 98 + fate_panel_h - 8, px + plot_w, 98 + fate_panel_h - 8,
+                 stroke=C["grid"]))
 
-    # Middle: the latency field. Rows are duration on a log scale, columns are
-    # time, colour is how many completions landed in that cell, and the count
-    # bar underneath says how much evidence each column holds.
-    _drawn, per_col_counts = _latency_heatmap(
-        shapes, reqs=timed_reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
-        y0=heat_y0, y1=heat_y1, n_cols=n_cols, col_s=col_s)
-    col_peak = max(per_col_counts or [0])
-    shapes.append(Text(px, count_y0 - 4, "completions per column", size=9,
-                       fill=C["muted"]))
-    for k, n in enumerate(per_col_counts):
-        if not n:
-            continue
-        h = (n / max(1, col_peak)) * (count_y1 - count_y0)
-        x = px + plot_w * k / n_cols
-        shapes.append(Rect(x, count_y1 - h, max(1.0, plot_w / n_cols - 0.4), h,
-                           fill="#9ca3af"))
-    shapes.append(Line(px, count_y1, px + plot_w, count_y1, stroke=C["axis"]))
+    # Middle: for a long window, the latency field. Rows are duration on a log
+    # scale, columns are time, colour is how many completions landed in that
+    # cell, and the count bar underneath says how much evidence each column
+    # holds. A short window already drew every request above, so it skips this.
+    per_col_counts = [0] * n_cols
+    if not short_window:
+        _drawn, per_col_counts = _latency_heatmap(
+            shapes, reqs=timed_reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
+            y0=heat_y0, y1=heat_y1, n_cols=n_cols, col_s=col_s)
+    if not short_window:
+        col_peak = max(per_col_counts or [0])
+        shapes.append(Text(px, count_y0 - 4, "completions per column", size=9,
+                           fill=C["muted"]))
+        for k, n in enumerate(per_col_counts):
+            if not n:
+                continue
+            h = (n / max(1, col_peak)) * (count_y1 - count_y0)
+            x = px + plot_w * k / n_cols
+            shapes.append(Rect(x, count_y1 - h, max(1.0, plot_w / n_cols - 0.4), h,
+                               fill="#9ca3af"))
+        shapes.append(Line(px, count_y1, px + plot_w, count_y1, stroke=C["axis"]))
     add(Line(px, top - 10, px + plot_w, top - 10, stroke=C["grid"]))
 
     # ---- title block ------------------------------------------------------
@@ -1078,9 +1350,10 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
                      f"as a sentence here and never as a step on this axis")
     key_line = ("reading the heatmap: a vertical stripe is a change at one time, a "
                 "horizontal band is several modes at once, a diagonal drift is a "
-                "slow shift")
+                "slow shift") if not short_window else ""
     rows = []
-    for line in (line1, line2, line3, line4, acct_line, key_line):
+    trend_line = _trend_verdict(timed_reqs, t0, t1, n_cols)
+    for line in (line1, line2, line3, line4, trend_line, acct_line, key_line):
         if not line:
             continue
         rows.extend(_wrap_to_width(line, width - pad_l - pad_r, 10))
