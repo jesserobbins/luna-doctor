@@ -17,6 +17,16 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.6] - 2026-11-04
+
+### Fixed
+
+- The bare run acknowledges before it can sit silent. With no arguments the
+  tool printed nothing until the account answered, and that wait runs to a
+  minute. It now says what it is about to do before the account line, and the
+  analyze and chart calls it makes are marked as already acknowledged, so the
+  notice appears once. It still stays off a pipe.
+
 ## [0.6.0-alpha.5] - 2026-11-04
 
 ### Added
