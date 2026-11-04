@@ -17,6 +17,24 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.3] - 2026-11-04
+
+### Changed
+
+- The chart asks the fifteen-minute and one-hour question first. Up to two
+  hours it draws a request timeline: one bar per request, sorted by start,
+  length as duration, coloured by tier with refusals in red, labelled with its
+  duration and model. Past 36 requests the slowest are kept and the count of the
+  rest is printed. Beyond two hours the distribution forms stay: admission fates
+  per column, the duration heatmap with its completion bar, and the concurrency
+  stack.
+
+- The footer answers "is it increasing, and what does it track" in words: the
+  p90 of the first third against the last third, and the correlation between a
+  column's in-flight count and its p90. It also states the limit: these logs
+  hold no first-token time, so a slower first byte and slower generation look
+  alike.
+
 ## [0.6.0-alpha.2] - 2026-11-04
 
 ### Changed
