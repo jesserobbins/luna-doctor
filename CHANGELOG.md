@@ -17,6 +17,18 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.8] - 2026-11-04
+
+### Changed
+
+- Every surface keeps the Simple English rules now, and a test enforces them.
+  The documents under `docs/` and the copy that `analyze`, `capacity`, `latency`
+  and `fix` print were unchecked. They are scanned now, each run in a throwaway
+  home so a leftover cache cannot make the guard flaky.
+- The report, the capacity footer, the latency table and the fix advice split
+  their semicolons into sentences and use can or must where they used a modal.
+- The 2026-10-23 capacity design note was rewritten in Simple English.
+
 ## [0.6.0-alpha.7] - 2026-11-04
 
 ### Added
