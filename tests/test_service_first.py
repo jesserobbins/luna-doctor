@@ -422,3 +422,79 @@ class Ergonomics(unittest.TestCase):
         first_notice = proc.stdout.index("luna-doctor: starting:")
         self.assertLess(first_notice, proc.stdout.index("account:"),
                         "the acknowledgement comes before the line that may wait")
+
+class TheArchiveIsRead(unittest.TestCase):
+    """agentsview supplies closed hours from every agent it archives.
+
+    It is history, not the live view: it ends at the last closed UTC hour, which
+    is why the current hour stays this tool's own reading of the logs.
+    """
+
+    def test_a_missing_binary_is_unavailable_not_zero(self):
+        from unittest import mock
+        from luna_doctor import sources
+        with mock.patch.object(sources.shutil, "which", return_value=None):
+            out = sources.agentsview_window(0, 3600)
+        self.assertFalse(out["present"])
+        self.assertFalse(out["readable"])
+        self.assertEqual(out["reason"], "not installed")
+        self.assertIsNone(out["peak_agents"])
+        self.assertIsNone(out["cost_usd"])
+
+    def test_it_reads_closed_hours_and_peaks(self):
+        from unittest import mock
+        from luna_doctor import sources
+        hours = {
+            "2026-11-03-21": {"activity": {"buckets": []}, "usage": {"by_model": []},
+                              "joint": {"cells": []}},
+            "2026-11-03-22": {"activity": {"buckets": [
+                {"start": "2026-11-03T22:00:00Z", "max_agents": 2,
+                 "max_interactive_agents": 2, "max_subagent_agents": 0,
+                 "output_tokens": 100, "cost": {"microdollars": 500000}}]},
+                "usage": {"by_model": [{"key": "glm-5.3", "output_tokens": 100,
+                                        "input_tokens": 10,
+                                        "cost": {"microdollars": 500000}}]},
+                "joint": {"cells": [{"pricing": {"unpriced_rows": 3}}]}},
+            "2026-11-03-23": {"activity": {"buckets": [
+                {"start": "2026-11-03T23:00:00Z", "max_agents": 7,
+                 "max_interactive_agents": 5, "max_subagent_agents": 2,
+                 "output_tokens": 200, "cost": {"microdollars": 1000000}}]},
+                "usage": {"by_model": [{"key": "glm-5.3", "output_tokens": 50,
+                                        "input_tokens": 5,
+                                        "cost": {"microdollars": 250000}}]},
+                "joint": {"cells": []}},
+        }
+
+        def fake_run(args, timeout):
+            if args[:2] == ["export", "range"]:
+                return {"closed_through": "2026-11-04T00:00:00Z",
+                        "earliest_date": "2025-11-20"}
+            stamp = args[2]
+            return hours.get(stamp)
+
+        with mock.patch.object(sources.shutil, "which", return_value="/bin/agentsview"), \
+             mock.patch.object(sources, "_agentsview_run", side_effect=fake_run):
+            out = sources.agentsview_window(
+                __import__("datetime").datetime(2026, 11, 3, 21, 0,
+                                                tzinfo=__import__("datetime").timezone.utc).timestamp(),
+                __import__("datetime").datetime(2026, 11, 4, 0, 0,
+                                                tzinfo=__import__("datetime").timezone.utc).timestamp())
+        self.assertTrue(out["readable"])
+        self.assertEqual(out["peak_agents"], 7)
+        self.assertEqual(out["cost_usd"], 1.5)
+        self.assertEqual(out["unpriced_rows"], 3)
+        self.assertEqual(len(out["hours"]), 3)
+        self.assertEqual(out["by_model"][0]["model"], "glm-5.3")
+        self.assertEqual(out["by_model"][0]["output_tokens"], 150,
+                         "the same model across hours is one row, summed")
+
+    def test_no_closed_hour_inside_the_window_says_so(self):
+        from unittest import mock
+        from luna_doctor import sources
+        with mock.patch.object(sources.shutil, "which", return_value="/bin/agentsview"), \
+             mock.patch.object(sources, "_agentsview_run",
+                               return_value={"closed_through": "2026-11-04T00:00:00Z"}):
+            out = sources.agentsview_window(0, 600)
+        self.assertTrue(out["readable"])
+        self.assertEqual(out["reason"], "no closed hour inside the window")
+        self.assertEqual(out["buckets"], [])

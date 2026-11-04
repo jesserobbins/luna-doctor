@@ -1551,6 +1551,125 @@ class Snapshot:
 AGENTSVIEW_TIMEOUT_S = 5.0
 
 
+AGENTSVIEW_BUCKET = "5m"
+AGENTSVIEW_MAX_HOURS = 24
+
+
+def _agentsview_run(args: list, timeout: float) -> dict | None:
+    exe = shutil.which("agentsview")
+    if exe is None:
+        return None
+    try:
+        proc = subprocess.run([exe] + args, capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout or "{}")
+    except ValueError:
+        return None
+
+
+def agentsview_window(since: float, until: float,
+                      *, max_hours: int = AGENTSVIEW_MAX_HOURS,
+                      timeout: float = AGENTSVIEW_TIMEOUT_S) -> dict:
+    """Closed UTC hours from the local agentsview archive, if it has any.
+
+    agentsview exports one CLOSED UTC hour at a time, with 5-minute buckets
+    carrying how many agents were in flight, how many of those were
+    interactive, subagent or automated, the output tokens and the cost. That is
+    history from every agent it archives - not just pi and claude-code - and it
+    ends at the last closed hour, so the current hour stays this tool's own
+    reading of the live logs.
+
+    Read-only and offline by construction: it runs `agentsview export`, never a
+    daemon, never a sync. A missing binary, a failed query or an old schema
+    reads as unavailable with a reason, never as zeros.
+    """
+    out = {"present": shutil.which("agentsview") is not None,
+           "readable": False, "closed_through": None, "hours": [],
+           "buckets": [], "by_model": [], "peak_agents": None,
+           "cost_usd": None, "unpriced_rows": 0, "reason": None}
+    if not out["present"]:
+        out["reason"] = "not installed"
+        return out
+    rng = _agentsview_run(["export", "range"], timeout)
+    if not rng or not rng.get("closed_through"):
+        out["reason"] = "export range did not answer"
+        return out
+    closed = _iso_to_epoch(rng.get("closed_through")) if "_iso_to_epoch" in globals() else None
+    if closed is None:
+        try:
+            closed = datetime.fromisoformat(
+                rng["closed_through"].replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            out["reason"] = "closed_through did not parse"
+            return out
+    out["closed_through"] = rng["closed_through"]
+    start = int(since // 3600) * 3600
+    end = min(until, closed)
+    hours = []
+    t = start
+    while t + 3600 <= min(closed, until) and len(hours) < max_hours:
+        hours.append(t)
+        t += 3600
+    if not hours:
+        out["readable"] = True
+        out["reason"] = "no closed hour inside the window"
+        return out
+    peak = 0
+    cost_micro = 0
+    tokens_by_model: dict = {}
+    buckets = []
+    unpriced = 0
+    for epoch in hours:
+        stamp = datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d-%H")
+        doc = _agentsview_run(["export", "hour", stamp, "--schema-version", "5",
+                               "--bucket", AGENTSVIEW_BUCKET], timeout)
+        if not doc:
+            out["reason"] = f"export hour {stamp} did not answer"
+            out["readable"] = True
+            return out
+        act = doc.get("activity") or {}
+        for b in act.get("buckets") or []:
+            n = b.get("max_agents")
+            if isinstance(n, int):
+                peak = max(peak, n)
+            cost = (b.get("cost") or {}).get("microdollars")
+            if isinstance(cost, int):
+                cost_micro += cost
+            buckets.append({"start": b.get("start"), "max_agents": n,
+                            "max_interactive": b.get("max_interactive_agents"),
+                            "max_subagent": b.get("max_subagent_agents"),
+                            "output_tokens": b.get("output_tokens")})
+        for row in ((doc.get("usage") or {}).get("by_model") or []):
+            key = row.get("key")
+            if not key:
+                continue
+            slot = tokens_by_model.setdefault(key, {"model": key, "output_tokens": 0,
+                                                    "input_tokens": 0,
+                                                    "cost_microdollars": 0})
+            slot["output_tokens"] += row.get("output_tokens") or 0
+            slot["input_tokens"] += row.get("input_tokens") or 0
+            slot["cost_microdollars"] += (row.get("cost") or {}).get("microdollars") or 0
+        for cell in ((doc.get("joint") or {}).get("cells") or []):
+            unpriced += int(((cell.get("pricing") or {}).get("unpriced_rows")) or 0)
+    out.update({
+        "readable": True,
+        "hours": [datetime.fromtimestamp(e, timezone.utc).strftime("%Y-%m-%dT%H:00Z")
+                  for e in hours],
+        "buckets": buckets,
+        "by_model": sorted(tokens_by_model.values(),
+                           key=lambda r: -r["cost_microdollars"])[:8],
+        "peak_agents": peak,
+        "cost_usd": round(cost_micro / 1_000_000.0, 4),
+        "unpriced_rows": unpriced,
+    })
+    return out
+
+
 def agentsview_status(timeout: float = AGENTSVIEW_TIMEOUT_S) -> dict:
     """What a local agentsview holds, or why we cannot say.
 

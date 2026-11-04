@@ -2848,6 +2848,23 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
     notes.append(report.Row(
         "note", "tiers here are inferred from model names; the served tier is not in these logs; "
                 "only a load test can see it."))
+    av = m.get("agentsview")
+    if av and av.get("buckets"):
+        bits = [f"{len(av.get('hours') or [])} closed UTC hour(s)"]
+        if av.get("peak_agents") is not None:
+            bits.append(f"peak {av['peak_agents']} agent(s) in flight")
+        if av.get("cost_usd"):
+            bits.append(f"reported model spend ${av['cost_usd']:.2f}")
+        if av.get("unpriced_rows"):
+            bits.append(f"{av['unpriced_rows']} row(s) the archive could not price")
+        top = (av.get("by_model") or [None])[0]
+        if top:
+            bits.append(f"top model {top['model']}")
+        notes.append(report.Row(
+            "archive",
+            " \u00b7 ".join(bits) + " (agentsview, this machine's session archive; "
+            "closed hours only, so the current hour is not in it)"))
+
     sub = m.get("subagents")
     if sub and sub.get("runs"):
         # The fan-out is a count of runs, measured from the async transcripts,
@@ -4712,6 +4729,16 @@ def cmd_analyze(args) -> int:
     # swamp enrichment (additive, never fails; opt-in through --swamp-root, and
     # installed is not in use, so only a swamp with runs in the window lands)
     _swamp_enrich(m, getattr(args, "swamp_root", None), now - hours * 3600, now)
+    # agentsview, when it is installed: closed UTC hours from every agent it
+    # archives, with agents in flight per 5-minute bucket, output tokens and
+    # reported model spend. It ends at the last closed hour, so the live hour
+    # stays this tool's own reading of the logs.
+    try:
+        av = sources.agentsview_window(now - hours * 3600, now)
+        if av.get("readable") and av.get("buckets"):
+            m["agentsview"] = av
+    except Exception:
+        pass
     # Subagent fan-out: a measurement of this machine, from the async
     # transcripts pi keeps beside the session that launched them. Additive and
     # never fatal - a store without them leaves the stanza out.
