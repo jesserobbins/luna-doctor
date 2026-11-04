@@ -3872,8 +3872,12 @@ def _default_run(ap, args) -> int:
     # analysis it frames must read the same payload.
     net = ["--offline"] if getattr(args, "offline", False) else (
         ["--online"] if getattr(args, "online", False) else [])
+    notice("starting: the account's capacity, then the last hour of logs, "
+           "then the picture")
     print(_account_line(allow_network=_account_network(args)))
-    code = _run(ap.parse_args(["analyze", "--since", "1h"] + net))
+    inner = ap.parse_args(["analyze", "--since", "1h"] + net)
+    inner._acked = True          # the bare run already said what it is doing
+    code = _run(inner)
     print()
     print(WELCOME)
     if code == 2:
@@ -3886,6 +3890,7 @@ def _default_run(ap, args) -> int:
               "window, run `luna-doctor analyze --since 7d`.")
         return code
     chart_args = ap.parse_args(["chart", "--since", "1h"] + net)
+    chart_args._acked = True
     try:
         _run(chart_args)
     except Exception as e:
@@ -4687,8 +4692,9 @@ def cmd_analyze(args) -> int:
     pi_roots = _check_roots(raw_pi, "--pi-root") if raw_pi else None
     claude_roots = _check_roots(raw_claude, "--claude-root") if raw_claude else None
     now = time.time()
-    notice(f"reading {', '.join(harnesses)} logs for the last "
-           f"{_window_word(hours)}, and the account's capacity")
+    if not getattr(args, "_acked", False):
+        notice(f"reading {', '.join(harnesses)} logs for the last "
+               f"{_window_word(hours)}, and the account's capacity")
     reqs = collect(hours, harnesses, pi_roots, claude_roots, now=now)
     m = analyse(reqs, hours)
     # The account's width bills the priority tier, so the attribution needs that

@@ -404,3 +404,21 @@ class Ergonomics(unittest.TestCase):
                             tier="interactive", start=now, end=now + 5,
                             outcome="completed")]
         self.assertEqual(cli.duration_sparkline(cli.analyse(reqs, 1), reqs), "")
+
+    def test_the_bare_run_acknowledges_before_it_can_block(self):
+        """The first line says what the run is doing, before any wait."""
+        import subprocess
+        import tempfile
+        home = tempfile.mkdtemp(prefix="luna-doctor-ack-")
+        env = dict(os.environ, HOME=home, NO_COLOR="1",
+                   LUNA_DOCTOR_STORE=os.path.join(home, "store"),
+                   LUNA_DOCTOR_CAPACITY=os.path.join(home, "cap.json"))
+        # a pty is what notice() requires; script(1) gives us one
+        proc = subprocess.run(["script", "-q", "/dev/null",
+                               os.path.join(ROOT, "bin", "luna-doctor"), "--offline"],
+                              capture_output=True, text=True, timeout=180,
+                              cwd=home, env=env)
+        self.assertIn("luna-doctor: starting:", proc.stdout)
+        first_notice = proc.stdout.index("luna-doctor: starting:")
+        self.assertLess(first_notice, proc.stdout.index("account:"),
+                        "the acknowledgement comes before the line that may wait")
