@@ -17,6 +17,21 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.4] - 2026-11-04
+
+### Changed
+
+- The answer is in the terminal. A `TREND` section now leads the report: the p90
+  of the first third against the last third says whether duration moved, the
+  correlation between in-flight count and p90 says what it tracks, the three
+  slowest requests are named, and the section states that these logs hold no
+  first-token time. It used to live only in the chart's footer.
+
+- The bare run writes its SVG and PNG to one stable path,
+  `~/.luna-doctor/last/chart.svg` and `.png`. Each run overwrites them, so no
+  timestamped files land in whatever directory the tool was called from. The
+  welcome text is four lines instead of nine.
+
 ## [0.6.0-alpha.3] - 2026-11-04
 
 ### Changed
