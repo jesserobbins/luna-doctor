@@ -1420,8 +1420,15 @@ def cmd_chart(args) -> int:
 
     out = args.out
     if not out:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        out = "luna-doctor-%s.svg" % stamp
+        # One stable place, so the tool stops dropping timestamped files in
+        # whatever directory it was run from: the same path every time, printed
+        # so it can be opened or pasted, and overwritten rather than piled up.
+        last = os.path.expanduser("~/.luna-doctor/last")
+        try:
+            os.makedirs(last, exist_ok=True)
+        except OSError:
+            last = "."
+        out = os.path.join(last, "chart.svg")
     try:
         with open(out, "w", encoding="utf-8") as fh:
             fh.write(svg)

@@ -2709,7 +2709,8 @@ def _service_rows(m: dict) -> list:
 
 
 
-def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
+def build_report(m: dict, head: str, adj: list[str], att=None,
+                 reqs: list | None = None) -> report.Report:
     """Turn analyse() metrics into the Report every renderer prints.
 
     `att` is an attribution.Attribution (optional): when present it becomes the
@@ -2799,6 +2800,15 @@ def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
             f"{c['admission_timeout']} blocked at admission)",
             "bad" if c["admission_timeout"] else "good"))
 
+    trend_rows: list[report.Row] = []
+    trend_text, worst = trend_summary(m, reqs or [])
+    trend_rows.append(report.Row("moving", trend_text))
+    if worst:
+        trend_rows.append(report.Row(
+            "slowest here",
+            " \u00b7 ".join(f"{r.duration:.0f}s {(r.model or '?')}"
+                             for r in worst) + " (this machine)"))
+
     lat = m.get("latency_by") or {}
     latency_rows: list[report.Row] = []
     tiers = m.get("latency_s") or {}
@@ -2878,7 +2888,8 @@ def build_report(m: dict, head: str, adj: list[str], att=None) -> report.Report:
                      + setting))
 
     sections = [report.Section(title, rows)
-                for title, rows in (("traffic", traffic), ("latency", latency_rows),
+                for title, rows in (("trend", trend_rows), ("traffic", traffic),
+                                    ("latency", latency_rows),
                                     ("pressure", pressure), ("notes", notes)) if rows]
     if att is not None:
         rows = [report.Row("the wall you hit", _VERDICT_WORDS.get(att.verdict, att.verdict), "bad"
@@ -2982,7 +2993,8 @@ def print_report(rep: report.Report, args) -> None:
 
 
 def render(m: dict, head: str, adj: list[str], as_json: bool,
-           stored: dict | None = None, args=None, att=None) -> None:
+           stored: dict | None = None, args=None, att=None,
+           reqs: list | None = None) -> None:
     if as_json:
         # A zero-request window returns from verdict() before the swamp
         # scratch key is consumed, and the envelope must never ship it:
@@ -3004,7 +3016,7 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
                             "findings": len(stored["findings"])}
         print(json.dumps(doc, indent=2))
         return
-    print_report(build_report(m, head, adj, att=att), args)
+    print_report(build_report(m, head, adj, att=att, reqs=reqs), args)
 
 
 # ---- live probe -------------------------------------------------------------
@@ -3784,19 +3796,14 @@ def _add_network(sp, subject: str = "the live model catalog from the gateway",
 # ---- the friendly default run (bare `luna-doctor`) ---------------------------
 
 WELCOME = (
-    "LunaRoute is the gateway in front of your models, and its capacity is\n"
-    "measured in concurrent requests, not tokens: how many may run at once.\n"
+    "LunaRoute measures capacity in concurrent requests, not tokens: how many\n"
+    "may run at once. This run read the last hour of local agent logs and asked\n"
+    "the account for its capacity, one authenticated GET cached for 5 minutes.\n"
     "\n"
-    "This run read the last hour of your local agent logs, and asked the\n"
-    "account for its capacity: one authenticated GET, cached for 5 minutes.\n"
-    "The same hour is drawn as a chart beside the report below, written to\n"
-    "this directory as an SVG and a PNG (their paths print after the report).\n"
-    "\n"
-    "The rest of the picture, one command per line:\n"
-    "  analyze   the same report for any window (luna-doctor analyze --since 24h)\n"
-    "  chart     the drawing alone, for any window\n"
-    "  fix       copy-paste settings that lower your concurrency\n"
-    "  capacity  the account line above, in full: plan, occupancy, admission"
+    "more:  analyze --since 15m|1h|24h   the same report for any window\n"
+    "       chart                      the picture alone\n"
+    "       fix                        settings that lower your concurrency\n"
+    "       capacity                   the account in full"
 )
 
 
@@ -4160,6 +4167,82 @@ def _utc_days(since: float, until: float) -> list:
 # generous for "this sample describes roughly now" and tight enough to refuse a
 # sample from yesterday.
 CAPACITY_FRESH_S = 15 * 60
+
+
+def trend_summary(m: dict, reqs: list) -> tuple[str, list]:
+    """Is latency moving, what does it track, and which requests were worst.
+
+    The three things a person asks about a short window, answered from the same
+    10-second buckets both the report and the picture use. Everything is this
+    machine's: the account reports no request latency at all.
+
+    The last clause is the honest limit. These logs hold a start time and the
+    time the record was written, never a first-token time, so a slower first
+    byte and slower generation look alike in every number here.
+    """
+    done = [r for r in timed(reqs) if r.outcome == "completed"]
+    if len(done) < 10:
+        return (f"too few completed requests to say whether latency moves "
+                f"({len(done)} here)", [])
+    lo = min(r.end for r in done)
+    hi = max(r.end for r in done)
+    n_cols = max(3, min(60, int((hi - lo) // 10) or 3))
+    per_col: list[list[float]] = [[] for _ in range(n_cols)]
+    inflight = [0] * n_cols
+    for r in done:
+        k = int((r.end - lo) / max(1e-9, (hi - lo)) * n_cols)
+        per_col[min(n_cols - 1, k)].append(r.duration)
+    for r in timed(reqs):
+        if r.start is None:
+            continue
+        end = r.end if r.end is not None else r.start
+        t = r.start
+        while t <= end:
+            k = int((t - lo) / max(1e-9, (hi - lo)) * n_cols)
+            inflight[min(n_cols - 1, k)] += 1
+            t += max(10.0, (hi - lo) / n_cols)
+    p90s = [pct(v, 90) if len(v) >= 3 else None for v in per_col]
+    third = max(1, n_cols // 3)
+    early = [v for v in p90s[:third] if v is not None]
+    late = [v for v in p90s[-third:] if v is not None]
+    pairs = [(inflight[k], p90s[k]) for k in range(n_cols) if p90s[k] is not None]
+    r_value = pearson([a for a, _ in pairs], [b for _, b in pairs]) if len(pairs) >= 5 else None
+    bits = []
+    if early and late:
+        a, b = pct(sorted(early), 50), pct(sorted(late), 50)
+        if a and b:
+            change = 100.0 * (b - a) / a
+            verb = "rose" if change >= 5 else ("fell" if change <= -5 else "held flat")
+            bits.append(f"duration p90 {verb} from {a:.0f}s to {b:.0f}s "
+                        f"({change:+.0f}%, first third to last third)")
+    if r_value is not None:
+        if r_value >= 0.4:
+            bits.append(f"duration rises with how many were in flight (r={r_value:+.2f}), "
+                        f"which is the shape of a queue")
+        elif r_value <= -0.4:
+            bits.append(f"duration is lower when more were in flight (r={r_value:+.2f}), "
+                        f"which is long requests running alone rather than a queue")
+        else:
+            bits.append(f"duration does not track how many were in flight "
+                        f"(r={r_value:+.2f}), so look at the model and the account")
+    bits.append("no first-token time is recorded in these logs, so a slower first "
+                "byte and slower generation look alike here")
+    worst = sorted(done, key=lambda r: -r.duration)[:3]
+    return "; ".join(bits), worst
+
+
+def pearson(xs: list, ys: list) -> float | None:
+    n = len(xs)
+    if n < 3:
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    if dx == 0 or dy == 0:
+        return None
+    return num / (dx * dy)
 
 
 def _account_network(args) -> bool:
@@ -4652,7 +4735,7 @@ def cmd_analyze(args) -> int:
               "envelope is not redacted. Use --for-issue alone to get the block.", file=sys.stderr)
         return 2
     if getattr(args, "for_issue", False) and not args.json:
-        rep = build_report(m, head, adj, att=att)
+        rep = build_report(m, head, adj, att=att, reqs=reqs)
         # The verdict already opens the block, so its own rows would repeat it.
         skip = ("the wall you hit", "why")
         rows = []
@@ -4713,7 +4796,7 @@ def cmd_analyze(args) -> int:
         except (OSError, ValueError, OverflowError) as e:
             # A read-only or unwritable store must not lose the report.
             print(f"luna-doctor: could not persist run: {e}", file=sys.stderr)
-    render(m, head, adj, args.json, stored=stored, args=args, att=att)
+    render(m, head, adj, args.json, stored=stored, args=args, att=att, reqs=reqs)
     return code
 
 

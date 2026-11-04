@@ -408,7 +408,7 @@ class DefaultRun(unittest.TestCase):
         # The welcome wraps at ~78 columns, so the wording is asserted on
         # whitespace-normalised text - the sentence, not the line breaks.
         flat = " ".join(out.split())
-        self.assertIn("gateway in front of your models", flat)
+        self.assertIn("measures capacity in concurrent requests", flat)
         self.assertIn("asked the account for its capacity", flat)
         for word in ("analyze", "chart", "fix", "capacity"):
             self.assertIn(word, out)
@@ -417,13 +417,17 @@ class DefaultRun(unittest.TestCase):
         # the analysis summary: the one-hour report's own stable rows
         self.assertIn("window: last 1h", out)
         self.assertIn("requests: 6", out)
-        # the chart beside it: both files land in the working directory,
-        # and the summary names both paths
-        svgs = [f for f in os.listdir(work) if f.endswith(".svg")]
-        pngs = [f for f in os.listdir(work) if f.endswith(".png")]
+        # the chart beside it: both files land in one stable place under
+        # $HOME - never in the directory the tool was run from - and the
+        # summary names both paths
+        self.assertEqual([f for f in os.listdir(work) if f.endswith((".svg", ".png"))], [],
+                         "the run must not litter the working directory")
+        last = os.path.join(home, ".luna-doctor", "last")
+        svgs = [f for f in os.listdir(last) if f.endswith(".svg")]
+        pngs = [f for f in os.listdir(last) if f.endswith(".png")]
         self.assertEqual(len(svgs), 1, "the chart SVG must be written once")
         self.assertEqual(len(pngs), 1, "the inline image must be written once")
-        with open(os.path.join(work, pngs[0]), "rb") as fh:
+        with open(os.path.join(last, pngs[0]), "rb") as fh:
             data = fh.read()
         self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertGreater(len(data), 0)
@@ -441,8 +445,12 @@ class DefaultRun(unittest.TestCase):
         self.assertEqual(first, "account: unknown (fetch with: luna-doctor capacity)")
         # the run went on: analysis and both chart files are still there
         self.assertIn("window: last 1h", out)
-        self.assertTrue(any(f.endswith(".svg") for f in os.listdir(work)))
-        self.assertTrue(any(f.endswith(".png") for f in os.listdir(work)))
+        # Artifacts live in one stable place under $HOME, not in the directory
+        # the tool happened to be run from.
+        self.assertEqual([f for f in os.listdir(work) if f.endswith((".svg", ".png"))], [],
+                         "the run must not litter the working directory")
+        last = os.path.join(home, ".luna-doctor", "last")
+        self.assertTrue(os.path.isfile(os.path.join(last, "chart.svg")), last)
 
     def test_the_exit_code_is_the_analysis_verdict(self):
         home = tempfile.mkdtemp(prefix="luna-doctor-home-")
