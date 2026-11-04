@@ -17,6 +17,19 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.6.0-alpha.9] - 2026-11-04
+
+### Fixed
+
+- The report died with an `IndexError` when a request started before the
+  earliest completion in the window. The trend columns are computed against the
+  window of completions, and only the right end was clamped, so a long request
+  that began earlier put a negative index into the in-flight count. Both ends
+  are clamped now.
+- A failure inside the trend no longer takes the report with it. It renders as
+  "the trend was not read in this window", with the reason, and the rest of the
+  report stands.
+
 ## [0.6.0-alpha.8] - 2026-11-04
 
 ### Changed
