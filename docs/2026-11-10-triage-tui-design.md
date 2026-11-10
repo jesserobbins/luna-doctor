@@ -180,3 +180,24 @@ and `chart` rendered text is a follow-on pass the builder can begin with the
 - Test fixtures: the suite stays offline. TUI screens get unit tests on
   their data-to-widget mapping, not snapshot tests of pixels.
 - Keybinding set. `[f]` for fix is a proposal, the rest is the builder's.
+
+## Second pass: the orientation dashboard (Jesse, after first use)
+
+First use showed the verdict screen too wordy, and the chart work unresolved:
+the long-window stacked-area picture does not read for most humans, while the
+1h picture (each request drawn) does. Decisions, taken 2026-11-10:
+
+1. The triage verdict screen becomes an orientation dashboard: medium density
+   (about 80 columns, 4-5 rows per panel), sparklines (Unicode blocks) carry
+   the shapes, prose shrinks to labels. Details move to keypresses.
+2. Sparklines in the dashboard; the rendered chart stays available on a
+   keypress (g opens it for the chosen window). No braille plots.
+3. The 1h chart stays the default picture and the useful one. The capacity
+   rule on every chart is drawn according to its provenance: an authoritative
+   (account) rule is a thick, clearly labelled solid line; a declared rule is
+   visibly thinner and dashed. Authority is a property of the mark, not only
+   of the label.
+4. Moon phases become the status vocabulary across surfaces: 🌕 healthy,
+   🌗 pressure, 🌑 blocked at admission (renderer degrades to ASCII as the
+   existing moon does). Each surface that shows a phase shows the legend
+   once. This is a status scale, decided by the planner, not decoration.
