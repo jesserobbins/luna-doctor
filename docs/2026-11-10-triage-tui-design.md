@@ -86,9 +86,9 @@ and falls back when absent. Visual target is Charm's terminal aesthetic
 (rounded borders, dimmed secondary text, bold accent on the verdict line)
 rendered through Textual's CSS, with no Go sidecar. Every verdict the TUI
 shows is computed by the existing Python code, so a Bubble Tea binary turns
-each of those into an IPC call. Open builder item: Textual's Python floor
-against this repo's `>=3.9` claim. If Textual needs newer, the extra gets an
-environment marker and the fallback covers older interpreters.
+each of those into an IPC call. Settled: Textual 8.2 requires Python 3.9 or
+newer, which is this repo's `>=3.9` floor, so the `luna-doctor[tui]` extra
+needs no environment marker and a machine without the extra keeps the fallback.
 
 ## The triage screen
 

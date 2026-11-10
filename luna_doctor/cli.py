@@ -3918,7 +3918,9 @@ def _default_run(ap, args) -> int:
               "Run `luna-doctor discover` to list the stores on this machine. For a wider "
               "window, run `luna-doctor analyze --since 7d`.")
         return code
-    chart_args = ap.parse_args(["chart", "--since", "1h"] + net)
+    # The declaration reaches the chart too: without it the picture's footer
+    # asks the person to declare a plan they just declared on this command.
+    chart_args = ap.parse_args(["chart", "--since", "1h"] + net + declared)
     chart_args._acked = True
     try:
         _run(chart_args)
@@ -3950,8 +3952,9 @@ def _try_tui_front_door(ap, argv: list[str]) -> int | None:
     The screen answers "I am having problems right now", so it takes the front
     door: no subcommand, both streams a terminal someone is reading, and the
     optional Textual extra installed. Everything else keeps `_default_run` - a
-    pipe (a script, an agent), a subcommand, a machine without the extra - so
-    the documented 0/1/2 exit codes its callers read stay where they are.
+    pipe (a script, an agent), a subcommand, a machine without the extra (absent,
+    or present and unloadable) - so the documented 0/1/2 exit codes its callers
+    read stay where they are.
 
     `--version` and `--help` are answered by argparse inside the parse below,
     before the screen is ever considered. A `--plan` reaches the screen through
@@ -3967,7 +3970,13 @@ def _try_tui_front_door(ap, argv: list[str]) -> int | None:
         return None
     if importlib.util.find_spec("textual") is None:
         return None
-    from luna_doctor import tui          # the import the extra is needed for
+    try:
+        from luna_doctor import tui      # the import the extra is needed for
+    except ImportError:
+        # find_spec saw a Textual that will not load: an install from another
+        # interpreter, or a version this module's API calls do not match. That
+        # is a machine without the extra, so the linear path takes the run.
+        return None
     return tui.run_triage(args.plan, online=_account_network(args))
 
 

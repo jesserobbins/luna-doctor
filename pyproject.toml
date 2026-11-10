@@ -35,6 +35,14 @@ Changelog = "https://github.com/jesserobbins/luna-doctor/blob/main/CHANGELOG.md"
 [project.scripts]
 luna-doctor = "luna_doctor.cli:main"
 
+[project.optional-dependencies]
+# The triage screen is the only code that imports Textual, so it is the only
+# reason to install it: a machine without the extra keeps the linear default
+# run and its documented 0/1/2 exit codes. Textual 8.2 is the tested major, and
+# its Python floor is 3.9 like this package's, so the pin needs no environment
+# marker.
+tui = ["textual>=8,<9"]
+
 [tool.setuptools]
 # The CLI, `fix` and `chart` all ship as one package. They have to be installed
 # together: `cli` loads its two sibling command files off disk, so installing it

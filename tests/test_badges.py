@@ -6,9 +6,12 @@ more trust than its state has is the bug this file guards. The states are
 sources.PROVENANCE_LEGEND's words plus attribution's "plan <name>" source.
 """
 
+import os
 import unittest
 
 from luna_doctor import badges
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class BadgeFor(unittest.TestCase):
@@ -51,6 +54,12 @@ class LegendLine(unittest.TestCase):
         line = badges.legend_line()
         self.assertNotIn("\n", line)
         self.assertEqual(line, line.rstrip())
+
+    def test_readme_quotes_the_legend_line(self):
+        """The README's legend is the one the screen draws, not a paraphrase."""
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
+            readme = fh.read()
+        self.assertIn(badges.legend_line(), readme)
 
 
 class BadgeHelp(unittest.TestCase):

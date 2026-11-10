@@ -17,6 +17,32 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- Bare `luna-doctor` in a terminal opens a triage screen. It asks one question
+  with six answers, reads the last 24 hours of local logs and the cached
+  account capacity while the question is on screen, and lands on one verdict.
+  The answer decides which evidence leads: a concurrency answer leads with the
+  admission counts, a slow answer with latency and queue waits, and a stuck
+  answer with the idle-budget diagnosis. `f` shows the `fix` output in place.
+- Every number on the verdict screen carries a provenance badge: `●` the account
+  reported it, `○` measured here as a lower bound, `◌` declared and not
+  measured. One legend line names all three, and the README quotes it.
+- The `tui` extra installs Textual 8, the screen's only dependency:
+  `pipx install 'luna-doctor[tui]'`. Without it, bare `luna-doctor` keeps the
+  linear default run and the documented 0/1/2 exit codes.
+- The bare run takes `--plan`, so one declaration reaches the triage screen and
+  the linear default run. On a subcommand, `--plan` stays after the subcommand.
+
+### Fixed
+
+- The bare run passed its `--plan` declaration to `analyze` and not to `chart`,
+  so the chart footer asked for a declaration the run already carried. The
+  declaration reaches both commands.
+- A Textual install that `find_spec` sees but that will not import fell through
+  the front door as a traceback. That machine now keeps the linear path, like a
+  machine without the extra.
+
 ## [0.6.0-alpha.9] - 2026-11-04
 
 ### Fixed

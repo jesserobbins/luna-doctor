@@ -49,10 +49,80 @@ ln -s "$PWD/bin/luna-doctor" ~/.local/bin/luna-doctor
 luna-doctor --version
 ```
 
+## First run
+
+`luna-doctor` with no arguments, in a terminal, opens the triage screen. It
+asks one question, "What are you seeing?", and offers six answers: requests
+failing or hanging, things are slow, "Stream ended without finish_reason", 429
+or concurrency errors, an agent that seems stuck mid-task, and nothing yet, just
+checking.
+
+The scan starts when the screen opens. The last 24 hours of local logs and the
+cached account capacity are read while the question is on screen, so the answer
+does not wait for the scan. The answer decides which evidence leads the verdict:
+
+| answer | the evidence that leads |
+|---|---|
+| requests failing or hanging | admission and denial counts |
+| 429 or concurrency errors | admission and denial counts |
+| things are slow | latency and queue waits |
+| "Stream ended without finish_reason" | the idle-budget diagnosis |
+| an agent that seems stuck mid-task | the idle-budget diagnosis |
+| nothing yet, just checking | the traffic summary |
+
+Press `f` for the `fix` output in place, and `q` to quit. The screen reads the
+capacity cache. As on every command that explains the account's numbers, a
+fresh cache is served without network, and a stale one is refreshed with one
+GET past the 5-minute TTL. `--offline` forbids that fetch, and the screen then
+reads whatever the cache holds, marked stale.
+
+The screen needs the optional extra. Without it, bare `luna-doctor` keeps the
+linear default run: the account line, the last hour analyzed, and the chart
+beside it.
+
+```bash
+pipx install 'luna-doctor[tui]'   # adds the triage screen to the install
+luna-doctor                       # a terminal: the triage screen
+echo | luna-doctor                # a pipe: the linear default run
+```
+
+### What the badges mean
+
+Every number on the verdict screen carries a badge, and one legend line names
+all three:
+
+```
+● authoritative (the account reports it) · ○ measured here, a lower bound · ◌ declared, not measured
+```
+
+`●` is a number the account reported. `○` is a number that this machine
+measured from its own logs, so it is a lower bound, because other machines are
+invisible. `◌` is a number that a person or a shipped default stated, and no
+measurement stands behind it. A `?` badge with its reason means unknown, and an
+unknown value is never a zero.
+
+### Where `--plan` goes
+
+`--plan` belongs to the command that carries it. On the bare run it is the front
+door's own declaration:
+
+```bash
+luna-doctor --plan max        # the triage screen, or the linear default run
+```
+
+On a subcommand, put `--plan` after the subcommand. The front door's `--plan`
+does not reach a subcommand's analysis:
+
+```bash
+luna-doctor analyze --plan max       # the report is judged against it
+luna-doctor chart --plan max         # the rule comes from it
+luna-doctor --plan max analyze       # the analysis reads no declaration
+```
+
 ## Quick start
 
 ```bash
-luna-doctor                  # the default run: the last hour analyzed, plus the chart
+luna-doctor                  # a terminal: the triage screen. A pipe: the default run
 luna-doctor discover          # what log stores exist, how big, how fresh
 luna-doctor analyze           # last 24h: what happened and what to adjust
 luna-doctor analyze --now     # last 15 minutes (alias for --since 15m)

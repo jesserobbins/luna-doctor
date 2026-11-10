@@ -11,6 +11,7 @@ screen's entry point are monkeypatched, and the one test that reads the
 `--online` refresh patches `sources.fetch_capacity` and `TriageApp.run`.
 """
 
+import builtins
 import importlib.util
 import sys
 import types
@@ -131,6 +132,32 @@ def test_without_textual_the_default_run_still_runs(monkeypatch):
     assert not calls, "the screen opened without Textual installed"
 
 
+def test_a_textual_that_will_not_import_falls_back_to_the_default_run(monkeypatch):
+    """`find_spec` sees the extra and the import fails: no traceback, no screen.
+
+    A Textual installed for another interpreter, or one whose API this module no
+    longer matches, is present to `find_spec` and unloadable to `import`. The
+    front door treats that machine the same as one without the extra.
+    """
+    calls = _stand_in_tui(monkeypatch)
+    _streams(monkeypatch, tty=True)
+    _textual(monkeypatch, installed=True)
+    default_run = _record_default_run(monkeypatch)
+    real_import = builtins.__import__
+
+    def cannot_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "luna_doctor" and "tui" in (fromlist or ()):
+            raise ImportError("cannot import name 'tui' from 'luna_doctor'")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", cannot_import)
+
+    assert cli.main([]) == 0
+
+    assert len(default_run) == 1, "an unloadable Textual raised at the front door"
+    assert not calls, "the screen opened through a failed import"
+
+
 def test_a_subcommand_keeps_the_default_run_out_of_it(monkeypatch):
     calls = _stand_in_tui(monkeypatch)
     _streams(monkeypatch, tty=True)
@@ -216,3 +243,24 @@ def test_plan_reaches_the_default_run_analyze(monkeypatch):
     assert [a.cmd for a in ran] == ["analyze"]
     assert ran[0].plan == "max", "the declaration did not reach the analysis"
     assert ran[0].since == "1h"
+
+
+def test_plan_reaches_the_default_run_chart(monkeypatch):
+    """The chart is part of the same run, so the declaration reaches it too.
+
+    Without it the chart footer asks for a `--plan` that this command already
+    carried, which reads as if the declaration was dropped.
+    """
+    _stand_in_tui(monkeypatch)
+    _streams(monkeypatch, tty=False)
+    _textual(monkeypatch, installed=True)
+    monkeypatch.setattr(cli, "_account_line", lambda allow_network=False: "account: unknown")
+    monkeypatch.setattr(cli, "_open_png_quietly", lambda path: None)
+    ran = []
+    monkeypatch.setattr(cli, "_run", lambda args: ran.append(args) or 0)
+
+    assert cli.main(["--plan", "max", "--offline"]) == 0
+
+    assert [a.cmd for a in ran] == ["analyze", "chart"]
+    assert ran[1].plan == "max", "the chart asked for a declaration the run carried"
+    assert ran[1].since == "1h"

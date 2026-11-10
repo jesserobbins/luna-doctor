@@ -200,8 +200,8 @@ def _plan_arg(value):
 def add_plan_arg(parser, help_text: str = PLAN_HELP) -> None:
     """Add the one --plan definition every command shares.
 
-    One helper so the bare run's front door, `chart`, `analyze`, `fix` and
-    `explain` cannot drift apart as the follow-up pass wires them to
+    One helper so the bare run's front door, `chart`, `analyze`, `fix`, `watch`
+    and `explain` cannot drift apart as the follow-up pass wires them to
     resolve_capacity().
     """
     parser.add_argument("--plan", default=None, metavar="NAME|N", help=help_text,
