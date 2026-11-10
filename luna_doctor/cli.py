@@ -31,6 +31,7 @@ import fcntl
 import glob
 import hashlib
 import http.client
+import importlib.util
 import io
 import json
 import math
@@ -3897,10 +3898,13 @@ def _default_run(ap, args) -> int:
     # analysis it frames must read the same payload.
     net = ["--offline"] if getattr(args, "offline", False) else (
         ["--online"] if getattr(args, "online", False) else [])
+    # A top-level --plan is a declaration about this account, so the analysis
+    # this run prints is judged against it rather than against nothing.
+    declared = ["--plan", args.plan] if getattr(args, "plan", None) else []
     notice("starting: the account's capacity, then the last hour of logs, "
            "then the picture")
     print(_account_line(allow_network=_account_network(args)))
-    inner = ap.parse_args(["analyze", "--since", "1h"] + net)
+    inner = ap.parse_args(["analyze", "--since", "1h"] + net + declared)
     inner._acked = True          # the bare run already said what it is doing
     code = _run(inner)
     print()
@@ -3940,6 +3944,33 @@ def _bare_duration(argv: list[str]) -> list[str]:
     return argv
 
 
+def _try_tui_front_door(ap, argv: list[str]) -> int | None:
+    """Bare `luna-doctor` in a terminal opens the triage screen.
+
+    The screen answers "I am having problems right now", so it takes the front
+    door: no subcommand, both streams a terminal someone is reading, and the
+    optional Textual extra installed. Everything else keeps `_default_run` - a
+    pipe (a script, an agent), a subcommand, a machine without the extra - so
+    the documented 0/1/2 exit codes its callers read stay where they are.
+
+    `--version` and `--help` are answered by argparse inside the parse below,
+    before the screen is ever considered. A `--plan` reaches the screen through
+    `args.plan`, and `--online` is the one capacity fetch `run_triage` makes
+    before the screen opens: the screen itself never touches the network.
+
+    None means the TUI path does not apply.
+    """
+    args = ap.parse_args(argv)
+    if args.cmd is not None:
+        return None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    if importlib.util.find_spec("textual") is None:
+        return None
+    from luna_doctor import tui          # the import the extra is needed for
+    return tui.run_triage(args.plan, online=_account_network(args))
+
+
 def main(argv: list[str] | None = None) -> int:
     # The gate is not resolved yet when argparse builds help text, so the
     # prerelease banner decides inline: no ANSI when NO_COLOR is set or
@@ -3954,6 +3985,9 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=_version_string())
     _add_network(ap, subject="the account's capacity", ttl="5-minute")
+    # The front door takes the same declaration a subcommand does: the screen
+    # and the default run both judge the account against it.
+    plan.add_plan_arg(ap)
     # No subcommand is the friendly default run, so `cmd` is optional; the
     # welcome path prints the account line, a short explanation, the
     # one-hour analysis and the chart beside it.
@@ -4116,6 +4150,10 @@ def main(argv: list[str] | None = None) -> int:
     _add_style(cp)
     cp.set_defaults(func=cmd_capacity)
 
+    tui_code = _try_tui_front_door(ap, argv)
+    if tui_code is not None:
+        return tui_code
+    # Not the front door: the linear path, parsed exactly as before.
     args = ap.parse_args(argv)
     if args.cmd is None:
         # the bare run: account line, welcome mat, the one-hour analysis,
@@ -4364,10 +4402,11 @@ def _window_word(hours: float) -> str:
 def _account_network(args) -> bool:
     """Does this run ask the account for its capacity?
 
-    Service first: `analyze`, `fix` and `chart` fetch the account's capacity by
-    default (cache-first, one GET when the cache is past its TTL), because the
-    account's numbers are what the report explains. `--offline` is the escape,
-    and it serves whatever the cache holds, marked stale.
+    Service first: the bare run's front door, `analyze`, `fix` and `chart`
+    fetch the account's capacity by default (cache-first, one GET when the
+    cache is past its TTL), because the account's numbers are what the report
+    explains. `--offline` is the escape, and it serves whatever the cache
+    holds, marked stale.
     """
     return not bool(getattr(args, "offline", False))
 
