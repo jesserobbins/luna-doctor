@@ -31,7 +31,7 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import Label, ListItem, ListView, Static
 
-from luna_doctor import attribution, badges, cli, sources
+from luna_doctor import attribution, badges, cli, explain, sources
 
 SCAN_HOURS = 24
 SCAN_HARNESSES = ("pi", "claude-code")
@@ -51,12 +51,12 @@ TRIAGE_CHOICES: list[tuple[str, str]] = [
 ]
 
 # Which evidence leads the verdict for each answer. "admission" is the admission
-# and saturation panel, "latency" the queue-wait panel, "stuck" the idle-budget
-# diagnosis, and "overview" the plain traffic summary.
+# and saturation panel, "latency" the latency-and-queue-wait panel, "stuck" the
+# idle-budget diagnosis, and "overview" the plain traffic summary.
 _LEAD = {
     "failing": "admission",
     "slow": "latency",
-    "finish_reason": "admission",
+    "finish_reason": "stuck",
     "concurrency": "admission",
     "stuck": "stuck",
     "checking": "overview",
@@ -150,8 +150,16 @@ def _occupancy_rows(cap) -> list[tuple[str, str]]:
     if available is not None:
         occupancy += f" · {available} available"
     ledger = cli._cap_field(now, "ledger")
-    if ledger == "up":
+    saturated = cli._cap_field(now, "saturated")
+    if saturated is not None:
+        occupancy += f" · saturated: {cli._cap_flag(saturated)}"
+    if ledger == "up" and in_use is not None:
         rows = [(badges.badge_for(sources.PROV_ACCOUNT), f"priority pool {occupancy}")]
+    elif ledger == "up":
+        # The ledger is healthy and the cap is there; the count is not. The
+        # row says so, so it must not wear the badge of a number the account
+        # reported.
+        rows = [(_BADGE_UNKNOWN, f"priority pool {occupancy}")]
     else:
         rows = [(_BADGE_UNKNOWN,
                  f"priority pool {occupancy}, but the ledger is "
@@ -169,26 +177,21 @@ def _overflow_rows(cap) -> list[tuple[str, str]]:
     """The overflow pool, as its own row: overflow traffic never appears in the
     priority pool's in_use.
 
-    An absent block is unknown, not a closed pool. The two null shapes are
-    different facts and are rendered differently: `limit: null` is a cap that
-    could not be read, `limit: 0` is a closed pool the account is entitled to
-    no overflow on, which is never saturated. The saturated flag is reported
-    as an observation ("saturated: yes"), never as a refusal.
-
-    The block is read as the CapacityPool the capacity report's own wording
-    helper reads, so both surfaces name the same shapes with the same words.
+    The wording is the capacity report's own (`cli._cap_pool_now`), so both
+    surfaces name the same shapes with the same words. An absent block is
+    unknown, not a closed pool. The two null shapes are different facts and are
+    rendered differently: `limit: null` is a cap that could not be read,
+    `limit: 0` is a closed pool the account is entitled to no overflow on, which
+    is never saturated. The saturated flag is reported as an observation
+    ("saturated: yes"), never as a refusal.
     """
     pool = cli._cap_field(getattr(cap, "now", None), "background")
-    if pool is None:
-        return [(_BADGE_UNKNOWN,
-                 "overflow pool not reported by the account (unknown) - a payload "
-                 "captured before the account reported this pool carries no such "
-                 "block, and that is not a pool with no capacity")]
     text = "overflow pool: " + cli._cap_pool_now(pool)
     limit = cli._cap_field(pool, "limit")
     if limit == 0 and not isinstance(limit, bool):
         return [(badges.badge_for(sources.PROV_ACCOUNT), text)]
-    text += f" · saturated: {cli._cap_flag(cli._cap_field(pool, 'saturated'))}"
+    if pool is not None:
+        text += f" · saturated: {cli._cap_flag(cli._cap_field(pool, 'saturated'))}"
     badge = badges.badge_for(sources.PROV_ACCOUNT) if limit is not None else _BADGE_UNKNOWN
     return [(badge, text)]
 
@@ -306,8 +309,14 @@ def _admission_evidence_rows(metrics: dict) -> list[tuple[str, str]]:
 
 
 def _latency_rows(metrics: dict) -> list[tuple[str, str]]:
-    """End-to-end latency per tier, from the completed requests only."""
-    rows = []
+    """The latency answer: the account's queue wait, then the local latencies.
+
+    The queue wait is the account's own admission measure, so it wears the
+    account badge even though it answers a latency question; a null there means
+    nobody waited that day, and cli._cap_wait says exactly that rather than a
+    zero. The local rows are completed requests only.
+    """
+    rows = [_queue_wait_row(metrics)]
     for tier in ("interactive", "background"):
         lat = (metrics.get("latency_s") or {}).get(tier) or {}
         if _count(lat.get("n")):
@@ -320,22 +329,58 @@ def _latency_rows(metrics: dict) -> list[tuple[str, str]]:
         rows.append((_BADGE_MEASURED,
                      f"p90 {_sec(top.get('p90'))} at concurrency {top.get('band')} "
                      f"against a mid-band p90 of {_sec(bands.get('mid_p90_baseline_s'))}"))
-    if not rows:
+    if len(rows) == 1:
         rows.append((_BADGE_MEASURED,
                      "no completed request in this window, so no latency was measured"))
     return rows
 
 
+def _queue_wait_row(metrics: dict) -> tuple[str, str]:
+    """The account's queue wait on the most recent complete UTC day it reports.
+
+    avg_queue_wait_ms is the account's own measure, so the row wears the account
+    badge. A window with no complete day in the account's record still gets a
+    row: the dimension is unknown, and a missing queue-wait line would read as
+    "nobody waited".
+    """
+    days = (metrics.get("capacity") or {}).get("window_days") or []
+    for day in reversed(days):
+        if isinstance(day, dict) and "avg_queue_wait_ms" in day:
+            return (badges.badge_for(sources.PROV_ACCOUNT),
+                    f"queue wait, the account's most recent complete UTC day "
+                    f"({day.get('day')}): {cli._cap_wait(day.get('avg_queue_wait_ms'))}")
+    return (_BADGE_UNKNOWN,
+            "queue wait: the account reports no complete UTC day inside this window "
+            "(unknown)")
+
+
 def _stuck_rows(metrics: dict) -> list[tuple[str, str]]:
-    """The idle-budget diagnosis: the class a stuck agent leaves in the logs."""
+    """The idle-budget diagnosis, plus one row from `explain --slowest`.
+
+    "Agent seems stuck" binds to the client_idle_timeout class *and* to the
+    explain --slowest panel (the builder-check decision), so one bounded row
+    carries the slowest request's own why, and the whole panel stays in
+    `luna-doctor explain`.
+    """
     stalled = _count((metrics.get("by_outcome") or {}).get("client_idle_timeout"))
-    if not stalled:
-        return [(_BADGE_MEASURED,
+    if stalled:
+        rows = [(_BADGE_MEASURED,
+                 f"{stalled} request(s) stalled until the harness's own idle budget killed "
+                 f"them (`client_idle_timeout`: the stream ended without a finish_reason)")]
+    else:
+        rows = [(_BADGE_MEASURED,
                  "no request in these logs ended on `client_idle_timeout`, so nothing "
                  "here shows the harness's idle budget stopping a stream")]
-    return [(_BADGE_MEASURED,
-             f"{stalled} request(s) stalled until the harness's own idle budget killed "
-             f"them (`client_idle_timeout`: the stream ended without a finish_reason)")]
+    slow = metrics.get("slowest_request") or {}
+    if slow.get("headline"):
+        rows.append((_BADGE_MEASURED,
+                     f"the slowest request here took {slow.get('duration', 'unknown')} "
+                     f"({slow.get('outcome', 'unknown')}): {slow['headline']}"))
+    else:
+        rows.append((_BADGE_MEASURED,
+                     "no request in these logs has a usable interval, so none can be "
+                     "ranked as the slowest"))
+    return rows
 
 
 def _overview_rows(metrics: dict) -> list[tuple[str, str]]:
@@ -444,7 +489,36 @@ def scan(plan: str | None = None) -> tuple:
             metrics["pressure_window_threshold"] = width
         except Exception:
             pass
+    digest = slowest_request_digest(reqs, metrics)
+    if digest is not None:
+        metrics["slowest_request"] = digest
     return metrics, sources.fetch_capacity(allow_network=False)
+
+
+def slowest_request_digest(reqs, metrics: dict):
+    """One bounded digest of the slowest request, from explain's own machinery.
+
+    "Agent seems stuck" reaches the explain --slowest panel too, so the screen
+    carries the slowest request's own why in one row. It calls explain.slowest
+    and explain.explain rather than re-deriving a reason from the metrics, and
+    it returns None when there is nothing to rank. It never raises: the screen
+    loses one row, not the verdict.
+    """
+    if not reqs:
+        return None
+    try:
+        slowest = explain.slowest(reqs, 1)[0]
+        served = metrics.get("capacity") or {}
+        if served.get("provenance") != sources.PROV_ACCOUNT:
+            served = None
+        doc = explain.explain(slowest, reqs, served, cli._priority_for_advice(metrics))
+    except Exception:
+        return None
+    return {
+        "duration": dict(doc["rows"]).get("duration", "unknown"),
+        "outcome": doc.get("outcome"),
+        "headline": doc.get("headline", ""),
+    }
 
 
 def scan_status(metrics: dict, cap, online: bool = False) -> str:
@@ -522,6 +596,7 @@ class TriageApp(App):
         self.metrics: dict | None = None
         self.capacity = None
         self.pending_choice: str | None = None
+        self.scan_failed: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("What are you seeing?", id="question")
@@ -551,11 +626,13 @@ class TriageApp(App):
         try:
             metrics, cap = scan(self.plan)
         except Exception as e:
-            self.call_from_thread(
-                self._set_status,
-                f"the scan failed ({type(e).__name__}: {e}); no verdict is available")
+            self.call_from_thread(self._scan_failed, f"{type(e).__name__}: {e}")
             return
         self.call_from_thread(self._scan_done, metrics, cap)
+
+    def _scan_failed(self, reason: str) -> None:
+        self.scan_failed = reason
+        self._set_status(f"the scan failed ({reason}); no verdict is available")
 
     def _scan_done(self, metrics: dict, cap) -> None:
         self.metrics = metrics
@@ -568,6 +645,9 @@ class TriageApp(App):
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         key = event.item.id
         if key is None:
+            return
+        if self.scan_failed is not None:
+            self._set_status(f"the scan failed ({self.scan_failed}); there is no verdict to show")
             return
         self.pending_choice = key
         if self.metrics is None:
@@ -590,6 +670,9 @@ class TriageApp(App):
 
     # -- the fix, in place, cache only ------------------------------------
     def action_show_fix(self) -> None:
+        if self.scan_failed is not None:
+            self._set_status(f"the scan failed ({self.scan_failed}); the fix output needs a scan")
+            return
         if self.metrics is None:
             self._set_status("the scan is still running; the fix output needs it")
             return

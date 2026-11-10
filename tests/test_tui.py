@@ -13,6 +13,7 @@ lower bound), then the verdict. The verdict rows come from `cli.verdict`, so a
 second verdict implementation cannot drift from the CLI's.
 """
 
+import asyncio
 import json
 import os
 import time
@@ -112,12 +113,17 @@ class TriageChoices(unittest.TestCase):
             ["failing", "slow", "finish_reason", "concurrency", "stuck", "checking"],
             [key for _text, key in tui.TRIAGE_CHOICES])
         self.assertEqual(
-            ["admission", "latency", "admission", "admission", "stuck", "overview"],
+            ["admission", "latency", "stuck", "admission", "stuck", "overview"],
             [tui.pick_lead(key) for _text, key in tui.TRIAGE_CHOICES])
 
     def test_concurrency_and_stuck_lead_their_own_panels(self):
         self.assertEqual("admission", tui.pick_lead("concurrency"))
         self.assertEqual("stuck", tui.pick_lead("stuck"))
+
+    def test_finish_reason_leads_the_idle_budget_diagnosis(self):
+        """The spec binds "stream ended without finish_reason" to its existing
+        diagnosis path, the client_idle_timeout class, not to admission."""
+        self.assertEqual("stuck", tui.pick_lead("finish_reason"))
 
     def test_every_answer_has_a_visible_label(self):
         for text, _key in tui.TRIAGE_CHOICES:
@@ -188,6 +194,12 @@ class DegradedPayload(unittest.TestCase):
             self.assertNotRegex(text, r"(?<![\w.])0(?![\w.])",
                                 f"a null became a zero: {text!r}")
 
+    def test_a_missing_payload_says_the_account_did_not_answer(self):
+        rows = tui.account_rows(_metrics(), None)
+        self.assertEqual(1, len(rows))
+        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), rows[0][0])
+        self.assertIn("the account did not answer", rows[0][1])
+
 
 # ---- (d) an empty window says what is missing ------------------------------
 class EmptyWindow(unittest.TestCase):
@@ -217,6 +229,81 @@ class StuckAnswer(unittest.TestCase):
         named = [text for _badge, text in rows if "client_idle_timeout" in text]
         self.assertTrue(named)
         self.assertIn("no request", named[0])
+
+    def test_the_stuck_answer_adds_one_slowest_request_row(self):
+        """The builder-check decision binds "agent seems stuck" to the
+        explain --slowest panel as well, so one bounded row carries that
+        request's own why - not the whole panel."""
+        metrics = _metrics(slowest_request={
+            "duration": "312.4s", "outcome": "client_idle_timeout",
+            "headline": "The stream stopped without a finish_reason."})
+        rows = [row for row in tui.local_rows("stuck", metrics)
+                if "slowest request" in row[1]]
+        self.assertEqual(1, len(rows))
+        self.assertEqual(badges.BADGE_MEASURED, rows[0][0])
+        self.assertIn("312.4s", rows[0][1])
+        self.assertIn("client_idle_timeout", rows[0][1])
+        self.assertIn("finish_reason", rows[0][1])
+
+    def test_a_window_with_nothing_to_rank_says_so(self):
+        rows = [row for row in tui.local_rows("stuck", _metrics())
+                if "slowest" in row[1]]
+        self.assertEqual(1, len(rows))
+        self.assertIn("no request", rows[0][1])
+
+    def test_the_slowest_digest_uses_the_explain_machinery(self):
+        """One digest, from explain's own selectors: nothing here re-derives a
+        reason from the metrics."""
+        doc = {"headline": "The stream stopped without a finish_reason.",
+               "rows": [("request", "pi/abc"), ("duration", "312.4s")],
+               "actions": [], "outcome": "client_idle_timeout", "room": True}
+        with mock.patch.object(tui.explain, "slowest", return_value=["req"]) as slow, \
+                mock.patch.object(tui.explain, "explain", return_value=doc):
+            digest = tui.slowest_request_digest(["req"], _metrics())
+        self.assertEqual({"duration": "312.4s", "outcome": "client_idle_timeout",
+                          "headline": "The stream stopped without a finish_reason."},
+                         digest)
+        slow.assert_called_once_with(["req"], 1)
+
+    def test_the_slowest_digest_is_none_without_requests_or_on_failure(self):
+        self.assertIsNone(tui.slowest_request_digest([], _metrics()))
+        with mock.patch.object(tui.explain, "slowest", side_effect=RuntimeError("boom")):
+            self.assertIsNone(tui.slowest_request_digest(["req"], _metrics()))
+
+
+# ---- (e2) "things are slow" reports the account's queue wait ----------------
+class SlowAnswer(unittest.TestCase):
+    def _rows(self, metrics):
+        return [row for row in tui.local_rows("slow", metrics)
+                if "queue wait" in row[1]]
+
+    def test_the_latest_complete_day_carries_the_queue_wait(self):
+        metrics = _metrics(capacity={"provenance": "account", "window_days": [
+            {"day": "2026-10-31", "avg_queue_wait_ms": 4200.0},
+            {"day": "2026-11-01", "avg_queue_wait_ms": 181478.12}]})
+        rows = self._rows(metrics)
+        self.assertEqual(1, len(rows))
+        self.assertEqual(badges.BADGE_ACCOUNT, rows[0][0],
+                         "the queue wait is the account's own measure")
+        self.assertIn("2026-11-01", rows[0][1])
+        self.assertIn("181.5s", rows[0][1])
+
+    def test_a_day_nobody_waited_says_so_rather_than_a_zero(self):
+        metrics = _metrics(capacity={"provenance": "account", "window_days": [
+            {"day": "2026-11-01", "avg_queue_wait_ms": None}]})
+        rows = self._rows(metrics)
+        self.assertIn("no waiting that day", rows[0][1])
+        self.assertNotIn("0.0s", rows[0][1])
+
+    def test_without_an_account_day_the_queue_wait_is_unknown(self):
+        rows = self._rows(_metrics())
+        self.assertEqual(1, len(rows))
+        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), rows[0][0])
+        self.assertIn("unknown", rows[0][1])
+
+    def test_the_latency_rows_still_carry_the_local_percentiles(self):
+        rows = tui.local_rows("slow", _metrics())
+        self.assertTrue(any("interactive latency" in text for _badge, text in rows))
 
 
 # ---- (f) the occupancy line is qualified by the ledger --------------------
@@ -283,6 +370,40 @@ class OverflowPoolShapes(unittest.TestCase):
         self.assertIn("in use 0 of 12 concurrent requests", text)
         self.assertIn("saturated: no", text)
 
+    def test_an_absent_block_uses_the_capacity_reports_own_words(self):
+        """A payload captured before the account reported the pool has no such
+        block: the row is the capacity report's sentence, not a second one."""
+        payload = _payload("capacity-2026-10-23.json")
+        rows = [row for row in tui.account_rows(_metrics(), _cap(payload))
+                if "overflow" in row[1]]
+        self.assertEqual(1, len(rows))
+        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), rows[0][0])
+        self.assertEqual("overflow pool: " + cli._cap_pool_now(None), rows[0][1])
+
+
+# ---- the priority pool's own saturated flag is an observation -------------
+class PriorityPoolObservation(unittest.TestCase):
+    def test_a_saturated_sample_keeps_its_flag_when_the_count_is_unread(self):
+        payload = _payload("capacity-2026-11-02.json")
+        payload["data"]["now"].update({"in_use": None, "available": None,
+                                        "saturated": True})
+        rows = [row for row in tui.account_rows(_metrics(), _cap(payload))
+                if "priority pool" in row[1]]
+        self.assertEqual(1, len(rows))
+        badge, text = rows[0]
+        self.assertIn("in use unknown (not reported)", text)
+        self.assertIn("saturated: yes", text)
+        self.assertNotIn("denied", text.lower(), "an observation, never a refusal")
+        self.assertNotIn("refus", text.lower())
+        self.assertNotEqual(badges.BADGE_ACCOUNT, badge,
+                            "an unread count is not authoritative")
+
+    def test_a_healthy_sample_reports_the_flag_as_no(self):
+        rows = [row for row in tui.account_rows(
+                    _metrics(), _cap(_payload("capacity-2026-11-02.json")))
+                if "priority pool" in row[1]]
+        self.assertIn("saturated: no", rows[0][1])
+
 
 # ---- (h) refusal words come only from admission counts -------------------
 class RefusalWordsComeFromAdmissionCounts(unittest.TestCase):
@@ -337,9 +458,41 @@ class TriageAppSurface(unittest.TestCase):
     def test_the_scan_reads_the_capacity_cache_only(self):
         with mock.patch.object(tui.cli, "collect", return_value=[]), \
                 mock.patch.object(tui.cli, "analyse", return_value={}), \
-                mock.patch.object(tui.cli, "_capacity_metrics", return_value={}), \
+                mock.patch.object(tui.cli, "_capacity_metrics",
+                                  return_value={}) as metrics_block, \
                 mock.patch.object(tui.sources, "fetch_capacity", return_value=None) as fetch:
             metrics, cap = tui.scan(plan="apex")
         fetch.assert_called_once_with(allow_network=False)
+        self.assertIs(False, metrics_block.call_args.kwargs.get("allow_network"),
+                      "the CLI's capacity block is read cache-only too")
         self.assertEqual("apex", metrics["declared_plan"])
         self.assertIsNone(cap)
+
+
+class TriageAppFailure(unittest.TestCase):
+    """A failed scan must not be reported as a scan still in progress."""
+
+    def test_a_failed_scan_is_never_reported_as_still_running(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        with mock.patch.object(tui, "scan", side_effect=RuntimeError("boom")):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                self.assertEqual("RuntimeError: boom", app.scan_failed)
+                self.assertIn("the scan failed", self._status(app))
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIn("the scan failed", self._status(app))
+                self.assertNotIn("still running", self._status(app))
+                await pilot.press("f")
+                await pilot.pause()
+                self.assertIn("the scan failed", self._status(app))
+                self.assertNotIn("still running", self._status(app))
+                await pilot.press("q")
+
+    @staticmethod
+    def _status(app) -> str:
+        return str(app.query_one("#status").render())
