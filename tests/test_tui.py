@@ -200,6 +200,17 @@ class DegradedPayload(unittest.TestCase):
         self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), rows[0][0])
         self.assertIn("the account did not answer", rows[0][1])
 
+    def test_a_declared_plan_still_reaches_a_machine_with_no_payload(self):
+        """--plan exists so the ◌ declared width can appear at the front door,
+        so a missing capacity payload must not hide the declaration."""
+        rows = tui.account_rows({"declared_plan": "max"}, None)
+        self.assertIn("the account did not answer", rows[0][1])
+        declared = [row for row in rows if row[0] == badges.BADGE_DECLARED]
+        self.assertEqual(1, len(declared))
+        self.assertIn("priority concurrency 4", declared[0][1])
+        self.assertIn("declared", declared[0][1])
+        self.assertIn("plan max", declared[0][1])
+
 
 # ---- (d) an empty window says what is missing ------------------------------
 class EmptyWindow(unittest.TestCase):
@@ -249,7 +260,20 @@ class StuckAnswer(unittest.TestCase):
         rows = [row for row in tui.local_rows("stuck", _metrics())
                 if "slowest" in row[1]]
         self.assertEqual(1, len(rows))
-        self.assertIn("no request", rows[0][1])
+        self.assertIn("not established (unknown)", rows[0][1])
+
+    def test_an_unranked_row_claims_no_cause_it_did_not_establish(self):
+        """A digest that is None may be an explain that raised, not an empty
+        window: the row states that nothing was ranked, never why."""
+        with mock.patch.object(tui.explain, "slowest", side_effect=RuntimeError("boom")):
+            digest = tui.slowest_request_digest(["req"], _metrics())
+        self.assertIsNone(digest)
+        rows = [row for row in tui.local_rows("stuck", _metrics(slowest_request=digest))
+                if "slowest" in row[1]]
+        self.assertEqual(1, len(rows))
+        self.assertNotIn("usable interval", rows[0][1])
+        self.assertNotIn("no request", rows[0][1])
+        self.assertIn("not established (unknown)", rows[0][1])
 
     def test_the_slowest_digest_uses_the_explain_machinery(self):
         """One digest, from explain's own selectors: nothing here re-derives a
@@ -345,11 +369,13 @@ class OverflowPoolShapes(unittest.TestCase):
         self.assertNotIn("entitled to no overflow", text)
 
     def test_a_zero_cap_is_no_entitlement_and_never_saturated(self):
-        _badge, text = self._overflow({"limit": 0, "in_use": 0,
-                                       "available": 0, "saturated": False})
+        badge, text = self._overflow({"limit": 0, "in_use": 0,
+                                      "available": 0, "saturated": False})
         self.assertIn("entitled to no overflow", text)
         self.assertIn("never saturated", text)
         self.assertNotIn("cap unknown", text)
+        self.assertEqual(badges.BADGE_ACCOUNT, badge,
+                         "a closed pool rests on its cap, so it stays authoritative")
 
     def test_the_two_null_shapes_are_two_different_strings(self):
         unknown = self._overflow({"limit": None, "in_use": None,
@@ -359,10 +385,27 @@ class OverflowPoolShapes(unittest.TestCase):
         self.assertNotEqual(unknown, closed)
 
     def test_a_real_cap_with_an_unread_count_keeps_the_cap(self):
-        _badge, text = self._overflow({"limit": 12, "in_use": None,
-                                       "available": None, "saturated": None})
+        badge, text = self._overflow({"limit": 12, "in_use": None,
+                                      "available": None, "saturated": None})
         self.assertIn("unknown (not reported)", text)
         self.assertIn("12", text)
+        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), badge,
+                         "a cap beside a count nobody could read is not authoritative")
+
+    def test_an_unread_count_is_not_authoritative_in_either_pool(self):
+        """One rule for both pools: the same fact shape reads the same way."""
+        payload = _payload("capacity-2026-11-02.json")
+        payload["data"]["now"].update({
+            "in_use": None, "available": None, "saturated": None,
+            "background": {"limit": 12, "in_use": None,
+                           "available": None, "saturated": None}})
+        rows = tui.account_rows(_metrics(), _cap(payload))
+        priority = [row for row in rows if "priority pool" in row[1]]
+        overflow = [row for row in rows if "overflow" in row[1]]
+        self.assertEqual(1, len(priority))
+        self.assertEqual(1, len(overflow))
+        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), overflow[0][0])
+        self.assertEqual(priority[0][0], overflow[0][0])
 
     def test_a_reported_pool_shows_its_count_and_its_flag(self):
         _badge, text = self._overflow({"limit": 12, "in_use": 0,
@@ -496,3 +539,50 @@ class TriageAppFailure(unittest.TestCase):
     @staticmethod
     def _status(app) -> str:
         return str(app.query_one("#status").render())
+
+
+class TriageAppLiteralText(unittest.TestCase):
+    """Bracketed text on this screen is prose, never Rich markup.
+
+    The status line repeats the CLI's words, and those name keys as [f] and
+    [q]; the fix panel prints the fix block's own output, which may name a
+    tier as [agents]. Parsed as markup, the brackets and what they hold vanish,
+    so the screen tells a reader to press nothing.
+    """
+
+    FIX = "run `luna-doctor fix --tier [agents]`, then press [f] again"
+
+    def test_bracketed_prose_survives_the_status_line_and_the_fix_panel(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        metrics = _metrics()
+        cap = _cap(_payload("capacity-2026-11-02.json"))
+        with mock.patch.object(tui, "scan", return_value=(metrics, cap)), \
+                mock.patch.object(tui, "fix_output", return_value=self.FIX):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                status = self._text(app, "#status")
+                self.assertIn("[f] shows the fix", status)
+                self.assertIn("[q] quits", status)
+                await pilot.press("f")
+                await self._settle(pilot, lambda: "[agents]" in self._text(app, "#fix-text"))
+                self.assertIn("[agents]", self._text(app, "#fix-text"))
+                self.assertIn("--tier [agents]", self._text(app, "#fix-text"))
+                self.assertIn("[q] quits", self._text(app, "#status"))
+                await pilot.press("q")
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
+
+    @staticmethod
+    def _text(app, selector) -> str:
+        return str(app.query_one(selector).render())

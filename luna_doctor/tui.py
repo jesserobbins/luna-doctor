@@ -93,11 +93,18 @@ def account_rows(metrics: dict, cap) -> list[tuple[str, str]]:
     authoritative badge. The two overflow-pool null shapes stay apart: a cap
     that could not be read is unknown, a zero cap is a closed pool. Refusal
     words appear only where the admission counts put them.
+
+    A plan the person declared still gets its row when no payload is cached:
+    --plan exists so the ◌ declared width can appear at the front door, and a
+    missing payload is no reason to hide a declaration the reader typed.
     """
     if cap is None:
-        return [(_BADGE_UNKNOWN,
+        rows = [(_BADGE_UNKNOWN,
                  "the account did not answer: no capacity payload is cached "
                  "(`luna-doctor capacity --online` fetches one)")]
+        if (metrics or {}).get("declared_plan"):
+            rows.append(_width_row(metrics, None))
+        return rows
     rows = [_width_row(metrics, cap)]
     rows.extend(_occupancy_rows(cap))
     rows.extend(_overflow_rows(cap))
@@ -112,7 +119,7 @@ def _width_row(metrics: dict, cap) -> tuple[str, str]:
     --plan declaration, and this row wears the badge that decision reports:
     ● when the account said the number, ◌ when a person declared it.
     """
-    config = cap.config
+    config = cli._cap_field(cap, "config")   # cap is None when nothing is cached
     served = config.to_dict() if hasattr(config, "to_dict") else None
     value, source = attribution.resolve_priority_concurrency(
         served, (metrics or {}).get("declared_plan"))
@@ -184,6 +191,10 @@ def _overflow_rows(cap) -> list[tuple[str, str]]:
     `limit: 0` is a closed pool the account is entitled to no overflow on, which
     is never saturated. The saturated flag is reported as an observation
     ("saturated: yes"), never as a refusal.
+
+    The authoritative badge follows the same rule as the priority pool's
+    occupancy row: a cap beside a count nobody could read is not a line the
+    account reported. A closed pool rests on its cap alone, so it keeps ●.
     """
     pool = cli._cap_field(getattr(cap, "now", None), "background")
     text = "overflow pool: " + cli._cap_pool_now(pool)
@@ -192,7 +203,8 @@ def _overflow_rows(cap) -> list[tuple[str, str]]:
         return [(badges.badge_for(sources.PROV_ACCOUNT), text)]
     if pool is not None:
         text += f" · saturated: {cli._cap_flag(cli._cap_field(pool, 'saturated'))}"
-    badge = badges.badge_for(sources.PROV_ACCOUNT) if limit is not None else _BADGE_UNKNOWN
+    read = limit is not None and cli._cap_field(pool, "in_use") is not None
+    badge = badges.badge_for(sources.PROV_ACCOUNT) if read else _BADGE_UNKNOWN
     return [(badge, text)]
 
 
@@ -377,9 +389,13 @@ def _stuck_rows(metrics: dict) -> list[tuple[str, str]]:
                      f"the slowest request here took {slow.get('duration', 'unknown')} "
                      f"({slow.get('outcome', 'unknown')}): {slow['headline']}"))
     else:
+        # The digest is None for more than one reason - an empty window, an
+        # explain that raised, a request set with nothing to rank - and this
+        # row cannot tell them apart. It states the one fact it has: no request
+        # was ranked, and why is not established here.
         rows.append((_BADGE_MEASURED,
-                     "no request in these logs has a usable interval, so none can be "
-                     "ranked as the slowest"))
+                     "the slowest request here is not established (unknown): this "
+                     "scan ranked none, and it recorded no reason why"))
     return rows
 
 
@@ -603,14 +619,17 @@ class TriageApp(App):
         yield ListView(
             *[ListItem(Label(text), id=key) for text, key in TRIAGE_CHOICES],
             id="choices")
-        yield Static("", id="status")
+        # markup=False: this line repeats the CLI's words, and those name keys
+        # as [f] and [q]. As Rich markup, the brackets and what they hold vanish.
+        yield Static("", id="status", markup=False)
         with VerticalScroll(id="verdict"):
             yield Static("", id="account", classes="panel")
             yield Static("", id="local", classes="panel")
             yield Static("", id="verdict-line", classes="panel")
             yield Static(badges.legend_line(), id="legend")
         with VerticalScroll(id="fix"):
-            yield Static("", id="fix-text")
+            # markup=False: the fix block's prose may name a tier as [agents].
+            yield Static("", id="fix-text", markup=False)
 
     def on_mount(self) -> None:
         self._set_status("scanning local logs… (last 24h)")
