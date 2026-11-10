@@ -35,7 +35,7 @@ which that starts belongs to the account. It is not in these logs.
 | an outcome id in the report, a verdict word, admission conversion, starved peers | [outcomes.md](references/outcomes.md) |
 | "why 300 seconds", "why 120 seconds", the pre-header wait, the per-model admission deadline, response headers, the body ceiling | [gateway-contract.md](references/gateway-contract.md) |
 | the `fix` block: a key with `from -> to`, a 400 about maximum context length or `maxTokens` versus `contextWindow`, a V or U row, `unchecked` | [fix-families.md](references/fix-families.md) |
-| the chart: bands, the grey outline, a flare tick, the dashed rule, the footer rows | [chart-anatomy.md](references/chart-anatomy.md) |
+| the chart: bands, the grey outline, a flare tick, the capacity rule, the footer rows | [chart-anatomy.md](references/chart-anatomy.md) |
 
 ## Command Index
 

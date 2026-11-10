@@ -67,7 +67,7 @@ logs and sends nothing anywhere.
 writes an SVG and a PNG in the working directory. `--no-image` writes the SVG
 alone. Use it when the story is shape rather than amount. Bands that pile at
 the same x as a cluster of flare ticks close in one picture an argument that
-three paragraphs can reopen. When the stack never approaches the dashed rule,
+three paragraphs can reopen. When the stack never approaches the capacity rule,
 say so plainly. Concurrency is not what this user is hitting. Add `--plan` only
 when the user declared one. The rule is labelled with its own source.
 

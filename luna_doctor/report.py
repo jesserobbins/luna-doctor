@@ -28,16 +28,22 @@ def status_moon(exit_code: int | None, headline: str | None) -> str:
     The scale: a clean window is the full moon, pressure the quarter moon, and
     a window where requests were blocked at admission the new moon - the
     darkest moon for the state that most needs a person. The exit code carries
-    the first two (0 clean, 1 pressure) and the headline carries the third:
+    the first two (0 clean, 1 pressure) and the headline carries the rest:
     `cli.verdict` names blocked admissions in that line, and its healthy
     headline -- "none blocked at admission" -- is why the code is read first.
-    Any other code (2: nothing was measured, or the account's claim without
-    local evidence) and a report that carries no verdict keep the plain moon:
-    no status is claimed, so no legend is printed.
+    Exit 0 does not always mean healthy: when the account reports pressure and
+    this machine measured none of its own, the verdict exits 0 and says so in
+    the headline. That claim is pressure, so it draws the quarter moon. Any
+    other code (2: nothing was measured) and a report that carries no verdict
+    keep the plain moon: no status is claimed, so no legend is printed.
     """
     if exit_code is None:
         return "moon"
     if exit_code == 0:
+        # the account's claim, with no local evidence to explain it, is
+        # pressure nobody here measured - not a healthy window
+        if "reports pressure" in (headline or ""):
+            return MOON_QUARTER
         return MOON_FULL
     if exit_code == 1:
         if "blocked at admission" in (headline or ""):

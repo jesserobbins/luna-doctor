@@ -43,6 +43,9 @@ Grey outline   the busiest moment in each column. Averages smooth away the
                the peaks the areas cannot. It is the envelope of the
                account total: the stack's own height at its worst.
 Open circle    the exact peak, and when it happened.
+Generated      the timestamp of the drawing sits at the right of the title line:
+               a picture of a past window is only honest with its own date
+               on it.
 Priority rule  the account's priority concurrency, drawn when the number is
                established. Authority is a property of the mark, not only
                of its label: a rule read from the account is a thick solid
@@ -69,11 +72,15 @@ Direct labels  each band is named at its right-hand edge, in its own
                the agent whenever more than one agent has traffic, so
                attribution never needs a second picture. There is no
                legend box: a legend makes the eye travel.
-Footer         provenance: window, version, which numbers are measured
-               (per-model rejection deadlines, with sample counts) and
-               which are declared (--plan). Rows are wrapped to the canvas
-               width and the canvas grows downward when there is more to
-               say: provenance is never cut to fit.
+Footer         two short lines, and no more. The first gives the rule's
+               provenance in a phrase - the number, its source, the plan it
+               came from, and a set-aside --plan when there was one -, and
+               says the rule is not established when nothing is known. The
+               second gives the one reading that matters: the peak against
+               the rule, or the rejection count when there is no rule to
+               read it against. A row that runs past the canvas wraps, but
+               there are only ever these two: what the picture could not
+               show belongs in `luna-doctor explain`, not under the mark.
 
 WHAT WAS CHOSEN NOT TO DRAW.
 
@@ -773,87 +780,7 @@ def _tail_rank_panel(shapes, *, reqs, px, plot_w, y0, y1):
                                    "black max", size=9.5, fill=C["muted"]))
 
 
-def _trend_verdict(reqs, t0, t1, n_cols):
-    """Is latency rising, and what does it track? One sentence, measured.
-
-    The p90 of the first third against the p90 of the last third says whether it
-    rose. The correlation between a column's in-flight count and that column's
-    p90 says whether the rise tracks load. The account carries no latency at
-    all, so everything here is this machine's.
-
-    It also says what it cannot see: these logs hold a start time and the time
-    the record was written, never a first-token time, so a slower first byte and
-    slower generation look alike in every number below.
-    """
-    done = [r for r in reqs if getattr(r, "outcome", "") == "completed"
-            and getattr(r, "start", None) is not None
-            and getattr(r, "end", None) is not None and r.end > r.start]
-    if len(done) < 10:
-        return ("too few completed requests to say whether latency moves "
-                f"({len(done)} here)")
-    per_col = [[] for _ in range(n_cols)]
-    inflight = [0] * n_cols
-    for r in done:
-        k = int((r.end - t0) / max(1e-9, (t1 - t0)) * n_cols)
-        if 0 <= k < n_cols:
-            per_col[k].append(r.end - r.start)
-    step = max(60.0, (t1 - t0) / n_cols)
-    for r in reqs:
-        start = getattr(r, "start", None)
-        if start is None:
-            continue
-        end = getattr(r, "end", None) or start
-        t = start
-        while t <= end:
-            k = int((t - t0) / max(1e-9, (t1 - t0)) * n_cols)
-            if 0 <= k < n_cols:
-                inflight[k] += 1
-            t += step
-    p90s = [pct(v, 90) if len(v) >= 3 else None for v in per_col]
-    third = max(1, n_cols // 3)
-    early = [v for v in p90s[:third] if v is not None]
-    late = [v for v in p90s[-third:] if v is not None]
-    pairs = [(inflight[k], p90s[k]) for k in range(n_cols) if p90s[k] is not None]
-    r_value = _pearson([a for a, _ in pairs], [b for _, b in pairs]) if len(pairs) >= 5 else None
-    bits = []
-    if early and late:
-        a, b = pct(sorted(early), 50), pct(sorted(late), 50)
-        if a and b:
-            change = 100.0 * (b - a) / a
-            verb = "rose" if change >= 5 else ("fell" if change <= -5 else "held flat")
-            bits.append(f"duration p90 {verb} from {a:.0f}s to {b:.0f}s "
-                        f"({change:+.0f}%, first third to last third)")
-    if r_value is not None:
-        if r_value >= 0.4:
-            bits.append(f"duration rises with how many were in flight (r={r_value:+.2f}), "
-                        f"which is the shape of a queue")
-        elif r_value <= -0.4:
-            bits.append(f"duration is lower when more were in flight (r={r_value:+.2f}), "
-                        f"which is long requests running alone rather than a queue")
-        else:
-            bits.append(f"it does not track how many were in flight (r={r_value:+.2f}), "
-                        f"so look at the model and the account, not at how many ran at once")
-    bits.append("no first-token time is recorded in these logs, so a slower first "
-                "byte and slower generation look alike here")
-    return "; ".join(bits)
-
-
-def _pearson(xs, ys):
-    n = len(xs)
-    if n < 3:
-        return None
-    mx = sum(xs) / n
-    my = sum(ys) / n
-    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
-    dy = math.sqrt(sum((y - my) ** 2 for y in ys))
-    if dx == 0 or dy == 0:
-        return None
-    return num / (dx * dy)
-
-
-def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
-                      account=None):
+def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     """Collect the chart as an ordered list of shapes.
 
     `m` is the metrics dict from analyse(); `reqs` the raw requests, because
@@ -898,22 +825,12 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
     span = t1 - t0
 
     bands, band_of = _bands(timed_reqs)
-    # the agents in volume order, for the footer's provenance
-    by_harness_n = {}
-    for r in timed_reqs:
-        by_harness_n[r.harness] = by_harness_n.get(r.harness, 0) + 1
-    harnesses = sorted(by_harness_n, key=lambda h: (-by_harness_n[h], h))
 
     # ---- geometry ---------------------------------------------------------
     pad_l, pad_r = 56, 18
     title_y, sub_y, key_y = 30, 53, 74
     # Two panels, one time axis. The service panel is fixed height and sits
     # above; the stack below keeps its own scale and its own unit.
-    acct_days = []
-    try:
-        acct_days = sources.capacity_admission_days(account)
-    except Exception:
-        acct_days = []
     fate_panel_h = 92
     heat_y0 = 98 + fate_panel_h + 30
     heat_y1 = heat_y0 + 210
@@ -968,7 +885,6 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
     n_reqs = m["requests"]
     dead = (m["by_outcome"].get("admission_timeout", 0)
             + m["by_outcome"].get("org_concurrency_limit", 0))
-    stalls = m["by_outcome"].get("client_idle_timeout", 0)
     bg_n = m["by_tier"].get("background", 0)
     bg_pct = round(100.0 * bg_n / max(1, n_reqs))
 
@@ -1019,6 +935,14 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
     # ---- title block ------------------------------------------------------
     add(Text(pad_l, title_y, "luna-doctor \u00b7 last %s" % human_window(hours),
              size=20, weight="600", fill=C["text"]))
+    # When the picture was drawn, said at the top where a reader looks first.
+    # The window edge alone cannot tell a picture read tomorrow from one drawn
+    # today, and a picture of a past window is only honest with its own date on
+    # it. It rides on the title line, right-aligned, so it never competes with
+    # the title but is never hunted for either.
+    add(Text(width - pad_r, title_y,
+             "generated %s UTC" % datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+             size=11.5, fill=C["muted"], anchor="end"))
     if timed_reqs:
         add(Text(pad_l, sub_y,
                  "%d requests \u00b7 peak %d concurrent inference requests "
@@ -1245,133 +1169,52 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
 
     add(Text(width - pad_r, xlab_y, "UTC", size=9.5, anchor="end", fill=C["muted"]))
 
-    # ---- footer: provenance, measured vs declared vs fetched ---------------
+    # ---- footer: two short lines, no more ----------------------------------
+    # The marks carry the picture. These two lines carry only what the marks
+    # cannot say for themselves: where the rule's number came from, and the one
+    # reading that matters. The rest of what this band used to explain - each
+    # model's measured deadline, the heatmap's reading guide, the account's
+    # day counters, the latency trend - lives in `luna-doctor explain`, which
+    # can say it at length. Prose is no longer the medium here.
     if rule_src == "account":
-        line1 = "account: priority concurrency %d" % rule_n
+        line1 = "rule: %d from account" % rule_n
         if acct_plan:
             line1 += " (plan %s)" % acct_plan
-        line1 += (" \u2014 fetched from api.lunaroute.com, served from disk cache; "
-                  "the account's own number, never a declaration")
-        if conflict:
-            # capacity API first: the declaration was set aside because the
-            # account reports otherwise, and the footer says so
-            line1 += (" Note: your --plan %s declaration was ignored \u2014 the "
-                      "account reports priority concurrency %d%s."
-                      % (declared_txt, acct_n,
-                         ", plan %s" % acct_plan if acct_plan else ""))
         if acct_stale:
-            line1 += "; the cache is stale, so the rule may be out of date"
+            line1 += " \u00b7 stale cache"
+        if conflict:
+            # the account's number won and the declaration was set aside; the
+            # console prints the whole sentence
+            line1 += " \u00b7 --plan %s ignored" % declared_txt
     elif rule_src == "plan":
-        if declared_named:
-            line1 = ("declared: priority concurrency %d (--plan %s) \u2014 "
-                     "LunaRoute's published plan default; an org-level override "
-                     "on the dashboard Metrics page wins. A declaration, not a "
-                     "measurement." % (rule_n, declared_txt))
-        else:
-            line1 = ("declared: priority concurrency %d (--plan %s) \u2014 "
-                     "declared by you; an org-level override on the dashboard "
-                     "Metrics page wins. A declaration, not a measurement."
-                     % (rule_n, declared_txt))
-        if cap is not None and cap.account_present:
-            # the payload served but had no number, so the declaration
-            # stood as the fallback -- the footer keeps the two states apart
-            line1 += (" The account's capacity payload reports no priority "
-                      "concurrency, so the declaration stands.")
+        line1 = "rule: %d declared (--plan %s)" % (rule_n, declared_txt)
     elif cap is not None and cap.account_present:
-        line1 = ("no priority concurrency rule drawn: the account's capacity "
-                 "payload is cached but reports no priority concurrency; "
-                 "declare it with chart --plan <plan name or number>")
+        line1 = ("rule: not established \u2014 the cached account payload reports "
+                 "no number")
     else:
-        line1 = ("no priority concurrency rule drawn: priority concurrency is "
-                 "specific to the account and cannot be read from these logs "
-                 "\u2014 fetch the account's real number with `luna-doctor capacity` "
-                 "(the chart reads its disk cache), or declare it with "
-                 "chart --plan <plan name or number>")
+        line1 = "rule: not established \u2014 luna-doctor capacity fetches it"
 
+    # the one reading: the peak against the rule, or the rejection count when
+    # there is no rule to read it against
     if not timed_reqs:
-        line2 = ("reading: no timed request in this window; the axes span the "
-                 "requested window and nothing was measured \u2014 try a wider "
-                 "--since or run luna-doctor discover")
+        line2 = "reading: no timed request in this window, so nothing was measured"
     elif rule_n is not None and m["peak_concurrency"] > rule_n:
         kind = "declared" if rule_src == "plan" else "account"
+        line2 = ("reading: peak %d exceeded the %s rule of %d"
+                 % (m["peak_concurrency"], kind, rule_n))
         if dead:
-            line2 = ("reading: the peak of %d concurrent inference requests "
-                     "exceeded the %s priority concurrency %d; %d "
-                     "request(s) waited for admission and were rejected"
-                     % (m["peak_concurrency"], kind, rule_n, dead))
-        else:
-            line2 = ("reading: the peak of %d concurrent inference requests "
-                     "exceeded the %s priority concurrency %d; no request "
-                     "was rejected in this window"
-                     % (m["peak_concurrency"], kind, rule_n))
+            line2 += ", and %d request(s) were rejected at admission" % dead
     elif rule_n is not None:
-        line2 = ("reading: the peak of %d concurrent inference requests stayed "
-                 "within the %s priority concurrency %d"
+        line2 = ("reading: peak %d stayed within the %s rule of %d"
                  % (m["peak_concurrency"],
                     "declared" if rule_src == "plan" else "account", rule_n))
     elif dead:
-        line2 = ("reading: %d request(s) waited for admission and were rejected; "
-                 "declare --plan to see them against your priority concurrency"
-                 % dead)
+        line2 = "reading: %d request(s) were rejected at admission" % dead
     else:
-        line2 = "reading: no request was rejected at admission in this window"
+        line2 = "reading: no request was rejected at admission"
 
-    pm = m.get("per_model_deadlines") or {}
-    bits = []
-    for model in sorted(pm):
-        d = pm[model]
-        if d.get("status") == "observed" and d.get("deadline_s") is not None:
-            bits.append("%s %.1fs (n=%d)" % (model, d["deadline_s"], d["n"]))
-    for model in sorted(pm):
-        d = pm[model]
-        if d.get("status") != "observed":
-            bits.append("%s: unknown (n=%d)" % (model, d.get("seen_n", 0)))
-    if bits:
-        line3 = ("measured: observed admission deadline per model \u2014 %s "
-                 "\u00b7 client idle budget %.0fs: %d silent stall(s)"
-                 % (" \u00b7 ".join(bits), CLIENT_IDLE_TIMEOUT_S, stalls))
-    else:
-        line3 = ("measured: no admission deadline to report (no request was "
-                 "rejected at admission in this window) \u00b7 client idle "
-                 "budget %.0fs: %d silent stall(s)"
-                 % (CLIENT_IDLE_TIMEOUT_S, stalls))
-
-    if harnesses:
-        read_from = "read from %s logs" % ", ".join(harnesses)
-    else:
-        read_from = "no agent had a timed request in this window"
-    line4 = ("bands: average concurrent inference requests per %s column "
-             "\u00b7 grey outline: the busiest moment per column \u00b7 a request "
-             "waiting for admission counts as open until it is served or "
-             "rejected \u00b7 luna-doctor v%s \u00b7 last %s \u00b7 %s"
-             % (_fmt_dur(col_s), VERSION, human_window(hours), read_from))
-
-    # the footer is wrapped, and the canvas grows to keep it: provenance is
-    # mandatory content, so a window with more to report than four rows hold
-    # (many models' measured deadlines, a long declared-plan note) extends
-    # the canvas downward instead of clipping. The plot above keeps its
-    # geometry; only the footer band moves.
-    acct_line = ""
-    try:
-        days = sources.capacity_admission_days(account)
-    except Exception:
-        days = []
-    if days:
-        denied = sum((d.get("denied") or 0) for _day, d in days if isinstance(d.get("denied"), int))
-        daw = sum((d.get("denied_after_wait") or 0) for _day, d in days
-                  if isinstance(d.get("denied_after_wait"), int))
-        acc = sum((d.get("accepted") or 0) for _day, d in days if isinstance(d.get("accepted"), int))
-        acct_line = (f"account, complete UTC days only: {acc} accepted, {denied} denied, "
-                     f"{daw} denied after waiting \u2014 a day-granular count, so it reads "
-                     f"as a sentence here and never as a step on this axis")
-    key_line = ("reading the heatmap: a vertical stripe is a change at one time, a "
-                "horizontal band is several modes at once, a diagonal drift is a "
-                "slow shift") if not short_window else ""
     rows = []
-    trend_line = _trend_verdict(timed_reqs, t0, t1, n_cols)
-    for line in (line1, line2, line3, line4, trend_line, acct_line, key_line):
-        if not line:
-            continue
+    for line in (line1, line2):
         rows.extend(_wrap_to_width(line, width - pad_l - pad_r, 10))
     need = xlab_y + 16 + (len(rows) - 1) * 16 + 24
     if need > height:
@@ -1384,9 +1227,8 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
     return Scene(width, height, C["bg"], shapes, font=CHART_FONT)
 
 
-def svg_chart(reqs, m, hours, width=1120, height=780, capacity=None, account=None):
-    return svg_from(build_chart_scene(reqs, m, hours, width, height, capacity,
-                                      account=account))
+def svg_chart(reqs, m, hours, width=1120, height=780, capacity=None):
+    return svg_from(build_chart_scene(reqs, m, hours, width, height, capacity))
 
 
 def cmd_chart(args) -> int:
@@ -1441,8 +1283,7 @@ def cmd_chart(args) -> int:
     if not args.json:
         notice("drawing the chart...")
     scene = build_chart_scene(reqs, m, hours, width=args.width,
-                              height=args.height, capacity=capacity,
-                              account=account_payload)
+                              height=args.height, capacity=capacity)
     svg = svg_from(scene)
 
     out = args.out

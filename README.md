@@ -355,9 +355,9 @@ Only completed requests enter the duration distribution. A refusal that fails in
 200 ms pulls the percentiles down, an admission timeout that fails after 120 s
 pulls them up, and neither is a statement about how slow the served traffic was.
 
-The account's own counters are day-granular, so they read as a sentence in the
-footer instead of a step line: a daily count drawn on an hourly axis asserts a
-step function the data does not contain.
+The account's own counters are day-granular, so the picture does not draw them
+at all: a daily count on an hourly axis asserts a step function the data does not
+contain. `capacity` and `analyze` report them as sentences.
 
 ![Seven days of concurrent requests: the stack peaks above the dashed
 priority-concurrency rule, and red flare ticks mark requests the gateway
@@ -393,11 +393,14 @@ class (blues for priority, violets for background). A band is named for the
 agent that it belongs to ("glm-5.3 · pi") whenever more than one agent has
 traffic. A grey outline carries the busiest moment per column. An open circle
 marks the exact peak. Red flare ticks hang where the gateway rejected a request.
-The account's priority concurrency is one dashed rule, drawn from the capacity
+The account's priority concurrency is one rule, drawn from the capacity
 API's cached account value, or declared with `--plan` when the account has no
-number. The rule is labelled with its source, so a fetched value can never be
-mistaken for a declared one. The footer carries the provenance: what was
-measured, what was declared.
+number. The mark shows the provenance: a number from the account is a thick
+solid line, and a declared number is a thin dashed one. The rule is labelled
+with its source as well, so a fetched value can never be mistaken for a declared
+one. The picture dates itself in the header, at the right of the title. Two lines
+under it carry the rule's provenance and the one reading that matters, and no
+more.
 
 The picture deliberately carries no universal admission deadline, because the
 deadline is per model. It carries no advisory concurrency figure, because advice

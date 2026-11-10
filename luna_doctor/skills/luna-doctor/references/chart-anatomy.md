@@ -46,16 +46,18 @@ tick reads `rejected at admission`, `rejected: concurrency limit`, or
 request. Its hover title names the class, the agent, the model and how long the
 request waited. Ticks clustered at one x mark the moment worth explaining.
 
-The dashed rule is the account's priority concurrency, drawn only when the number
-is established. Its label names the source, so a fetched number can never be
-mistaken for a declared one. A fetched line reads `priority concurrency 10 (account, plan teams)`,
+The capacity rule is the account's priority concurrency, drawn only when the
+number is established. The mark carries the provenance. A number the account
+reported is a thick solid line, in the strongest ink of the picture. A number
+declared with `--plan` is a thin dashed line. A fetched line reads `priority
+concurrency 10 (account, plan teams)`,
 with ` · stale cache` appended when the cache is old. A declared line reads
 `priority concurrency (--plan max = 4)` when the account had no number. The
-account is the first authority. When a `--plan` contradicts it, the plan is set
-aside and the footer says so. The number belongs to one account, not to the
-gateway. With nothing established, no rule is drawn. The footer says that the
-number is specific to the account, and it points at `luna-doctor capacity` and at
-`chart --plan <plan name or number>`.
+label names the source as well, so a fetched number can never be mistaken for a
+declared one. The account is the first authority. When a `--plan` contradicts
+it, the plan is set aside and the footer says so. The number belongs to one
+account, not to the gateway. With nothing established, no rule is drawn, and
+the footer says that `luna-doctor capacity` fetches the account's number.
 
 ## Labels and the footer
 
@@ -63,19 +65,23 @@ Every band is named at its right-hand edge, in its own ink, at the height where
 it left the stack. A hairline leader joins the name when the band ended early.
 There is no legend box.
 
-Four footer rows wrap to the canvas, which grows downward rather than cutting
-provenance. The first row gives which rule is drawn and where its number came
-from, or why none is. The `reading:` row gives whether the peak stayed within the
-priority concurrency or exceeded it. It also gives how many requests waited for
-admission and were rejected. The `measured:` row gives each model's observed
-admission deadline with its sample count, or `unknown (n=K)`. It also gives the
-client idle budget and the silent stall count. The `bands:` row gives the column
-width, the grey outline, the version, the window, and which logs were read. It
-also gives the rule that a request waiting for admission counts as open until
-served or rejected.
+Two footer rows, and no more. The first gives the rule and where its number came
+from, or why none is established. The second gives the one reading that matters:
+whether the peak stayed within the priority concurrency or exceeded it, and how
+many requests were rejected when any were. A row wraps when it runs past the
+canvas, so a long plan name never loses its line.
+
+The header dates the picture at the right of the title, as `generated <date>
+<time> UTC`. A picture of a past window is only honest with its own date on it.
+
+Everything else this band used to carry left the picture. The per-model
+admission deadlines with their counts, the heatmap's reading guide, the account's
+day counters and the latency trend are sentences, and `luna-doctor explain` is
+where a reader goes for sentences. The rule that a request waiting for admission
+counts as open until it is served or rejected still holds. The marks show it.
 
 The chart does not draw three marks. One is a universal admission deadline,
-because that deadline is per model and the footer reports each measured one with
+because that deadline is per model and `explain` reports each measured one with
 its count. The second is an advisory concurrency figure, because advice depends
 on the account and belongs to `analyze` and `fix`, not to a ruler here. The third
 is a latency picture, because latency lives in `analyze`.
@@ -86,6 +92,6 @@ The picture shows which bands piled up, for whom, in which class, and whether th
 total crossed the account's priority concurrency as requests were rejected.
 
 Read the `reading:` row before you interpret anything. When the stack never comes
-near the dashed rule and no flare ticks hang over the burst, concurrency is not
+near the capacity rule and no flare ticks hang over the burst, concurrency is not
 the problem. Say it plainly. Then look for the wait in `analyze` and `explain`
 instead.

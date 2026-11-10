@@ -22,7 +22,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
 
 
-from luna_doctor import cli, plan
+from luna_doctor import cli, plan, report
+from luna_doctor.render_pretty import render_pretty
+from luna_doctor.style import Style
 
 
 def metrics(**capacity):
@@ -158,6 +160,16 @@ class TheInsufficientEvidenceOutcome(unittest.TestCase):
         self.assertIn("EVIDENCE" if "EVIDENCE" in adj[0] else str(cli.EVIDENCE_MIN_REQUESTS), adj[0])
         self.assertIn("fewer than", adj[0])
         self.assertEqual(code, 0, "measured, but not enough to explain")
+        # Exit 0 here means "nothing here measured pressure", not "healthy":
+        # the account's own claim is the pressure, so the status moon says so
+        # and the surface prints the legend for the scale it just used.
+        self.assertEqual("moon_quarter", report.status_moon(code, head))
+        style = Style(color=False, emoji=True, motion=False)
+        out = render_pretty(report.Report(headline=head, sections=[],
+                                          adjustments=list(adj), exit_code=code),
+                            style)
+        self.assertTrue(out.startswith("\U0001F317"), out.splitlines()[0])
+        self.assertEqual(1, out.count(style.moon_legend()))
 
     def test_no_store_says_so_and_names_the_missing_thing(self):
         with unittest.mock.patch.object(cli, "_any_default_store", return_value=False):
@@ -299,9 +311,9 @@ class TheChartIsDesignedForDiagnosis(unittest.TestCase):
     the private brief 2026-11-03-observability-viz-brief.md.
     """
 
-    def _scene(self, reqs, hours=24.0, account=None, capacity=None):
+    def _scene(self, reqs, hours=24.0, capacity=None):
         m = cli.analyse(reqs, hours)
-        return cli.build_chart_scene(reqs, m, hours, capacity=capacity, account=account)
+        return cli.build_chart_scene(reqs, m, hours, capacity=capacity)
 
     def _text(self, scene):
         return " ".join(getattr(shape, "s", "") for shape in scene.shapes)
@@ -343,18 +355,19 @@ class TheChartIsDesignedForDiagnosis(unittest.TestCase):
         for kind in ("served", "demoted", "refused: admission", "refused: limit"):
             self.assertIn(kind, text)
 
-    def test_the_account_counters_are_a_sentence_not_a_step_line(self):
-        from luna_doctor import sources
+    def test_the_picture_says_the_rule_and_one_reading_in_two_lines(self):
+        """The footer carries the rule's provenance and one reading, no more.
+
+        The account's day counters, the measured deadlines and the heatmap's
+        reading guide left this band: they are sentences, and `luna-doctor
+        explain` is where a reader goes for sentences."""
         now = 1_700_000_000.0
-        cap = sources.Capacity(admission=sources.CapacityAdmission(last_7d=[
-            {"day": "2026-11-01", "accepted": 40, "deferred": 3, "denied": 9,
-             "denied_after_wait": 4}]))
-        text = self._text(self._scene([self._req(now + i * 60, 5.0) for i in range(10)],
-                                      account=cap))
-        self.assertIn("complete UTC days only", text)
-        self.assertIn("40 accepted", text)
-        self.assertIn("never as a step on this axis", text)
-        self.assertIn("reading the heatmap", text)
+        text = self._text(self._scene([self._req(now + i * 60, 5.0) for i in range(10)]))
+        self.assertIn("rule: not established", text)
+        self.assertIn("reading: no request was rejected at admission", text)
+        self.assertNotIn("complete UTC days only", text)
+        self.assertNotIn("measured: observed admission deadline", text)
+        self.assertNotIn("reading the heatmap", text)
 
     def test_no_completions_says_so_rather_than_drawing_an_empty_field(self):
         now = 1_700_000_000.0
@@ -482,6 +495,57 @@ class TheChartSaysWhatItIsDoing(unittest.TestCase):
             _before, stderr, _out = self._chart(tmp, "--json")
         self.assertNotIn("drawing the chart", stderr)
         self.assertNotIn("chart written", stderr)
+
+
+class TheChartFooterStaysTwoLines(unittest.TestCase):
+    """Jesse, 2026-11-10: drop the wall of text, and date the picture up top.
+
+    The marks carry the story. The band under the picture carries the rule's
+    provenance and the one reading that matters, and nothing else: a third
+    line is already more prose than a picture can support. The generation
+    timestamp moves to the title block, where a reader looks first.
+    """
+
+    NOW = 1_700_000_000.0
+
+    def _req(self, i):
+        return cli.Request(harness="pi", session="s", model="glm-5.3",
+                           start=self.NOW + i * 60, end=self.NOW + i * 60 + 5,
+                           outcome="completed")
+
+    def _scene(self, reqs, capacity=None):
+        return cli.build_chart_scene(reqs, cli.analyse(reqs, 24.0), 24.0,
+                                     capacity=capacity)
+
+    def _footer_rows(self, scene):
+        """Every text run in the bottom tenth of the canvas: the footer band."""
+        return [s for s in scene.shapes
+                if isinstance(s, cli.Text) and s.y >= scene.height * 0.9]
+
+    def test_the_footer_is_at_most_two_lines(self):
+        reqs = [self._req(i) for i in range(20)]
+        for capacity in (None, plan.Capacity(priority=4, source="plan",
+                                             declared="max")):
+            rows = self._footer_rows(self._scene(reqs, capacity))
+            self.assertLessEqual(len(rows), 2, [r.s for r in rows])
+            self.assertTrue(rows[0].s.startswith("rule: "), rows[0].s)
+            self.assertTrue(rows[-1].s.startswith("reading: "), rows[-1].s)
+
+    def test_the_prose_that_left_the_picture_did_not_come_back(self):
+        reqs = [self._req(i) for i in range(20)]
+        text = " ".join(s.s for s in self._footer_rows(self._scene(reqs)))
+        for gone in ("bands:", "measured:", "complete UTC days only",
+                     "reading the heatmap", "too few completed requests",
+                     "luna-doctor v"):
+            self.assertNotIn(gone, text)
+
+    def test_the_header_carries_the_time_the_picture_was_drawn(self):
+        scene = self._scene([])
+        header = [s for s in scene.shapes
+                  if isinstance(s, cli.Text) and s.s.startswith("generated ")]
+        self.assertEqual(1, len(header), "the picture dates itself once")
+        self.assertLessEqual(header[0].y, 40, "the date belongs in the title block")
+        self.assertRegex(header[0].s, r"^generated \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$")
 
 
 class LatencyTablePlaceholder(unittest.TestCase):

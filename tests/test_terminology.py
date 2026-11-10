@@ -187,8 +187,10 @@ class NoRetiredVocabulary(unittest.TestCase):
         # in ChartPlan and ChartAccountRule).
         self.assertNotIn("advised concurrency", svg,
                          "a plan-dependent advisory rule must not be drawn")
-        self.assertIn("specific to the account", svg,
+        self.assertIn("rule: not established", svg,
                       "the no-plan footer must say why no rule is drawn")
+        self.assertIn("luna-doctor capacity", svg,
+                      "the no-plan footer must name what fetches the number")
         self._assert_clean("chart svg", svg)
         self._assert_clean("chart console", stdout)
 

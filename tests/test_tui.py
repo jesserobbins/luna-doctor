@@ -168,17 +168,27 @@ class RankedTrustOrder(unittest.TestCase):
 
     def test_the_verdict_row_leads_with_the_status_moon_the_cli_earns(self):
         """One status scale on both surfaces: the moon comes from the same
-        helper the pretty renderer asks, and its legend closes the panel once."""
+        helper the pretty renderer asks."""
         head, _adjustments, code = cli.verdict(_metrics())
         rows = tui.verdict_rows(self.metrics)
         glyph = tui._GLYPH_STYLE.symbol(report.status_moon(code, head))
         self.assertEqual(f"{glyph} {head}", rows[0][1])
         self.assertEqual("\U0001F311", glyph,
                          "3 blocked admissions earns the new moon")
-        legends = [text for _badge, text in rows if "healthy" in text]
-        self.assertEqual(1, len(legends), "the scale is explained once, not per row")
+
+    def test_the_legend_is_its_own_line_not_a_row_of_the_bold_panel(self):
+        """The panel is bold and the legend is a key, so the screen prints the
+        legend at the pretty renderer's quiet weight: its own muted line."""
+        legend = tui.status_legend(_metrics())
         for phase in ("\U0001F315", "\U0001F317", "\U0001F311"):
-            self.assertIn(phase, legends[0])
+            self.assertIn(phase, legend)
+        self.assertNotIn("healthy", " ".join(text for _b, text in
+                                             tui.verdict_rows(self.metrics)))
+
+    def test_a_verdict_that_claims_no_status_prints_no_legend(self):
+        empty = _metrics(requests=0, by_outcome={}, by_tier={}, by_harness={},
+                         pressure_windows=0, longest_pressure_window=None)
+        self.assertEqual("", tui.status_legend(empty))
 
 
 # ---- (c) the degraded payload: every null is unknown ----------------------
@@ -554,6 +564,54 @@ class TriageAppFailure(unittest.TestCase):
     @staticmethod
     def _status(app) -> str:
         return str(app.query_one("#status").render())
+
+
+class TheStatusMoonOnTheScreen(unittest.TestCase):
+    """The moon and its legend reach the screen, and the legend stays quiet.
+
+    The verdict panel renders bold; the legend is a key to a scale, not a
+    conclusion, so it renders as its own muted line under that panel - the
+    weight the pretty renderer paints it in.
+    """
+
+    def test_the_legend_renders_below_the_panel_not_inside_it(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        with mock.patch.object(tui, "scan",
+                               return_value=(_metrics(),
+                                             _cap(_payload("capacity-2026-11-02.json")))):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                legend = str(app.query_one("#moon-legend").render())
+                panel = str(app.query_one("#verdict-line").render())
+                self.assertIn("healthy", legend)
+                self.assertIn("\U0001F311", legend)
+                self.assertNotIn("healthy", panel,
+                                 "the key was drawn in the panel's bold weight")
+                self.assertTrue(app.query_one("#moon-legend").display)
+                await pilot.press("q")
+
+    def test_a_verdict_with_no_status_hides_the_legend_line(self):
+        asyncio.run(self._drive_no_status())
+
+    async def _drive_no_status(self):
+        empty = _metrics(requests=0, by_outcome={}, by_tier={}, by_harness={},
+                         pressure_windows=0, longest_pressure_window=None)
+        app = tui.TriageApp()
+        with mock.patch.object(tui, "scan", return_value=(empty, None)):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertFalse(app.query_one("#moon-legend").display,
+                                 "nothing measured, so no scale was used")
+                await pilot.press("q")
 
 
 class EverySlowStepSaysItIsRunning(unittest.TestCase):

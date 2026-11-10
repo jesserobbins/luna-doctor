@@ -193,8 +193,9 @@ class Chart(unittest.TestCase):
     def test_svg_carries_the_data(self):
         svg = self._chart()
         self.assertIn("<circle", svg)
-        self.assertIn("admission deadline", svg)
-        self.assertIn("idle budget", svg)
+        # the picture names the rule's provenance and one reading, in two lines
+        self.assertIn("rule: ", svg)
+        self.assertIn("reading: ", svg)
         self.assertNotIn("nan", svg.lower())
         self.assertNotIn("None", svg)
 
@@ -544,12 +545,11 @@ class ChartSweep(unittest.TestCase):
             self.assertTrue(svg.startswith("<svg"), svg[:40])
             ET.fromstring(svg)
             # every request survived collection, every rejection is a tick
-            # where it died, and the deadline the footer reports is the
-            # measured one, per model, with its n
+            # where it died, and the two-line footer still reads the window
             self.assertIn("7000 requests", svg)
             self.assertIn("rejected at admission", svg)
-            self.assertIn("measured: observed admission deadline per model", svg)
-            self.assertIn("60.3s (n=", svg)
+            self.assertIn("rule: not established", svg)
+            self.assertIn("reading: ", svg)
             self.assertLess(elapsed, 10.0,
                             "chart needed %.1fs for 7000 requests" % elapsed)
 
@@ -593,8 +593,7 @@ class ChartPlan(unittest.TestCase):
             with open(out) as fh:
                 svg = fh.read()
             self.assertIn("priority concurrency (--plan 25)", svg)
-            self.assertIn("declared by you", svg)
-            self.assertIn("A declaration, not a measurement", svg)
+            self.assertIn("rule: 25 declared (--plan 25)", svg)
 
     def test_a_plan_name_labels_its_published_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -603,8 +602,7 @@ class ChartPlan(unittest.TestCase):
             with open(out) as fh:
                 svg = fh.read()
             self.assertIn("priority concurrency (--plan max = 4)", svg)
-            self.assertIn("published plan default", svg)
-            self.assertIn("A declaration, not a measurement", svg)
+            self.assertIn("rule: 4 declared (--plan max)", svg)
 
     def test_no_plan_draws_no_rule_and_names_the_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -613,8 +611,8 @@ class ChartPlan(unittest.TestCase):
             with open(out) as fh:
                 svg = fh.read()
             self.assertNotIn("priority concurrency (--plan", svg)
-            self.assertIn("no priority concurrency rule drawn", svg)
-            self.assertIn("specific to the account", svg)
+            self.assertIn("rule: not established", svg)
+            self.assertIn("luna-doctor capacity fetches it", svg)
 
 
 class ChartSingleStack(unittest.TestCase):
@@ -717,8 +715,9 @@ class ChartSingleStack(unittest.TestCase):
                          "no traffic still draws the one plot area, not a bare message")
         svg = self.m.svg_from(scene)
         self.assertIn("no timed requests in this window", svg)
-        self.assertIn("nothing was measured", svg)
-        self.assertIn("no agent had a timed request in this window", svg)
+        self.assertIn("reading: no timed request in this window, so nothing was measured",
+                      svg)
+        self.assertIn("rule: not established", svg)
 
 
 # ---- the capacity payload fixtures -------------------------------------------
@@ -803,7 +802,7 @@ class ChartAccountRule(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stdout, svg = self._chart(tmp, capacity=_capacity_payload())
             self.assertIn("priority concurrency 12 (account, plan apex)", svg)
-            self.assertIn("fetched from api.lunaroute.com, served from disk cache", svg)
+            self.assertIn("rule: 12 from account (plan apex)", svg)
             self.assertIn("priority concurrency 12 (account, plan apex): rule drawn",
                           stdout)
             self.assertNotIn("--plan", stdout,
@@ -832,8 +831,9 @@ class ChartAccountRule(unittest.TestCase):
             stdout, svg = self._chart(tmp, "--plan", "25", capacity=_capacity_payload())
             self.assertIn("priority concurrency 12 (account, plan apex)", svg)
             joined = _svg_text(svg)
-            self.assertIn("your --plan 25 declaration was ignored", joined)
-            self.assertIn("the account reports priority concurrency 12", joined)
+            self.assertIn("--plan 25 ignored", joined,
+                          "the picture says the declaration was set aside, in a tag")
+            self.assertIn("the account reports priority concurrency 12", stdout)
             self.assertIn("priority concurrency 12 (account, plan apex): rule drawn",
                           stdout)
             self.assertIn("the --plan 25 declaration was ignored", stdout)
@@ -860,7 +860,7 @@ class ChartAccountRule(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stdout, svg = self._chart(tmp, "--plan", "25", capacity=payload)
             self.assertIn("priority concurrency (--plan 25)", svg)
-            self.assertIn("so the declaration stands", _svg_text(svg))
+            self.assertIn("rule: 25 declared (--plan 25)", _svg_text(svg))
             self.assertIn("declared via --plan 25", stdout)
 
     def test_a_stale_payload_draws_the_rule_and_says_so(self):
@@ -885,7 +885,7 @@ class ChartAccountRule(unittest.TestCase):
             with open(out) as fh:
                 svg = fh.read()
             self.assertIn("priority concurrency 12 (account, plan apex) \u00b7 stale cache", svg)
-            self.assertIn("the cache is stale, so the rule may be out of date",
+            self.assertIn("rule: 12 from account (plan apex) \u00b7 stale cache",
                           _svg_text(svg))
             self.assertIn("stale cache", proc.stdout)
 
@@ -895,16 +895,15 @@ class ChartAccountRule(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             stdout, svg = self._chart(tmp, capacity=payload)
             self.assertNotIn("priority concurrency (", svg)
-            self.assertIn("no priority concurrency rule drawn", svg)
-            self.assertIn("cached but reports no priority concurrency", svg)
+            self.assertIn("rule: not established", svg)
+            self.assertIn("the cached account payload reports no number", svg)
             self.assertIn("the cached capacity payload reports none", stdout)
 
     def test_no_payload_no_plan_still_says_why_and_points_at_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:
             stdout, svg = self._chart(tmp)
             self.assertNotIn("priority concurrency (", svg)
-            self.assertIn("no priority concurrency rule drawn", svg)
-            self.assertIn("specific to the account", svg)
+            self.assertIn("rule: not established", svg)
             self.assertIn("luna-doctor capacity", svg)
 
 

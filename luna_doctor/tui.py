@@ -431,9 +431,11 @@ def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
     above it, not a number one source reported. The text is the headline and
     adjustments `analyze` prints, so the TUI cannot disagree with the CLI about
     what the window means. The status moon leads the headline, read from
-    `report.status_moon` - the same helper the pretty renderer asks - and the
-    legend for that scale closes the panel once. The one arrow marks the action
-    this screen can take in place.
+    `report.status_moon` - the same helper the pretty renderer asks. The legend
+    for that scale is not a row here: `status_legend` returns it, and the screen
+    prints it as its own quiet line under the panel, the weight the pretty
+    renderer gives it. The one arrow marks the action this screen can take in
+    place.
     """
     headline, adjustments, exit_code = cli.verdict(metrics)
     moon = report.status_moon(exit_code, headline)
@@ -441,9 +443,20 @@ def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
     rows = [("", f"{glyph} {headline}" if glyph else headline)]
     rows += [("", line) for line in adjustments]
     rows += [("→", "press [f] for the per-agent fix, or run `luna-doctor fix`")]
-    if moon in report.MOON_PHASES:
-        rows.append(("", _GLYPH_STYLE.moon_legend()))
     return rows
+
+
+def status_legend(metrics: dict) -> str:
+    """The one-line legend for the status moons, or "" when no phase is drawn.
+
+    It is the same sentence the pretty renderer closes with, from the same
+    table, and the screen prints it as its own muted line: a key to a scale is
+    not a conclusion, so it never wears the verdict panel's bold.
+    """
+    headline, _adjustments, exit_code = cli.verdict(metrics)
+    if report.status_moon(exit_code, headline) not in report.MOON_PHASES:
+        return ""
+    return _GLYPH_STYLE.moon_legend()
 
 
 def build_verdict_rows(choice_key: str, metrics: dict, cap) -> list[tuple[str, str]]:
@@ -609,7 +622,7 @@ class TriageApp(App):
     #verdict { display: none; padding: 0 2; }
     .panel { border: round $primary; padding: 0 1; margin: 1 0 0 0; height: auto; }
     #verdict-line { border: round $accent; }
-    #legend { padding: 1 2; color: $text-muted; }
+    #legend, #moon-legend { padding: 1 2; color: $text-muted; }
     #fix { display: none; border: round $secondary; padding: 0 1; }
     """
 
@@ -639,6 +652,10 @@ class TriageApp(App):
             yield Static("", id="account", classes="panel")
             yield Static("", id="local", classes="panel")
             yield Static("", id="verdict-line", classes="panel")
+            # its own line, in the muted weight every legend on this screen
+            # wears: the verdict panel above it is bold, and a key is not a
+            # conclusion
+            yield Static("", id="moon-legend")
             yield Static(badges.legend_line(), id="legend")
         with VerticalScroll(id="fix"):
             # markup=False: the fix block's prose may name a tier as [agents].
@@ -694,6 +711,11 @@ class TriageApp(App):
             panel_text(PANEL_LOCAL, local_rows(key, self.metrics)))
         self.query_one("#verdict-line", Static).update(
             panel_text(PANEL_VERDICT, verdict_rows(self.metrics), bold=True))
+        legend = status_legend(self.metrics)
+        moon_legend = self.query_one("#moon-legend", Static)
+        moon_legend.update(legend)
+        # no phase drawn means no key: an empty line would be decoration
+        moon_legend.display = bool(legend)
         self.query_one("#question").display = False
         self.query_one("#choices").display = False
         self.query_one("#verdict").display = True

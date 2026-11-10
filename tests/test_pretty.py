@@ -113,6 +113,16 @@ class VerdictMoons(unittest.TestCase):
         self.assertEqual("moon_quarter", status_moon(1, self.PRESSURE))
         self.assertEqual("moon_new", status_moon(1, self.BLOCKED))
 
+    def test_an_account_claim_exits_zero_and_is_still_pressure(self):
+        """The account can report pressure this machine cannot explain, and
+        that answer exits 0 because nothing local measured anything. It is not
+        a healthy window, so it draws the quarter moon."""
+        from luna_doctor.report import status_moon
+        claim = ("The account reports pressure this machine cannot explain: the "
+                 "account's priority pool was full at the sample: in use 12 of 12 "
+                 "priority concurrent requests at 2026-11-03T22:14:42Z (account).")
+        self.assertEqual("moon_quarter", status_moon(0, claim))
+
     def test_a_report_with_no_verdict_claims_no_status(self):
         from luna_doctor.report import status_moon
         self.assertEqual("moon", status_moon(None, "latency by model"))
