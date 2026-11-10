@@ -116,7 +116,8 @@ TUI never opens new network behavior.
 
 ```
   ── What the account reports (authoritative) ──────────────
-  ● limit 12 priority · in_use 8 · overflow 0/12
+  ● limit 12 priority · in_use 8 · overflow 4/12 in use
+  ● pool ledger up · sample taken 2s before this screen
   ● last 7d: denied_after_wait 16 (Oct 20, Oct 22)
 
   ── What this machine's logs show (informative, lower bound) ─
@@ -151,6 +152,20 @@ and `chart` rendered text is a follow-on pass the builder may begin with the
 
 - Null is unknown, never zero; absent blocks render with their reason.
 - `now` covers the priority pool only; admission covers the shared pool.
+- **Live-occupancy semantics, from the API's `now` section (binding):**
+  - The occupancy line is qualified by `ledger`: when the ledger is not
+    `up`, `in_use` and `saturated` are advisory and the screen says the
+    count may be stale or missing — the pool line never looks authoritative
+    when its source ledger is not healthy.
+  - The overflow pool's two null shapes stay distinct: `limit: null` is
+    "the cap could not be read (unknown)"; `limit: 0` is "no overflow
+    entitled, a closed pool", which is never saturated. The TUI renders
+    both, differently, in the account panel.
+  - `saturated` is an observation, never a verdict: a full pool is not a
+    refusal. Refusal language comes only from the admission counts.
+  - `sampled_at` is shown so the reader knows how fresh the live read is.
+  - The block is read together: a single null field cannot tell "idle"
+    from "unavailable", so one null never collapses the whole pool row.
 - Admission holds complete UTC days only.
 - Copy rules from memory: "blocked at admission", no "deaths", no probe
   advice, no summing measured concurrency with configured fan-out.
