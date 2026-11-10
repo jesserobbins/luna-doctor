@@ -7,20 +7,20 @@ Owner: Jesse.
 ## Builder-check decisions (Jesse, 2026-11-10)
 
 - Today's bare `_default_run` (account line, welcome text, 1h `analyze` whose
-  verdict is the exit code, chart) is kept **verbatim as the non-TTY path**.
-  TTY opens the TUI; piped output keeps the old behavior and the documented
+  verdict is the exit code, chart) is kept verbatim as the non-TTY path.
+  TTY opens the TUI. Piped output keeps the old behavior and the documented
   0/1/2 exit-code contract. After the TUI closes, `main()` returns 0.
-- `--online` on a bare invocation forces one capacity fetch **before** the TUI
-  opens; the TUI itself runs cache-only from then on. `[f]` (fix in-place)
+- `--online` on a bare invocation forces one capacity fetch before the TUI
+  opens. The TUI itself runs cache-only from then on. `[f]` (fix in-place)
   runs cache-only too. The TUI never opens network behavior.
 - Bare `luna-doctor` gains a top-level `--plan`, resolved through the existing
   `attribution.resolve_priority_concurrency` path so `◌` declared badges can
   appear at the front door.
 - "Agent seems stuck" maps to the `client_idle_timeout` classification and the
   `explain --slowest` panel. One 24h scan feeds every triage answer (re-sliced
-  per answer); no second analysis runs after selection.
-- Rolling badges into `analyze`/`chart` rendered text is **deferred** to a
-  later pass. This build is TUI-only.
+  per answer). No second analysis runs after selection.
+- Rolling badges into `analyze`/`chart` rendered text is deferred to a later
+  pass. This build is TUI-only.
 
 ## Intent
 
@@ -30,11 +30,11 @@ do". First use must be a diagnosis, not a menu.
 
 Two problems, settled in conversation:
 
-1. **The front door is unhelpful.** Bare `luna-doctor` should assume "I am
-   having problems right now", ask one question about what the person is
-   seeing, steer the analysis from that answer, and land on a verdict with a
-   next action.
-2. **Source-of-truth is invisible.** The codebase already tracks provenance
+1. The front door is unhelpful. Bare `luna-doctor` must assume "I am having
+   problems right now", ask one question about what the person is seeing,
+   steer the analysis from that answer, and land on a verdict with a next
+   action.
+2. Source-of-truth is invisible. The codebase already tracks provenance
    (`account` from the capacity API, `measured` from local logs, `declared`
    via `--plan`), but the reports do not put it where Jesse can see it. He
    cannot tell at a glance whether a number was said by the server or
@@ -47,8 +47,8 @@ Two problems, settled in conversation:
    are you seeing?"), a scan of local logs and the cached capacity payload
    while the question is on screen, then a single verdict screen.
 2. The triage answer steers what leads the verdict: "429 / concurrency
-   errors" leads with admission and denial counts; "things are slow" leads
-   with latency and queue waits; "stream ended without finish_reason" and
+   errors" leads with admission and denial counts. "things are slow" leads
+   with latency and queue waits. "stream ended without finish_reason" and
    "agent seems stuck" lead with their existing diagnosis paths.
 3. Every number in the verdict screen carries a badge: `●` the account
    reported it (authoritative), `○` measured locally (informative, a lower
@@ -62,14 +62,14 @@ Two problems, settled in conversation:
 
 - No new data sources. The TUI consumes what `analyze` and `capacity`
   already produce.
-- No live-refresh dashboard. One pass, one verdict; `watch` already exists
+- No live-refresh dashboard. One pass, one verdict. `watch` already exists
   for the live case.
 - No rewrite of the verdict model. The TUI renders the same `metrics` and
   Report objects the CLI renders.
 
 ## Approaches considered
 
-- **A, TUI as front door (chosen).** Bare `luna-doctor` opens the triage.
+- A, TUI as front door (chosen). Bare `luna-doctor` opens the triage.
   Subcommands unchanged. Matches first use: people run it when broken.
 - B, `luna-doctor tui` as a separate mode: rejected. Two entry points means
   first-time users still meet argparse help, which is the problem being
@@ -84,10 +84,10 @@ CSS-like styling, widgets for the list and panels, asyncio-friendly for the
 background capacity fetch. Import-guarded: `main()` checks for the module
 and falls back when absent. Visual target is Charm's terminal aesthetic
 (rounded borders, dimmed secondary text, bold accent on the verdict line)
-rendered through Textual's CSS; no Go sidecar — every verdict the TUI shows
-is computed by the existing Python code, so a Bubble Tea binary would make
-each of those an IPC call. Open builder item: Textual's Python floor against
-this repo's `>=3.9` claim; if Textual needs newer, the extra gets an
+rendered through Textual's CSS, with no Go sidecar. Every verdict the TUI
+shows is computed by the existing Python code, so a Bubble Tea binary turns
+each of those into an IPC call. Open builder item: Textual's Python floor
+against this repo's `>=3.9` claim. If Textual needs newer, the extra gets an
 environment marker and the fallback covers older interpreters.
 
 ## The triage screen
@@ -107,9 +107,9 @@ $ luna-doctor
   fetching account capacity…       ✓ plan apex · 12 lanes (cached 2m ago)
 ```
 
-The scan and the capacity read run while the question is on screen; they
+The scan and the capacity read run while the question is on screen. They
 never block the answer. The capacity payload comes from the 5-minute disk
-cache when fresh; `--online` semantics stay with the `capacity` command. The
+cache when fresh. `--online` semantics stay with the `capacity` command. The
 TUI never opens new network behavior.
 
 ## The verdict screen
@@ -130,7 +130,7 @@ TUI never opens new network behavior.
 ```
 
 Three panels in ranked-trust order. The verdict line reuses the existing
-`analyze` verdict model. `[f]` runs the `fix` output in-place; `--json` and
+`analyze` verdict model. `[f]` runs the `fix` output in-place. `--json` and
 copy actions are available as keybindings. Leave keys return to the CLI's
 own report text so nothing is shown only in the TUI.
 
@@ -140,25 +140,25 @@ The `PROVENANCE_LEGEND` words already exist. The badge layer maps them:
 
 | state | badge | trust |
 |---|---|---|
-| `account` | `●` | authoritative — the API said it |
+| `account` | `●` | authoritative, the API said it |
 | `measured` / local | `○` | informative, lower bound |
 | `declared` / configured constant | `◌` | stated, not measured |
 
-Applied first to the TUI verdict screen; rolling the badges into `analyze`
-and `chart` rendered text is a follow-on pass the builder may begin with the
+Applied first to the TUI verdict screen. Rolling the badges into `analyze`
+and `chart` rendered text is a follow-on pass the builder can begin with the
 `analyze` headline if it lands cleanly.
 
 ## Constraints carried from the capacity design
 
-- Null is unknown, never zero; absent blocks render with their reason.
-- `now` covers the priority pool only; admission covers the shared pool.
-- **Live-occupancy semantics, from the API's `now` section (binding):**
+- Null is unknown, never zero. Absent blocks render with their reason.
+- `now` covers the priority pool only. Admission covers the shared pool.
+- Live-occupancy semantics, from the API's `now` section (binding):
   - The occupancy line is qualified by `ledger`: when the ledger is not
     `up`, `in_use` and `saturated` are advisory and the screen says the
-    count may be stale or missing — the pool line never looks authoritative
-    when its source ledger is not healthy.
+    count can be stale or missing, so the pool line never looks
+    authoritative when its source ledger is not healthy.
   - The overflow pool's two null shapes stay distinct: `limit: null` is
-    "the cap could not be read (unknown)"; `limit: 0` is "no overflow
+    "the cap is not readable (unknown)". `limit: 0` is "no overflow
     entitled, a closed pool", which is never saturated. The TUI renders
     both, differently, in the account panel.
   - `saturated` is an observation, never a verdict: a full pool is not a
@@ -174,9 +174,9 @@ and `chart` rendered text is a follow-on pass the builder may begin with the
 
 - Widget choices and layout, within the screens sketched above.
 - The fallback (no Textual) shape: linear prompt via a tiny hand-rolled
-  selector or plain help; no new hard dependency either way.
+  selector or plain help. No new hard dependency either way.
 - Which `analyze` code paths the verdict screen calls directly versus
   re-renders from cached `metrics`.
-- Test fixtures: the suite stays offline; TUI screens get unit tests on
+- Test fixtures: the suite stays offline. TUI screens get unit tests on
   their data-to-widget mapping, not snapshot tests of pixels.
-- Keybinding set; `[f]` for fix is a proposal, the rest is the builder's.
+- Keybinding set. `[f]` for fix is a proposal, the rest is the builder's.
