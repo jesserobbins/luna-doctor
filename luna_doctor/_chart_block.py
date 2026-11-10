@@ -43,17 +43,21 @@ Grey outline   the busiest moment in each column. Averages smooth away the
                the peaks the areas cannot. It is the envelope of the
                account total: the stack's own height at its worst.
 Open circle    the exact peak, and when it happened.
-Dashed rule    the account's priority concurrency, drawn when the number is
-               established, and labelled with its source so a fetched
-               account value can never be mistaken for a declared one:
-               "priority concurrency 12 (account, plan apex)" when the
-               capacity payload is cached, "priority concurrency
-               (--plan max = 4)" when the user declared it and the
-               account had no number. The capacity API is the first
-               authority: a --plan declaration is the fallback, and one
-               the account contradicts is set aside with a note. It is
-               an account-wide limit, so it is drawn once, against the
-               one total it governs.
+Priority rule  the account's priority concurrency, drawn when the number is
+               established. Authority is a property of the mark, not only
+               of its label: a rule read from the account is a thick solid
+               near-black line (stroke 3.5, no dash), and a rule declared
+               with --plan is a thin dashed grey one, so a reader can tell
+               which one they are looking at before reading a word. Each is
+               labelled with its source as well, so a fetched account value
+               can never be mistaken for a declared one: "priority
+               concurrency 12 (account, plan apex)" when the capacity
+               payload is cached, "priority concurrency (--plan max = 4)"
+               when the user declared it and the account had no number.
+               The capacity API is the first authority: a --plan
+               declaration is the fallback, and one the account contradicts
+               is set aside with a note. It is an account-wide limit, so it
+               is drawn once, against the one total it governs.
 Flare ticks    one tick per request the gateway rejected, hung from the top
                edge of the plot area at the moment it died. The hover
                title names the agent whose request died; on the single
@@ -184,6 +188,10 @@ C = {
     "text": "#111827",
     "muted": "#6b7280",
     "rule": "#374151",
+    # the same grey family, at the palette's strongest ink: a rule the account
+    # reported is drawn in this, thick and solid, so it cannot be read as a
+    # declaration
+    "rule_account": "#111827",
     "flare": "#dc2626",
     "outline": "#9ca3af",
     "bg": "#ffffff",
@@ -1204,7 +1212,15 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
     # ---- the resolved priority concurrency, against the one stack ----------
     if rule_n is not None:
         ry = y_of(rule_n)
-        add(Line(px, ry, px + plot_w, ry, C["rule"], 1.0, (5, 4), 0.9))
+        # Authority rides on the mark: the account's fetched number is a
+        # thick solid line, a --plan declaration a thin dashed one, so the
+        # two can never be confused at a glance. The label names the source
+        # as well, and takes its ink from its own rule.
+        if rule_src == "account":
+            rule_ink, rule_w, rule_dash = C["rule_account"], 3.5, ()
+        else:
+            rule_ink, rule_w, rule_dash = C["rule"], 1.0, (5, 4)
+        add(Line(px, ry, px + plot_w, ry, rule_ink, rule_w, rule_dash, 0.9))
         if rule_src == "account":
             rule_label = "priority concurrency %d (account" % rule_n
             if acct_plan:
@@ -1225,7 +1241,7 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None,
         # whatever the bands are doing underneath, without hiding the rule.
         plate_w = 5.4 * len(rule_label) + 6
         add(Rect(px + 2, ly - 10, plate_w, 14, fill="#ffffff", fill_opacity=0.88))
-        add(Text(px + 5, ly, rule_label, size=10, fill=C["rule"]))
+        add(Text(px + 5, ly, rule_label, size=10, fill=rule_ink))
 
     add(Text(width - pad_r, xlab_y, "UTC", size=9.5, anchor="end", fill=C["muted"]))
 
@@ -1416,6 +1432,14 @@ def cmd_chart(args) -> int:
     # and no new dependency enters. --no-image suppresses the PNG; the
     # default writes it beside the SVG under the same stem because the
     # raster is the one a chat, a note or a doc can paste inline.
+    #
+    # Drawing takes seconds and used to say nothing at all, which reads as a
+    # stopped tool. Two lines, the same `notice` every slow command uses (and
+    # none at all under --json, where the envelope is the whole answer): one
+    # before the work, one after it that names the file and what it took.
+    drawn_at = time.monotonic()
+    if not args.json:
+        notice("drawing the chart...")
     scene = build_chart_scene(reqs, m, hours, width=args.width,
                               height=args.height, capacity=capacity,
                               account=account_payload)
@@ -1459,6 +1483,10 @@ def cmd_chart(args) -> int:
     # part of a bigger whole (the bare default run) can name or open them
     args._svg_path = os.path.abspath(out)
     args._png_path = os.path.abspath(png_out) if png_out else None
+    if not args.json:
+        notice("chart written: %s (%.0f KB, %.1f s)"
+               % (os.path.abspath(out), len(svg) / 1024,
+                  time.monotonic() - drawn_at))
 
     if args.json:
         doc = {

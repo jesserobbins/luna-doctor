@@ -10,6 +10,7 @@ report, never a `UnicodeEncodeError`.
 
 from __future__ import annotations
 
+from luna_doctor.report import MOON_PHASES, status_moon
 from luna_doctor.style import Style, resolve_style
 
 MOON = "\U0001F319"
@@ -47,15 +48,20 @@ def style_for(requested, stream) -> Style:
 def render_pretty(report, style, width: int = 80) -> str:
     """Render `report` for a terminal, ending in a single newline.
 
-    The moon leads the headline (the one line a report is scanned for),
-    section titles sit dim over an ASCII rule, and values right-align in
-    one column while the widest row fits `width` - past that the rows fall
-    back to `label: value` lines, so a long value never loses its label.
-    Decoration is `style`'s to allow: with the gate closed this emits the
-    same layout with no ANSI codes, and the moon becomes `(c)`.
+    The status moon leads the headline (the one line a report is scanned for),
+    and it comes from report.status_moon, the same helper the triage screen
+    asks - so a window reads as the same moon on both surfaces. Section titles
+    sit dim over an ASCII rule, and values right-align in one column while the
+    widest row fits `width` - past that the rows fall back to `label: value`
+    lines, so a long value never loses its label. Decoration is `style`'s to
+    allow: with the gate closed this emits the same layout with no ANSI codes,
+    and the moon becomes its ASCII stand-in. A report that draws a phase moon
+    closes with the one-line status legend; a plain moon claims no status, so
+    it prints none.
     """
     lines = []
-    head = style.symbol("moon")
+    moon = status_moon(report.exit_code, report.headline)
+    head = style.symbol(moon)
     headline = f"{head} {report.headline}" if head else report.headline
     lines.append(style.paint(headline, "headline"))
     for section in report.sections:
@@ -73,6 +79,10 @@ def render_pretty(report, style, width: int = 80) -> str:
     if report.footnote:
         lines.append("")
         lines.append(style.paint(report.footnote, "muted"))
+    if moon in MOON_PHASES:
+        # the legend is a key to the scale, printed once where the scale is
+        lines.append("")
+        lines.append(style.paint(style.moon_legend(), "muted"))
     return "\n".join(lines) + "\n"
 
 

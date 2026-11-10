@@ -18,8 +18,33 @@ _ANSI = {
     "muted": "\033[2m",
     "headline": "\033[1m",
 }
-_EMOJI = {"moon": "\U0001F319"}
-_ASCII = {"moon": "(c)"}
+# The moons are the status vocabulary: a full moon for a healthy window, a
+# quarter moon for pressure, a new moon for requests blocked at admission. The
+# plain `moon` is what a surface draws when it names no status (and what every
+# report drew before the scale existed), so it stays as it was. Each ASCII
+# stand-in is 7-bit and shows how much of the disc is lit, so the scale
+# survives a terminal that refuses the glyphs.
+_EMOJI = {
+    "moon": "\U0001F319",
+    "moon_full": "\U0001F315",
+    "moon_quarter": "\U0001F317",
+    "moon_new": "\U0001F311",
+}
+_ASCII = {
+    "moon": "(c)",
+    "moon_full": "(O)",
+    "moon_quarter": "(o)",
+    "moon_new": "()",
+}
+
+# The status scale, in order of increasing trouble, with the words that go
+# beside each glyph. One table: the legend a surface prints and the glyphs it
+# prints it with cannot drift apart, and every surface says the same sentence.
+MOON_STATUS = (
+    ("moon_full", "healthy"),
+    ("moon_quarter", "pressure"),
+    ("moon_new", "blocked at admission"),
+)
 
 
 class Style:
@@ -42,6 +67,18 @@ class Style:
         if self.emoji:
             return _EMOJI.get(name, "")
         return _ASCII.get(name, "")
+
+    def moon_legend(self) -> str:
+        """The one-line legend for the status moons, in this gate's alphabet.
+
+        Every surface that draws a phase moon prints this line once, so a
+        reader meets the scale one time and never has to infer it. The
+        separator is the house dot when glyphs are allowed and a plain pipe
+        when they are not, so the degraded line stays 7-bit text.
+        """
+        sep = " \u00b7 " if self.emoji else " | "
+        return sep.join("%s %s" % (self.symbol(name), word)
+                        for name, word in MOON_STATUS)
 
 
 def resolve_style(requested, stream, env=None):

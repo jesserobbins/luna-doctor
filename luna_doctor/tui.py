@@ -31,7 +31,8 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import Label, ListItem, ListView, Static
 
-from luna_doctor import attribution, badges, cli, explain, sources
+from luna_doctor import attribution, badges, cli, explain, report, sources
+from luna_doctor.style import Style
 
 SCAN_HOURS = 24
 SCAN_HARNESSES = ("pi", "claude-code")
@@ -64,6 +65,11 @@ _LEAD = {
 
 _BADGE_UNKNOWN = badges.badge_for(sources.PROV_UNKNOWN)
 _BADGE_MEASURED = badges.badge_for(sources.PROV_MEASURED)
+
+# The status moons and their legend, through the one gate that owns glyphs: a
+# screen is not a byte stream, and Textual draws UTF-8, so the screen asks for
+# the emoji form - the same glyphs `--style pretty` prints.
+_GLYPH_STYLE = Style(color=False, emoji=True, motion=False)
 
 
 def pick_lead(choice_key: str) -> str:
@@ -424,13 +430,20 @@ def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
     The badge column stays empty: a verdict is a conclusion drawn from the rows
     above it, not a number one source reported. The text is the headline and
     adjustments `analyze` prints, so the TUI cannot disagree with the CLI about
-    what the window means. The one arrow marks the action this screen can take
-    in place.
+    what the window means. The status moon leads the headline, read from
+    `report.status_moon` - the same helper the pretty renderer asks - and the
+    legend for that scale closes the panel once. The one arrow marks the action
+    this screen can take in place.
     """
-    headline, adjustments, _exit_code = cli.verdict(metrics)
-    return ([("", headline)]
-            + [("", line) for line in adjustments]
-            + [("→", "press [f] for the per-agent fix, or run `luna-doctor fix`")])
+    headline, adjustments, exit_code = cli.verdict(metrics)
+    moon = report.status_moon(exit_code, headline)
+    glyph = _GLYPH_STYLE.symbol(moon)
+    rows = [("", f"{glyph} {headline}" if glyph else headline)]
+    rows += [("", line) for line in adjustments]
+    rows += [("→", "press [f] for the per-agent fix, or run `luna-doctor fix`")]
+    if moon in report.MOON_PHASES:
+        rows.append(("", _GLYPH_STYLE.moon_legend()))
+    return rows
 
 
 def build_verdict_rows(choice_key: str, metrics: dict, cap) -> list[tuple[str, str]]:
@@ -718,6 +731,10 @@ def run_triage(plan: str | None = None, online: bool = False) -> int:
     caller falls back to the linear path.
     """
     if online:
+        # The refresh is a network round trip that can take seconds, and it
+        # happens before the screen exists: say what it is doing first, so a
+        # quiet terminal does not read as a hung app.
+        cli.notice("refreshing the account's capacity cache before the screen opens")
         try:
             sources.fetch_capacity(allow_network=True)
         except Exception:

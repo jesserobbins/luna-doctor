@@ -22,7 +22,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
 
 
-from luna_doctor import cli
+from luna_doctor import cli, plan
 
 
 def metrics(**capacity):
@@ -360,6 +360,128 @@ class TheChartIsDesignedForDiagnosis(unittest.TestCase):
         now = 1_700_000_000.0
         text = self._text(self._scene([self._req(now, 120.0, outcome="admission_timeout")]))
         self.assertIn("fewer than 5 requests per column", text)
+
+
+class TheRuleMarkCarriesItsAuthority(unittest.TestCase):
+    """Authority is a property of the mark, not only of the label.
+
+    The design decision (2026-11-10): the capacity rule on every chart is drawn
+    according to its provenance - the account's own number is a thick, solid
+    line, a --plan declaration visibly thinner and dashed - so a reader can
+    tell which one they are looking at before reading a word.
+    """
+
+    NOW = 1_700_000_000.0
+
+    def _scene(self, capacity):
+        reqs = [cli.Request(harness="pi", session="s", model="glm-5.3",
+                            start=self.NOW + i * 60, end=self.NOW + i * 60 + 600,
+                            outcome="completed") for i in range(4)]
+        return cli.build_chart_scene(reqs, cli.analyse(reqs, 24.0), 24.0,
+                                     capacity=capacity)
+
+    def _rule(self, scene):
+        """The one full-width horizontal line that is not an axis or a grid."""
+        rules = [s for s in scene.shapes
+                 if isinstance(s, cli.Line) and s.y1 == s.y2
+                 and (s.x2 - s.x1) > 500
+                 and s.stroke not in ("#9ca3af", "#e5e7eb")]
+        self.assertEqual(1, len(rules), "one priority rule, against the one stack")
+        return rules[0]
+
+    def _account(self):
+        return plan.Capacity(priority=12, source="account", declared="",
+                             account_present=True, account_priority=12,
+                             account_plan="apex")
+
+    def test_an_account_rule_is_thick_and_solid(self):
+        rule = self._rule(self._scene(self._account()))
+        self.assertEqual((), rule.dash, "an authoritative rule is never dashed")
+        self.assertGreaterEqual(rule.stroke_width, 3.0)
+        self.assertEqual("#111827", rule.stroke, "the rule wears the strongest ink")
+
+    def test_a_declared_rule_is_thin_and_dashed(self):
+        rule = self._rule(self._scene(plan.Capacity(priority=4, source="plan",
+                                                    declared="max")))
+        self.assertTrue(rule.dash, "a declared rule is dashed")
+        self.assertLessEqual(rule.stroke_width, 1.5)
+        self.assertEqual("#374151", rule.stroke)
+
+    def test_the_svg_carries_the_authority_too(self):
+        declared = cli.svg_from(self._scene(
+            plan.Capacity(priority=4, source="plan", declared="max")))
+        self.assertIn('stroke="#374151" stroke-dasharray="5 4"', declared)
+        account = cli.svg_from(self._scene(self._account()))
+        self.assertIn('stroke="#111827" stroke-width="3.5"', account)
+        self.assertNotIn("stroke-dasharray", account)
+
+
+class TheChartSaysWhatItIsDoing(unittest.TestCase):
+    """Drawing the chart takes seconds, and it used to say nothing at all.
+
+    The owner's words: "chart says nothing". Two lines, both through the one
+    `notice` helper every slow command uses: one before the render starts, one
+    after it that names the file and what it took. Neither is written under
+    --json, where the envelope is the whole answer.
+    """
+
+    class _Terminal:
+        """A stream that says it is a terminal and keeps what it was given."""
+
+        encoding = "utf-8"
+
+        def __init__(self):
+            self.text = ""
+
+        def isatty(self):
+            return True
+
+        def write(self, text):
+            self.text += text
+            return len(text)
+
+        def flush(self):
+            pass
+
+    def _chart(self, tmp, *extra):
+        """Run `chart` in-process with the picture faked and the streams kept."""
+        stdout, stderr = self._Terminal(), self._Terminal()
+        at_render = {}
+
+        def fake_scene(*args, **kwargs):
+            at_render["stderr"] = stderr.text
+        out = os.path.join(tmp, "chart.svg")
+        env = {k: v for k, v in os.environ.items() if k != "LUNA_DOCTOR_QUIET"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cli, "collect", return_value=[]), \
+                mock.patch.object(cli, "analyse",
+                                  return_value=cli.analyse([], 1.0)), \
+                mock.patch.object(cli.sources, "fetch_capacity", return_value=None), \
+                mock.patch.object(cli, "build_chart_scene", side_effect=fake_scene), \
+                mock.patch.object(cli, "svg_from", return_value="<svg/>"), \
+                mock.patch.object(sys, "stdout", stdout), \
+                mock.patch.object(sys, "stderr", stderr):
+            code = cli.main(["chart", "--since", "1h", "--offline", "--no-image",
+                             "--out", out, *extra])
+        self.assertEqual(0, code)
+        return at_render.get("stderr", ""), stderr.text, out
+
+    def test_a_notice_precedes_the_render_and_one_names_the_file_after(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            before, stderr, out = self._chart(tmp)
+        self.assertIn("drawing the chart", before,
+                      "nothing was said before the picture was drawn")
+        self.assertNotIn("chart written", before)
+        self.assertIn("chart written: %s" % os.path.abspath(out), stderr)
+        self.assertRegex(stderr, r"chart written: .*\(\d+ KB, \d+\.\d s\)")
+
+    def test_json_gets_no_activity_lines(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            _before, stderr, _out = self._chart(tmp, "--json")
+        self.assertNotIn("drawing the chart", stderr)
+        self.assertNotIn("chart written", stderr)
 
 
 class LatencyTablePlaceholder(unittest.TestCase):

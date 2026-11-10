@@ -16,6 +16,7 @@ second verdict implementation cannot drift from the CLI's.
 import asyncio
 import json
 import os
+import threading
 import time
 import unittest
 from unittest import mock
@@ -24,7 +25,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from luna_doctor import badges, cli, sources, tui
+from luna_doctor import badges, cli, report, sources, tui
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
@@ -161,9 +162,23 @@ class RankedTrustOrder(unittest.TestCase):
     def test_the_verdict_row_is_the_cli_verdict_not_a_second_one(self):
         head, _adjustments, _code = cli.verdict(_metrics())
         first = tui.verdict_rows(self.metrics)[0]
-        self.assertEqual(head, first[1])
+        self.assertIn(head, first[1], "the verdict line repeats the CLI's own headline")
         self.assertEqual("", first[0],
                          "a verdict is a conclusion, so it wears no source badge")
+
+    def test_the_verdict_row_leads_with_the_status_moon_the_cli_earns(self):
+        """One status scale on both surfaces: the moon comes from the same
+        helper the pretty renderer asks, and its legend closes the panel once."""
+        head, _adjustments, code = cli.verdict(_metrics())
+        rows = tui.verdict_rows(self.metrics)
+        glyph = tui._GLYPH_STYLE.symbol(report.status_moon(code, head))
+        self.assertEqual(f"{glyph} {head}", rows[0][1])
+        self.assertEqual("\U0001F311", glyph,
+                         "3 blocked admissions earns the new moon")
+        legends = [text for _badge, text in rows if "healthy" in text]
+        self.assertEqual(1, len(legends), "the scale is explained once, not per row")
+        for phase in ("\U0001F315", "\U0001F317", "\U0001F311"):
+            self.assertIn(phase, legends[0])
 
 
 # ---- (c) the degraded payload: every null is unknown ----------------------
@@ -539,6 +554,75 @@ class TriageAppFailure(unittest.TestCase):
     @staticmethod
     def _status(app) -> str:
         return str(app.query_one("#status").render())
+
+
+class EverySlowStepSaysItIsRunning(unittest.TestCase):
+    """The owner's rule: every surface that can sit for a second or more shows
+    activity first. The scan says so on mount, the fix says so before it runs,
+    and the one capacity fetch that happens before the screen exists says so on
+    the terminal it is about to replace."""
+
+    def test_the_fix_sets_the_status_before_it_starts_working(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        computing, release = threading.Event(), threading.Event()
+
+        def slow_fix(plan=None):
+            # the worker is inside the fix, and the screen must already say so
+            computing.set()
+            release.wait(5)
+            return "fix output"
+
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), _cap(_payload("capacity-2026-11-02.json")))), \
+                mock.patch.object(tui, "fix_output", side_effect=slow_fix):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("f")
+                for _attempt in range(40):
+                    await pilot.pause(0.05)
+                    if computing.is_set():
+                        break
+                self.assertTrue(computing.is_set(), "the fix never started")
+                status = str(app.query_one("#status").render())
+                self.assertIn("rendering the fix output", status)
+                self.assertNotIn("[q] quits", status,
+                                 "the screen still offered the previous action, not the work")
+                release.set()
+                await self._settle(pilot, lambda: "fix output" in str(app.query_one("#fix-text").render()))
+                await pilot.press("q")
+
+    def test_the_capacity_refresh_before_the_screen_says_so_first(self):
+        events = []
+        with mock.patch.object(tui.cli, "notice",
+                               side_effect=lambda message: events.append(("notice", message))), \
+                mock.patch.object(tui.sources, "fetch_capacity",
+                                  side_effect=lambda **kw: events.append(("fetch", kw))), \
+                mock.patch.object(tui.TriageApp, "run", return_value=None):
+            tui.run_triage(plan=None, online=True)
+        self.assertEqual("notice", events[0][0],
+                         "the refresh began with no word on the terminal")
+        self.assertIn("capacity", events[0][1])
+        self.assertEqual("fetch", events[1][0])
+
+    def test_a_cache_only_screen_refresh_prints_nothing(self):
+        events = []
+        with mock.patch.object(tui.cli, "notice",
+                               side_effect=lambda message: events.append(message)), \
+                mock.patch.object(tui.TriageApp, "run", return_value=None):
+            tui.run_triage(plan=None, online=False)
+        self.assertEqual([], events, "an offline run has no wait to excuse")
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
 
 
 class TriageAppLiteralText(unittest.TestCase):

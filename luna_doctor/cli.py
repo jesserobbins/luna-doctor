@@ -2711,7 +2711,8 @@ def _service_rows(m: dict) -> list:
 
 
 def build_report(m: dict, head: str, adj: list[str], att=None,
-                 reqs: list | None = None) -> report.Report:
+                 reqs: list | None = None,
+                 exit_code: int | None = None) -> report.Report:
     """Turn analyse() metrics into the Report every renderer prints.
 
     `att` is an attribution.Attribution (optional): when present it becomes the
@@ -2719,6 +2720,10 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
     the account, or the gateway - comes before any evidence for it. Its rows
     keep their own labels, and its actions join the adjustments, so a plain or
     pretty renderer needs no change to carry them.
+
+    `exit_code` is the verdict's own code, carried so the pretty renderer can
+    draw the status moon the verdict earns (see report.status_moon). It is
+    passed through untouched and decides nothing in the report itself.
 
     The rows keep the analysis order - traffic first, then the admission and
     saturation evidence, then the caveats - so the plain renderer says what
@@ -2933,7 +2938,8 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
     service = _service_rows(m)
     if service:
         sections.insert(0, report.Section("service", service))
-    return report.Report(headline=head, sections=sections, adjustments=list(adj))
+    return report.Report(headline=head, sections=sections, adjustments=list(adj),
+                         exit_code=exit_code)
 
 
 def write_out(text: str) -> None:
@@ -3023,7 +3029,7 @@ def print_report(rep: report.Report, args) -> None:
 
 def render(m: dict, head: str, adj: list[str], as_json: bool,
            stored: dict | None = None, args=None, att=None,
-           reqs: list | None = None) -> None:
+           reqs: list | None = None, exit_code: int | None = None) -> None:
     if as_json:
         # A zero-request window returns from verdict() before the swamp
         # scratch key is consumed, and the envelope must never ship it:
@@ -3045,7 +3051,8 @@ def render(m: dict, head: str, adj: list[str], as_json: bool,
                             "findings": len(stored["findings"])}
         print(json.dumps(doc, indent=2))
         return
-    print_report(build_report(m, head, adj, att=att, reqs=reqs), args)
+    print_report(build_report(m, head, adj, att=att, reqs=reqs,
+                              exit_code=exit_code), args)
 
 
 # ---- live probe -------------------------------------------------------------
@@ -4973,7 +4980,8 @@ def cmd_analyze(args) -> int:
         except (OSError, ValueError, OverflowError) as e:
             # A read-only or unwritable store must not lose the report.
             print(f"luna-doctor: the run was not persisted: {e}", file=sys.stderr)
-    render(m, head, adj, args.json, stored=stored, args=args, att=att, reqs=reqs)
+    render(m, head, adj, args.json, stored=stored, args=args, att=att, reqs=reqs,
+           exit_code=code)
     return code
 
 
