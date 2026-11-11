@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -391,6 +392,17 @@ class LedgerQualifiedOccupancy(unittest.TestCase):
         self.assertNotEqual(badges.BADGE_ACCOUNT, badge,
                             "an advisory count must not wear the authoritative badge")
 
+    def test_an_unread_sample_time_downgrades_the_pool_row(self):
+        """The row prints "sampled at unknown", so it is not the account's word."""
+        payload = _payload("capacity-2026-11-02.json")
+        payload["data"]["now"]["sampled_at"] = None
+        rows = [row for row in tui.account_rows(_metrics(), _cap(payload))
+                if "priority pool" in row[1]]
+        self.assertEqual(1, len(rows))
+        self.assertIn("sampled at unknown", rows[0][1])
+        self.assertNotEqual(badges.BADGE_ACCOUNT, rows[0][0],
+                            "a row with an unread sample time wore the account badge")
+
     def test_a_healthy_ledger_keeps_the_authoritative_row(self):
         rows = tui.account_rows(_metrics(), _cap(_payload("capacity-2026-11-02.json")))
         occupancy = [row for row in rows if "priority pool" in row[1]]
@@ -672,7 +684,7 @@ class EverySlowStepSaysItIsRunning(unittest.TestCase):
                 self.assertNotIn("[q] quits", status,
                                  "the screen still offered the previous action, not the work")
                 release.set()
-                await self._settle(pilot, lambda: "fix output" in str(app.query_one("#fix-text").render()))
+                await self._settle(pilot, lambda: "fix output" in str(app.query_one("#detail-text").render()))
                 await pilot.press("q")
 
     def test_the_capacity_refresh_before_the_screen_says_so_first(self):
@@ -709,14 +721,14 @@ class TriageAppLiteralText(unittest.TestCase):
     """Bracketed text on this screen is prose, never Rich markup.
 
     The status line repeats the CLI's words, and those name keys as [f] and
-    [q]; the fix panel prints the fix block's own output, which may name a
-    tier as [agents]. Parsed as markup, the brackets and what they hold vanish,
-    so the screen tells a reader to press nothing.
+    [q]; the detail panel prints a command's own output, and the fix block
+    may name a tier as [agents]. Parsed as markup, the brackets and what they
+    hold vanish, so the screen tells a reader to press nothing.
     """
 
     FIX = "run `luna-doctor fix --tier [agents]`, then press [f] again"
 
-    def test_bracketed_prose_survives_the_status_line_and_the_fix_panel(self):
+    def test_bracketed_prose_survives_the_status_line_and_the_detail_panel(self):
         asyncio.run(self._drive())
 
     async def _drive(self):
@@ -733,9 +745,9 @@ class TriageAppLiteralText(unittest.TestCase):
                 self.assertIn("[f] shows the fix", status)
                 self.assertIn("[q] quits", status)
                 await pilot.press("f")
-                await self._settle(pilot, lambda: "[agents]" in self._text(app, "#fix-text"))
-                self.assertIn("[agents]", self._text(app, "#fix-text"))
-                self.assertIn("--tier [agents]", self._text(app, "#fix-text"))
+                await self._settle(pilot, lambda: "[agents]" in self._text(app, "#detail-text"))
+                self.assertIn("[agents]", self._text(app, "#detail-text"))
+                self.assertIn("--tier [agents]", self._text(app, "#detail-text"))
                 self.assertIn("[q] quits", self._text(app, "#status"))
                 await pilot.press("q")
 
@@ -804,10 +816,33 @@ class MediumDensityPanels(unittest.TestCase):
         self.assertEqual(1, len(named))
         self.assertIn("scheduler admission timeout", named[0])
 
-    def test_the_verdict_panel_ends_with_where_the_report_is(self):
+    def test_the_verdict_panel_holds_three_lines_on_a_busy_window(self):
+        """One sentence, the action and one pointer: the report is `[d]`.
+
+        This fixture carries three adjustments, about a thousand characters of
+        the CLI's prose that the panel used to fold into one sprawling row."""
+        rows = tui.verdict_rows(_metrics())
+        self.assertLessEqual(len(rows), 3, rows)
+        for _badge, text in rows:
+            self.assertLessEqual(len(text), 120, f"a row that wraps into a wall: {text!r}")
+        prose = " ".join(text for _badge, text in rows)
+        self.assertNotIn("the right home for", prose,
+                         "the adjustments are the report's job, not the panel's")
+
+    def test_the_verdict_panel_states_one_sentence_of_the_cli_verdict(self):
+        metrics = _metrics()
+        headline, adjustments, code = cli.verdict(metrics)
+        self.assertTrue(adjustments, "this fixture carries prose beyond the headline")
+        glyph = tui._GLYPH_STYLE.symbol(report.status_moon(code, headline))
+        self.assertEqual(f"{glyph} {headline}", tui.verdict_rows(metrics)[0][1],
+                         "the panel states the headline and none of the adjustments")
+
+    def test_the_verdict_panel_ends_with_one_pointer_to_the_report(self):
         rows = tui.verdict_rows(self._busy())
         self.assertEqual("", rows[-1][0], "a pointer to the report is no one's number")
-        self.assertIn("press d for the full report", rows[-1][1])
+        self.assertEqual("details: press d for the full analyze report", rows[-1][1])
+        self.assertEqual(1, sum("press d" in text for _badge, text in rows),
+                         "one pointer, not two")
 
 
 # ---- the sparkline: the window's shape, re-binned ------------------------
@@ -821,6 +856,12 @@ class ConcurrencySparkline(unittest.TestCase):
         self.assertEqual(" ", spark[1], "an empty column is a space, not a low bar")
         self.assertEqual("\u2588", spark[2], "12h later lands in the third column")
         self.assertEqual(" ", spark[3])
+
+    def test_a_minute_before_the_window_is_not_clamped_into_column_zero(self):
+        spark = tui.concurrency_sparkline(_scan_of([(-120, 17), (600, 4)]), width=4)
+        self.assertEqual(" ", spark[0],
+                         "a minute outside the window is not this window's traffic")
+        self.assertNotEqual(" ", spark[1])
 
     def test_the_busiest_minute_inside_a_column_is_the_column(self):
         spark = tui.concurrency_sparkline(_scan_of([(0, 2), (10, 9)]), width=2)
@@ -928,13 +969,93 @@ class TheSparkOnTheScreen(unittest.TestCase):
         return str(app.query_one("#status").render())
 
 
+# ---- [d]: the report the verdict was cut from ---------------------------
+class TheDetailOnAKeypress(unittest.TestCase):
+    """`[d]` fills the detail panel with the `analyze` report, cache only."""
+
+    def test_the_detail_is_the_analyze_report_offline(self):
+        with mock.patch.object(tui.cli, "main", return_value=0) as main:
+            text = tui.detail_output("apex", 24)
+        argv = main.call_args.args[0]
+        self.assertEqual("analyze", argv[0])
+        self.assertEqual("24h", argv[argv.index("--since") + 1])
+        self.assertIn("--offline", argv)
+        self.assertEqual("apex", argv[argv.index("--plan") + 1])
+        self.assertEqual("", text)
+
+    def test_d_runs_analyze_and_fills_the_detail_panel(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp(plan="apex")
+
+        def report(argv):
+            print("peak concurrency 17")
+            return 0
+
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+                mock.patch.object(tui.cli, "main", side_effect=report) as main:
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("d")
+                await self._settle(
+                    pilot, lambda: "peak concurrency 17" in self._text(app, "#detail-text"))
+                argv = main.call_args.args[0]
+                self.assertEqual("analyze", argv[0])
+                self.assertIn("--offline", argv)
+                self.assertEqual("apex", argv[argv.index("--plan") + 1])
+                self.assertTrue(app.query_one("#detail").display)
+                self.assertIn("the analyze report is on screen",
+                              self._text(app, "#status"))
+                await pilot.press("q")
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
+
+    @staticmethod
+    def _text(app, selector) -> str:
+        return str(app.query_one(selector).render())
+
+
+# ---- one sentence of prose, then the report ------------------------------
+class TheFirstSentence(unittest.TestCase):
+    def test_it_keeps_one_sentence_and_drops_the_rest(self):
+        self.assertEqual("Blocked at admission.",
+                         tui.first_sentence("Blocked at admission. Run `fix` next."))
+        self.assertEqual("2 requests peaked at 17.",
+                         tui.first_sentence("2 requests peaked at 17. 3 ran on -background."))
+
+    def test_a_decimal_point_does_not_end_a_sentence(self):
+        self.assertEqual("The p90 of 240.0s held.",
+                         tui.first_sentence("The p90 of 240.0s held. The next one is longer."))
+
+    def test_text_without_a_full_stop_comes_back_whole(self):
+        self.assertEqual("no full stop here", tui.first_sentence("  no full stop here  "))
+        self.assertEqual("", tui.first_sentence(""))
+
+
 # ---- [c]: the chart, drawn by the command that owns it -------------------
 class TheChartOnAKeypress(unittest.TestCase):
     """The rendered picture stays one keypress away, drawn for this window."""
 
     def test_the_chart_asks_the_command_for_this_window_offline(self):
-        with mock.patch.object(tui.cli, "main") as main:
-            svg, png = tui.chart_output("apex", 24)
+        def drawn(argv):
+            out = argv[argv.index("--out") + 1]
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write("<svg/>")
+            with open(os.path.splitext(out)[0] + ".png", "wb") as fh:
+                fh.write(b"png")
+            return 0
+
+        with mock.patch.object(tui.cli, "main", side_effect=drawn) as main:
+            svg, png, error = tui.chart_output("apex", 24)
         self.addCleanup(shutil.rmtree, os.path.dirname(svg), True)
         argv = main.call_args.args[0]
         self.assertEqual("chart", argv[0])
@@ -943,7 +1064,26 @@ class TheChartOnAKeypress(unittest.TestCase):
         self.assertEqual("apex", argv[argv.index("--plan") + 1])
         self.assertEqual(svg, argv[argv.index("--out") + 1])
         self.assertTrue(svg.endswith("chart.svg"), svg)
-        self.assertIsNone(png, "nothing wrote a PNG, so nothing is offered as opened")
+        self.assertEqual("", error)
+        self.assertTrue(png.endswith("chart.png"), "the PNG the command wrote is offered")
+
+    def test_a_failed_chart_reports_the_error_and_offers_no_file(self):
+        def refused(argv):
+            print("luna-doctor: cannot write the chart: no space left", file=sys.stderr)
+            return 2
+
+        with mock.patch.object(tui.cli, "main", side_effect=refused):
+            svg, png, error = tui.chart_output("apex", 24)
+        self.addCleanup(shutil.rmtree, os.path.dirname(svg), True)
+        self.assertIsNone(png, "a chart nobody wrote is not offered as opened")
+        self.assertIn("no space left", error, "the command's own last line comes back")
+
+    def test_a_chart_that_wrote_no_file_is_a_failure_even_at_exit_zero(self):
+        with mock.patch.object(tui.cli, "main", return_value=0):
+            svg, _png, error = tui.chart_output("apex", 24)
+        self.addCleanup(shutil.rmtree, os.path.dirname(svg), True)
+        self.assertFalse(os.path.exists(svg))
+        self.assertTrue(error, "a path asked for is not a file that exists")
 
     def test_c_confirms_the_path_it_wrote(self):
         asyncio.run(self._drive())
@@ -951,7 +1091,7 @@ class TheChartOnAKeypress(unittest.TestCase):
     async def _drive(self):
         app = tui.TriageApp()
         drawn = ("/tmp/luna-doctor-chart/chart.svg",
-                 "/tmp/luna-doctor-chart/chart.png")
+                 "/tmp/luna-doctor-chart/chart.png", "")
         with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
                 mock.patch.object(tui, "chart_output", return_value=drawn) as chart:
             async with app.run_test(size=(100, 40)) as pilot:
@@ -965,6 +1105,28 @@ class TheChartOnAKeypress(unittest.TestCase):
                 self.assertEqual(1, chart.call_count)
                 self.assertIn("chart written: /tmp/luna-doctor-chart/chart.png", status)
                 self.assertIn("[q] quits", status)
+                await pilot.press("q")
+
+    def test_a_failed_chart_names_the_error_instead_of_a_path(self):
+        asyncio.run(self._drive_failure())
+
+    async def _drive_failure(self):
+        app = tui.TriageApp()
+        failed = ("/tmp/luna-doctor-chart/chart.svg", None,
+                  "luna-doctor: cannot write the chart: no space left")
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+                mock.patch.object(tui, "chart_output", return_value=failed):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("c")
+                await self._settle(
+                    pilot, lambda: "the chart failed" in self._status(app))
+                status = self._status(app)
+                self.assertIn("cannot write the chart", status)
+                self.assertNotIn("chart written", status,
+                                 "a status must not name a file nobody wrote")
                 await pilot.press("q")
 
     @staticmethod

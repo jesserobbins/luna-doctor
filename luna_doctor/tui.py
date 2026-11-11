@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -99,6 +100,20 @@ def _count(value):
 
 def _sec(value) -> str:
     return "unknown" if value is None else f"{value}s"
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(\"'\u2018\u201c])")
+
+
+def first_sentence(text: str) -> str:
+    """The first sentence of a piece of CLI prose, stripped.
+
+    A sentence ends at a full stop, a question mark or an exclamation mark
+    followed by whitespace and something that starts a sentence. The screen
+    keeps one sentence of the verdict's prose, so this is the seam that
+    decides where the report takes over.
+    """
+    return _SENTENCE_END.split((text or "").strip(), maxsplit=1)[0].strip()
 
 
 # ---- the account panel: what the account reports (●) -----------------------
@@ -183,11 +198,10 @@ def _occupancy_rows(cap) -> list[tuple[str, str]]:
     if saturated is not None:
         occupancy += f" · saturated: {cli._cap_flag(saturated)}"
     if ledger == "up":
-        # The ledger is healthy and the cap is there. The count may not be, and
-        # a row that says so must not wear the badge of a number the account
-        # reported.
-        badge = (badges.badge_for(sources.PROV_ACCOUNT) if in_use is not None
-                 else _BADGE_UNKNOWN)
+        # A row that prints an unread count or an unread sample time is not a
+        # line the account reported, so it must not wear the account's badge.
+        known = in_use is not None and sampled is not None
+        badge = (badges.badge_for(sources.PROV_ACCOUNT) if known else _BADGE_UNKNOWN)
         text = (f"priority pool {occupancy} · ledger up, sampled at "
                 f"{cli._cap_unknown(sampled)}")
     else:
@@ -499,7 +513,11 @@ def concurrency_sparkline(metrics: dict, *, width: int = SPARK_WIDTH) -> str:
     per_column = span / width
     columns = [0] * width
     for stamp, value in series:
-        column = min(width - 1, max(0, int((stamp - start) / per_column)))
+        if stamp < start:
+            # A minute before the window is not this window's traffic, and
+            # clamping it into column 0 would draw it as if it were.
+            continue
+        column = min(width - 1, int((stamp - start) / per_column))
         columns[column] = max(columns[column], value)
     peak = max(columns)
     return "".join(" " if not value else
@@ -531,11 +549,11 @@ def spark_text(metrics: dict, *, width: int = SPARK_WIDTH) -> Text:
 
 # ---- the verdict panel: the CLI's own verdict, never a second one ----------
 def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
-    """The verdict line, its adjustments, the action and where the detail is.
+    """The verdict line, the action, and where the rest of it lives.
 
     The badge column stays empty: a verdict is a conclusion drawn from the rows
-    above it, not a number one source reported. The text is the headline and
-    adjustments `analyze` prints, so the TUI cannot disagree with the CLI about
+    above it, not a number one source reported. The text is `cli.verdict`'s own
+    headline and adjustments, so the TUI cannot disagree with the CLI about
     what the window means. The status moon leads the headline, read from
     `report.status_moon` - the same helper the pretty renderer asks. The legend
     for that scale is not a row here: `status_legend` returns it, and the screen
@@ -543,19 +561,18 @@ def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
     renderer gives it. The one arrow marks the action this screen can take in
     place.
 
-    The adjustments share one row: they are the CLI's own sentences, no fact is
-    dropped, and the panel still holds four rows at most. The last row says
-    where the whole report is, because this screen orients and does not
-    enumerate.
+    One sentence, not the whole verdict: `analyze` prints the headline and
+    every adjustment in full, and `[d]` shows it on this screen, so the panel
+    states the conclusion and points at the report instead of becoming the
+    report. The last row is that pointer, and there is only one.
     """
     headline, adjustments, exit_code = cli.verdict(metrics)
     moon = report.status_moon(exit_code, headline)
     glyph = _GLYPH_STYLE.symbol(moon)
-    rows = [("", f"{glyph} {headline}" if glyph else headline)]
-    if adjustments:
-        rows.append(("", " ".join(adjustments)))
+    line = first_sentence(" ".join([headline, *adjustments]))
+    rows = [("", f"{glyph} {line}" if glyph else line)]
     rows += [("→", "press [f] for the per-agent fix, or run `luna-doctor fix`"),
-             ("", "details: press d for the full report")]
+             ("", "details: press d for the full analyze report")]
     return rows
 
 
@@ -699,6 +716,30 @@ def scan_status(metrics: dict, cap, online: bool = False) -> str:
     return " · ".join(bits)
 
 
+def _captured_main(argv: list[str]) -> tuple[int, str]:
+    """Run one CLI command in-process with both streams captured.
+
+    The screen owns the terminal while the command runs, so a notice, a report
+    or a usage error has to come back as text. A SystemExit from argparse is
+    that text too, with its own code: a bad flag is output on this screen,
+    never a crash. Returns (exit code, captured text).
+    """
+    buf = io.StringIO()
+    code = 0
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            code = cli.main(argv) or 0
+    except SystemExit as e:      # a usage error exiting 2 is output on this screen, not a crash
+        code = e.code if isinstance(e.code, int) else 2
+    return code, buf.getvalue()
+
+
+def _last_line(text: str) -> str:
+    """The last non-blank line of captured CLI output, or ""."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
 def fix_output(plan: str | None = None) -> str:
     """The `fix` command's own output, cache-only, as text for the screen.
 
@@ -709,17 +750,26 @@ def fix_output(plan: str | None = None) -> str:
     argv = ["fix", "--since", f"{SCAN_HOURS}h", "--offline"]
     if plan:
         argv += ["--plan", plan]
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            cli.main(argv)
-    except SystemExit:      # a usage error exiting 2 is output on this screen, not a crash
-        pass
-    return buf.getvalue()
+    return _captured_main(argv)[1]
+
+
+def detail_output(plan: str | None = None, hours: float = SCAN_HOURS) -> str:
+    """The `analyze` report's own text, cache-only, for the detail panel.
+
+    `[d]` shows the report the verdict was cut from, so it runs the command
+    instead of re-rendering the metrics: one report, one wording, and the
+    screen cannot invent a detail the CLI does not print. The window is the
+    scan's own, and `--offline` keeps the promise that the TUI opens no new
+    network behavior.
+    """
+    argv = ["analyze", "--since", f"{hours:g}h", "--offline"]
+    if plan:
+        argv += ["--plan", plan]
+    return _captured_main(argv)[1]
 
 
 def chart_output(plan: str | None = None,
-                 hours: float = SCAN_HOURS) -> tuple[str, str | None]:
+                 hours: float = SCAN_HOURS) -> tuple[str, str | None, str]:
     """Draw this window's chart, then open the picture in the system viewer.
 
     The chart is the `chart` command's own work, so the screen asks for it
@@ -732,8 +782,12 @@ def chart_output(plan: str | None = None,
     The chart goes into a directory this press makes: the screen must not
     overwrite the stable SVG that a bare run leaves in `~/.luna-doctor/last`,
     and the viewer needs the file to outlive the keypress. The PNG is opened
-    only when it was written, because a terminal cannot show a picture. Returns
-    (svg path, png path or None).
+    only when it was written, because a terminal cannot show a picture.
+
+    A path this press asked for is not a file. The command's exit code and the
+    file on disk are the evidence that a chart was written, so a run that
+    failed reports its own last line back instead of a path nobody can open.
+    Returns (svg path, png path or None, the failure reason or "").
     """
     folder = tempfile.mkdtemp(prefix="luna-doctor-chart-")
     svg_path = os.path.join(folder, "chart.svg")
@@ -741,16 +795,13 @@ def chart_output(plan: str | None = None,
     argv = ["chart", "--since", f"{hours:g}h", "--offline", "--out", svg_path]
     if plan:
         argv += ["--plan", plan]
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            cli.main(argv)
-    except SystemExit:      # a usage error exiting 2 is output on this screen, not a crash
-        pass
-    if not os.path.exists(png_path):
-        return svg_path, None
-    cli._open_png_quietly(png_path)
-    return svg_path, png_path
+    code, text = _captured_main(argv)
+    if code != 0 or not os.path.exists(svg_path):
+        return svg_path, None, _last_line(text) or f"the chart command exited {code}"
+    png = png_path if os.path.exists(png_path) else None
+    if png:
+        cli._open_png_quietly(png)
+    return svg_path, png, ""
 
 
 # ---- the screen -----------------------------------------------------------
@@ -775,11 +826,12 @@ class TriageApp(App):
     #verdict-line { border: round $accent; }
     #spark { padding: 1 2 0 2; }
     #legend, #moon-legend { padding: 1 2; color: $text-muted; }
-    #fix { display: none; border: round $secondary; padding: 0 1; }
+    #detail { display: none; border: round $secondary; padding: 0 1; }
     """
 
     BINDINGS = [
         Binding("c", "show_chart", "chart"),
+        Binding("d", "show_detail", "detail"),
         Binding("f", "show_fix", "fix"),
         Binding("q", "quit", "quit"),
     ]
@@ -812,9 +864,10 @@ class TriageApp(App):
             # conclusion
             yield Static("", id="moon-legend")
             yield Static(badges.legend_line(), id="legend")
-        with VerticalScroll(id="fix"):
-            # markup=False: the fix block's prose may name a tier as [agents].
-            yield Static("", id="fix-text", markup=False)
+        with VerticalScroll(id="detail"):
+            # markup=False: this panel prints a command's own words, and the
+            # fix block may name a tier as [agents].
+            yield Static("", id="detail-text", markup=False)
 
     def on_mount(self) -> None:
         self._set_status("scanning local logs… (last 24h)")
@@ -880,7 +933,32 @@ class TriageApp(App):
         self.query_one("#choices").display = False
         self.query_one("#verdict").display = True
         self._set_status(f"{scan_status(self.metrics, self.capacity, self.online)} · "
-                         f"[f] shows the fix, [c] draws the chart, [q] quits")
+                         f"[f] shows the fix, [d] the full report, "
+                         f"[c] draws the chart, [q] quits")
+
+    # -- the detail panel: the analyze report, or the fix output ----------
+    def _show_detail(self, text: str, empty: str, status: str) -> None:
+        """Fill the one detail panel with a command's own words, and say so."""
+        self.query_one("#detail-text", Static).update(text or empty)
+        self.query_one("#detail").display = True
+        self._set_status(f"{status} · [q] quits")
+
+    def action_show_detail(self) -> None:
+        """Show the whole `analyze` report the verdict was cut from."""
+        if self.scan_failed is not None:
+            self._set_status(f"the scan failed ({self.scan_failed}); the report needs a scan")
+            return
+        if self.metrics is None:
+            self._set_status("the scan is still running; the report needs it")
+            return
+        self._set_status("rendering the analyze report (cache only)…")
+        self._detail_worker(int(self.metrics.get("window_hours") or SCAN_HOURS))
+
+    @work(thread=True)
+    def _detail_worker(self, hours: int) -> None:
+        self.call_from_thread(self._show_detail, detail_output(self.plan, hours),
+                              "the analyze report was empty",
+                              "the analyze report is on screen")
 
     # -- the fix, in place, cache only ------------------------------------
     def action_show_fix(self) -> None:
@@ -895,12 +973,9 @@ class TriageApp(App):
 
     @work(thread=True)
     def _fix_worker(self) -> None:
-        self.call_from_thread(self._fix_done, fix_output(self.plan))
-
-    def _fix_done(self, text: str) -> None:
-        self.query_one("#fix-text", Static).update(text or "the fix output was empty")
-        self.query_one("#fix").display = True
-        self._set_status("the fix output is on screen · [q] quits")
+        self.call_from_thread(self._show_detail, fix_output(self.plan),
+                              "the fix output was empty",
+                              "the fix output is on screen")
 
     # -- the chart, in place, cache only ----------------------------------
     def action_show_chart(self) -> None:
@@ -916,10 +991,13 @@ class TriageApp(App):
 
     @work(thread=True)
     def _chart_worker(self, hours: int) -> None:
-        svg_path, png_path = chart_output(self.plan, hours)
-        self.call_from_thread(self._chart_done, svg_path, png_path)
+        svg_path, png_path, error = chart_output(self.plan, hours)
+        self.call_from_thread(self._chart_done, svg_path, png_path, error)
 
-    def _chart_done(self, svg_path: str, png_path: str | None) -> None:
+    def _chart_done(self, svg_path: str, png_path: str | None, error: str) -> None:
+        if error:
+            self._set_status(f"the chart failed: {error} · [q] quits")
+            return
         written = png_path or svg_path
         opened = " · the PNG is open" if png_path else ""
         self._set_status(f"chart written: {written}{opened} · [q] quits")
