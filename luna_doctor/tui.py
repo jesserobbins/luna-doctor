@@ -553,8 +553,8 @@ def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
 
     The badge column stays empty: a verdict is a conclusion drawn from the rows
     above it, not a number one source reported. The text is `cli.verdict`'s own
-    headline and adjustments, so the TUI cannot disagree with the CLI about
-    what the window means. The status moon leads the headline, read from
+    headline, so the TUI cannot disagree with the CLI about what the window
+    means. The status moon leads the headline, read from
     `report.status_moon` - the same helper the pretty renderer asks. The legend
     for that scale is not a row here: `status_legend` returns it, and the screen
     prints it as its own quiet line under the panel, the weight the pretty
