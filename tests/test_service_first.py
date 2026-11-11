@@ -360,7 +360,8 @@ class TheChartIsDesignedForDiagnosis(unittest.TestCase):
 
         The account's day counters, the measured deadlines and the heatmap's
         reading guide left this band: they are sentences, and `luna-doctor
-        explain` is where a reader goes for sentences."""
+        analyze` reports the deadlines and the counters, while `explain` tells
+        the story of one request."""
         now = 1_700_000_000.0
         text = self._text(self._scene([self._req(now + i * 60, 5.0) for i in range(10)]))
         self.assertIn("rule: not established", text)

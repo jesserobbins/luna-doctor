@@ -93,8 +93,9 @@ moved into the band names, and the one stack carries the total at every
 moment of the window.
 No universal admission deadline. The previous chart drew one wall at 120.2s
 for every model; that is one model's constant (another model's requests
-were rejected at 60.3s). Rejections are per-request ticks, and the footer
-reports each model's observed deadline, measured, with its n.
+were rejected at 60.3s). Rejections are per-request ticks here, and
+`luna-doctor analyze` reports each model's observed deadline, measured,
+with its n, in the admission wall row.
 No advisory concurrency rule. The old "advised 8" was headroom under a cap
 of 10 that turned out to be one plan's default, not a gateway constant.
 Advice that depends on the plan is being re-derived per plan elsewhere in
@@ -102,9 +103,9 @@ the tool; a number drawn here would be a guess wearing a ruler.
 No overflow-capacity rule. Only one plan documents overflow capacity, it
 is not declarable yet, and a missing line is honest where a wrong one is
 not.
-No priority rule at all when nothing is established: the footer says the
-number is specific to the account and cannot be read from these logs, and
-points at `luna-doctor capacity` and --plan.
+No priority rule at all when nothing is established: the footer's first
+line says the rule is not established and points at `luna-doctor capacity`,
+which fetches the account's number from the capacity API's cache.
 No latency picture. It shared a frame with the old bars and halved the
 space each story got; latency keeps its own home in `analyze`.
 No plot fills, plot borders, or legend: the data is the ink.
@@ -114,10 +115,10 @@ one "other" band per scheduling class and agent, so an agent's identity
 survives the fold while the model names beneath it do not -- the residue
 is, by definition, the traffic no label could name. And when only one
 agent has traffic in the window the agent suffix is dropped from every
-name: with one agent there is nothing to distinguish, and the footer's
-"read from pi logs" already says whose traffic it is. A window where no
-agent had timed traffic still draws the one plot area over the requested
-window -- empty axes and the honest footer, never a bare message.
+name: with one agent there is nothing to distinguish, and the title's
+window already says whose traffic this is. A window where no agent had
+timed traffic still draws the one plot area over the requested window --
+empty axes and the two honest footer lines, never a bare message.
 """
 
 import math
@@ -903,7 +904,8 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     else:
         # Top: what happened to each request in the same columns. Counts, from
         # these logs, at a resolution the axis can carry - the account's own
-        # counters are day-granular and read as a sentence in the footer.
+        # counters are day-granular, so they stay out of the picture and
+        # `luna-doctor analyze` reports them beside the local traffic.
         _admission_panel(shapes, reqs=reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
                          y0=98, y1=98 + fate_panel_h - 16, n_cols=n_cols)
         add(Line(px, 98 + fate_panel_h - 8, px + plot_w, 98 + fate_panel_h - 8,

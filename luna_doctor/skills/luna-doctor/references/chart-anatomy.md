@@ -74,17 +74,21 @@ canvas, so a long plan name never loses its line.
 The header dates the picture at the right of the title, as `generated <date>
 <time> UTC`. A picture of a past window is only honest with its own date on it.
 
-Everything else this band used to carry left the picture. The per-model
-admission deadlines with their counts, the heatmap's reading guide, the account's
-day counters and the latency trend are sentences, and `luna-doctor explain` is
-where a reader goes for sentences. The rule that a request waiting for admission
-counts as open until it is served or rejected still holds. The marks show it.
+Everything else this band used to carry left the picture. `luna-doctor analyze`
+reports each model's admission deadline with its count, in the `admission wall`
+row. The same report gives the account's day counters beside the local traffic,
+and its saturation bands say whether latency rises at the ceiling. The heatmap's
+reading guide is gone, because the marks carry the shape. For the story of one
+request, run `luna-doctor explain`. The rule that a request waiting for
+admission counts as open until it is served or rejected still holds. The marks
+show it.
 
 The chart does not draw three marks. One is a universal admission deadline,
-because that deadline is per model and `explain` reports each measured one with
-its count. The second is an advisory concurrency figure, because advice depends
-on the account and belongs to `analyze` and `fix`, not to a ruler here. The third
-is a latency picture, because latency lives in `analyze`.
+because that deadline is per model and `analyze` reports each measured one with
+its count, in the `admission wall` row. The second is an advisory concurrency
+figure, because advice depends on the account and belongs to `analyze` and
+`fix`, not to a ruler here. The third is a latency picture, because latency
+lives in `analyze`.
 
 ## How this playbook ends
 

@@ -16,8 +16,9 @@ machine.
     python3 scripts/make_demo_charts.py
 
 Writes assets/chart-7d.svg, assets/chart-7d.png, assets/chart-24h.svg and
-assets/chart-24h.png. Deterministic: the seed is fixed, so two runs on the same
-day produce the same pictures.
+assets/chart-24h.png. The seed is fixed, so two runs trace the same traffic.
+The one thing that moves is the date the picture carries: each run is stamped
+with the time it was drawn, so a regenerated image is a picture of that moment.
 """
 
 import json
@@ -196,11 +197,13 @@ def chart(home, pi_root, since, out):
     env = dict(os.environ)
     env["HOME"] = home
     # No capacity payload: the dashed rule must come from the declaration alone.
+    # `--offline` is what makes that true: without it the chart asks the account
+    # for its own number, and a real account value would reach a public image.
     env["LUNA_DOCTOR_CAPACITY"] = os.path.join(home, "no-such-capacity.json")
     env["LUNA_DOCTOR_STORE"] = os.path.join(home, "store")
     proc = subprocess.run(
         [sys.executable, CLI, "chart", "--since", since, "--pi-root", pi_root,
-         "--harness", "pi", "--plan", DECLARED_PLAN, "--out", out,
+         "--harness", "pi", "--plan", DECLARED_PLAN, "--offline", "--out", out,
          "--width", "1120", "--height", "640"],
         capture_output=True, text=True, env=env, cwd=ROOT)
     if proc.returncode not in (0, 1):
