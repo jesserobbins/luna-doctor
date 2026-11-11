@@ -16,13 +16,20 @@ to the linear path.
 The panels are in ranked-trust order: what the account reports first (●), then
 what this machine's logs show (○), then the verdict. Every number carries its
 badge, and one legend line names all three.
+
+The screen is an orientation dashboard, not a report: no panel holds more than
+four rows, one sparkline carries the window's shape, and the detail stays in
+`analyze`, `explain`, `capacity` and `chart`, which the screen shells out to.
 """
 
 from __future__ import annotations
 
 import contextlib
 import io
+import os
+import tempfile
 import time
+from datetime import datetime, timezone
 
 from rich.text import Text
 from textual import work
@@ -36,6 +43,12 @@ from luna_doctor.style import Style
 
 SCAN_HOURS = 24
 SCAN_HARNESSES = ("pi", "claude-code")
+
+# The dashboard is drawn for about 80 columns, so the sparkline is 60 wide.
+SPARK_WIDTH = 60
+
+# Eight blocks, lowest first: the ramp cli.duration_sparkline prints.
+_SPARK_BLOCKS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
 
 PANEL_ACCOUNT = "What the account reports (authoritative)"
 PANEL_LOCAL = "What this machine's logs show (informative, a lower bound)"
@@ -139,12 +152,14 @@ def _width_row(metrics: dict, cap) -> tuple[str, str]:
 
 
 def _occupancy_rows(cap) -> list[tuple[str, str]]:
-    """The priority pool's live occupancy and the moment it was taken.
+    """The priority pool's live occupancy, with the ledger and sample behind it.
 
-    The flat `now` fields cover the priority pool only. The occupancy line is
-    qualified by the ledger: when the ledger is not "up", the count is advisory
-    and the row says it may be stale or missing, because a pool line that looks
-    authoritative over an unhealthy ledger is a claim nobody measured.
+    The flat `now` fields cover the priority pool only. The occupancy is
+    qualified by the ledger: when the ledger is not "up", the count is
+    advisory and the row says it may be stale or missing, because a pool line
+    that looks authoritative over an unhealthy ledger is a claim nobody
+    measured. The ledger and the sample time share this row: the dashboard
+    orients, and `capacity` prints the whole block.
     """
     now = cap.now
     if now is None:
@@ -163,27 +178,26 @@ def _occupancy_rows(cap) -> list[tuple[str, str]]:
     if available is not None:
         occupancy += f" · {available} available"
     ledger = cli._cap_field(now, "ledger")
+    sampled = cli._cap_field(now, "sampled_at")
     saturated = cli._cap_field(now, "saturated")
     if saturated is not None:
         occupancy += f" · saturated: {cli._cap_flag(saturated)}"
-    if ledger == "up" and in_use is not None:
-        rows = [(badges.badge_for(sources.PROV_ACCOUNT), f"priority pool {occupancy}")]
-    elif ledger == "up":
-        # The ledger is healthy and the cap is there; the count is not. The
-        # row says so, so it must not wear the badge of a number the account
+    if ledger == "up":
+        # The ledger is healthy and the cap is there. The count may not be, and
+        # a row that says so must not wear the badge of a number the account
         # reported.
-        rows = [(_BADGE_UNKNOWN, f"priority pool {occupancy}")]
+        badge = (badges.badge_for(sources.PROV_ACCOUNT) if in_use is not None
+                 else _BADGE_UNKNOWN)
+        text = (f"priority pool {occupancy} · ledger up, sampled at "
+                f"{cli._cap_unknown(sampled)}")
     else:
-        rows = [(_BADGE_UNKNOWN,
-                 f"priority pool {occupancy}, but the ledger is "
-                 f"{cli._cap_unknown(ledger)}, so the count may be stale or missing")]
-    sampled = cli._cap_field(now, "sampled_at")
-    sample = f"pool ledger {cli._cap_unknown(ledger)} · sampled at {cli._cap_unknown(sampled)}"
+        badge = _BADGE_UNKNOWN
+        text = (f"priority pool {occupancy}, but the ledger is "
+                f"{cli._cap_unknown(ledger)}, so the count may be stale or "
+                f"missing · sampled at {cli._cap_unknown(sampled)}")
     if getattr(cap, "stale", False):
-        sample += "; the cache is past its time to live, so run `luna-doctor capacity --online`"
-    known = ledger is not None and sampled is not None
-    rows.append((badges.badge_for(sources.PROV_ACCOUNT) if known else _BADGE_UNKNOWN, sample))
-    return rows
+        text += "; the cache is past its time to live, so run `luna-doctor capacity --online`"
+    return [(badge, text)]
 
 
 def _overflow_rows(cap) -> list[tuple[str, str]]:
@@ -290,14 +304,20 @@ def local_rows(choice_key: str, metrics: dict) -> list[tuple[str, str]]:
 
 
 def _outcome_rows(metrics: dict, classes) -> list[tuple[str, str]]:
-    """One row per outcome class the person's answer is about, when it counted."""
+    """One row naming every outcome class the answer is about that counted.
+
+    The classes share the row: the dashboard orients, and `analyze` still
+    prints each class on its own line with its own count.
+    """
     by_outcome = metrics.get("by_outcome") or {}
-    rows = []
+    bits = []
     for name, phrase in classes:
         count = _count(by_outcome.get(name))
         if count:
-            rows.append((_BADGE_MEASURED, f"{count} request(s) {phrase}"))
-    return rows
+            bits.append(f"{count} request(s) {phrase}")
+    if not bits:
+        return []
+    return [(_BADGE_MEASURED, " · ".join(bits))]
 
 
 _PRESSURE_CLASSES = (
@@ -332,15 +352,19 @@ def _latency_rows(metrics: dict) -> list[tuple[str, str]]:
     The queue wait is the account's own admission measure, so it wears the
     account badge even though it answers a latency question; a null there means
     nobody waited that day, and cli._cap_wait says exactly that rather than a
-    zero. The local rows are completed requests only.
+    zero. The local numbers are completed requests only, and both tiers share
+    one row so the panel stays short. The band row is the one shape a reader
+    cannot get from the percentiles, so it keeps a row of its own.
     """
     rows = [_queue_wait_row(metrics)]
+    tiers = []
     for tier in ("interactive", "background"):
         lat = (metrics.get("latency_s") or {}).get(tier) or {}
         if _count(lat.get("n")):
-            rows.append((_BADGE_MEASURED,
-                         f"{tier} latency n={lat['n']} p50={_sec(lat.get('p50'))} "
-                         f"p90={_sec(lat.get('p90'))}"))
+            tiers.append(f"{tier} latency n={lat['n']} p50={_sec(lat.get('p50'))} "
+                         f"p90={_sec(lat.get('p90'))}")
+    if tiers:
+        rows.append((_BADGE_MEASURED, " · ".join(tiers)))
     bands = metrics.get("saturation_bands") or {}
     if bands.get("top_inflation_flagged"):
         top = (bands.get("bands") or [])[-1]
@@ -423,9 +447,91 @@ def _overview_rows(metrics: dict) -> list[tuple[str, str]]:
     return rows
 
 
+# ---- the sparkline: the window's shape in one row of blocks ---------------
+def _epoch(value):
+    """A usable epoch second, or None: a bool is not a clock, and neither is a string."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def _minute_epoch(stamp):
+    """Seconds since the epoch for one by_minute stamp ("2026-11-02T23:00Z")."""
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%dT%H:%MZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def concurrency_sparkline(metrics: dict, *, width: int = SPARK_WIDTH) -> str:
+    """The window's concurrency as one row of blocks, or "" when it is empty.
+
+    by_minute is sparse - concurrency_by_minute drops every quiet minute - so
+    one block per entry would draw a busy hour and a busy day at the same
+    width. The series is re-binned onto uniform columns across window_hours
+    instead: one column per slice of the window, and a column nobody was
+    running in is a space. A window that was quiet at its start reads as
+    blanks, not as low bars.
+
+    Each column carries the busiest minute inside it, scaled against the
+    window's own peak, so the ramp compares across the row. The window closes
+    at the scan's clock when the metrics carry one (scan sets scanned_at) and
+    at the last active minute otherwise.
+    """
+    if width < 1:
+        return ""
+    series = []
+    for entry in metrics.get("by_minute") or []:
+        if not isinstance(entry, dict):
+            continue
+        stamp = _minute_epoch(entry.get("minute"))
+        value = _count(entry.get("max_concurrent"))
+        if stamp is not None and value:
+            series.append((stamp, value))
+    if not series:
+        return ""
+    series.sort()
+    hours = metrics.get("window_hours") or SCAN_HOURS
+    span = max(60.0, hours * 3600)
+    end = _epoch(metrics.get("scanned_at")) or series[-1][0] + 60.0
+    start = end - span
+    per_column = span / width
+    columns = [0] * width
+    for stamp, value in series:
+        column = min(width - 1, max(0, int((stamp - start) / per_column)))
+        columns[column] = max(columns[column], value)
+    peak = max(columns)
+    return "".join(" " if not value else
+                   _SPARK_BLOCKS[min(len(_SPARK_BLOCKS) - 1,
+                                     value * len(_SPARK_BLOCKS) // peak)]
+                   for value in columns)
+
+
+def spark_caption(metrics: dict) -> str:
+    """The sparkline's one-line key: what the row shows and the peak it scales to."""
+    peak = _count(metrics.get("peak_concurrency"))
+    shown = "unknown" if peak is None else peak
+    return f"concurrency across the window · peak {shown}"
+
+
+def spark_text(metrics: dict, *, width: int = SPARK_WIDTH) -> Text:
+    """The sparkline and its caption as one quiet block of two lines.
+
+    Empty when the window holds no active minute: an empty picture is not a
+    shape, and the screen hides the line rather than drawing a flat one.
+    """
+    blocks = concurrency_sparkline(metrics, width=width)
+    if not blocks:
+        return Text("")
+    text = Text(blocks)
+    text.append("\n" + spark_caption(metrics), style="dim")
+    return text
+
+
 # ---- the verdict panel: the CLI's own verdict, never a second one ----------
 def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
-    """The verdict line and its adjustments, from cli.verdict and nowhere else.
+    """The verdict line, its adjustments, the action and where the detail is.
 
     The badge column stays empty: a verdict is a conclusion drawn from the rows
     above it, not a number one source reported. The text is the headline and
@@ -436,13 +542,20 @@ def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
     prints it as its own quiet line under the panel, the weight the pretty
     renderer gives it. The one arrow marks the action this screen can take in
     place.
+
+    The adjustments share one row: they are the CLI's own sentences, no fact is
+    dropped, and the panel still holds four rows at most. The last row says
+    where the whole report is, because this screen orients and does not
+    enumerate.
     """
     headline, adjustments, exit_code = cli.verdict(metrics)
     moon = report.status_moon(exit_code, headline)
     glyph = _GLYPH_STYLE.symbol(moon)
     rows = [("", f"{glyph} {headline}" if glyph else headline)]
-    rows += [("", line) for line in adjustments]
-    rows += [("→", "press [f] for the per-agent fix, or run `luna-doctor fix`")]
+    if adjustments:
+        rows.append(("", " ".join(adjustments)))
+    rows += [("→", "press [f] for the per-agent fix, or run `luna-doctor fix`"),
+             ("", "details: press d for the full report")]
     return rows
 
 
@@ -508,6 +621,9 @@ def scan(plan: str | None = None) -> tuple:
     reqs = cli.collect(SCAN_HOURS, list(SCAN_HARNESSES), None, None, now=now)
     metrics = cli.analyse(reqs, SCAN_HOURS)
     metrics["declared_plan"] = plan
+    # The sparkline re-bins by_minute across the window, so the window needs a
+    # close it can trust: this scan's own clock, not the last active minute.
+    metrics["scanned_at"] = now
     try:
         metrics["peak_concurrency_priority"] = cli.max_concurrency(
             [r for r in cli.timed(reqs) if getattr(r, "tier", "") == "interactive"])[0]
@@ -602,6 +718,41 @@ def fix_output(plan: str | None = None) -> str:
     return buf.getvalue()
 
 
+def chart_output(plan: str | None = None,
+                 hours: float = SCAN_HOURS) -> tuple[str, str | None]:
+    """Draw this window's chart, then open the picture in the system viewer.
+
+    The chart is the `chart` command's own work, so the screen asks for it
+    instead of drawing a second one: same window, same scene, same file. Both
+    streams are captured, so the CLI's notices and any usage error stay text on
+    this screen instead of painting over it. `--offline` keeps the promise that
+    the TUI opens no new network behavior, and `--out` names the file, so the
+    screen can say where the chart went without reading the CLI's mind.
+
+    The chart goes into a directory this press makes: the screen must not
+    overwrite the stable SVG that a bare run leaves in `~/.luna-doctor/last`,
+    and the viewer needs the file to outlive the keypress. The PNG is opened
+    only when it was written, because a terminal cannot show a picture. Returns
+    (svg path, png path or None).
+    """
+    folder = tempfile.mkdtemp(prefix="luna-doctor-chart-")
+    svg_path = os.path.join(folder, "chart.svg")
+    png_path = os.path.join(folder, "chart.png")
+    argv = ["chart", "--since", f"{hours:g}h", "--offline", "--out", svg_path]
+    if plan:
+        argv += ["--plan", plan]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            cli.main(argv)
+    except SystemExit:      # a usage error exiting 2 is output on this screen, not a crash
+        pass
+    if not os.path.exists(png_path):
+        return svg_path, None
+    cli._open_png_quietly(png_path)
+    return svg_path, png_path
+
+
 # ---- the screen -----------------------------------------------------------
 class TriageApp(App):
     """The triage screen: one question, then one badged verdict.
@@ -622,11 +773,13 @@ class TriageApp(App):
     #verdict { display: none; padding: 0 2; }
     .panel { border: round $primary; padding: 0 1; margin: 1 0 0 0; height: auto; }
     #verdict-line { border: round $accent; }
+    #spark { padding: 1 2 0 2; }
     #legend, #moon-legend { padding: 1 2; color: $text-muted; }
     #fix { display: none; border: round $secondary; padding: 0 1; }
     """
 
     BINDINGS = [
+        Binding("c", "show_chart", "chart"),
         Binding("f", "show_fix", "fix"),
         Binding("q", "quit", "quit"),
     ]
@@ -651,6 +804,8 @@ class TriageApp(App):
         with VerticalScroll(id="verdict"):
             yield Static("", id="account", classes="panel")
             yield Static("", id="local", classes="panel")
+            # the picture between the evidence and the conclusion it supports
+            yield Static("", id="spark")
             yield Static("", id="verdict-line", classes="panel")
             # its own line, in the muted weight every legend on this screen
             # wears: the verdict panel above it is bold, and a key is not a
@@ -716,11 +871,16 @@ class TriageApp(App):
         moon_legend.update(legend)
         # no phase drawn means no key: an empty line would be decoration
         moon_legend.display = bool(legend)
+        spark = spark_text(self.metrics)
+        spark_line = self.query_one("#spark", Static)
+        spark_line.update(spark)
+        # no active minute means no picture: a blank line is not a shape
+        spark_line.display = bool(spark.plain)
         self.query_one("#question").display = False
         self.query_one("#choices").display = False
         self.query_one("#verdict").display = True
         self._set_status(f"{scan_status(self.metrics, self.capacity, self.online)} · "
-                         f"[f] shows the fix, [q] quits")
+                         f"[f] shows the fix, [c] draws the chart, [q] quits")
 
     # -- the fix, in place, cache only ------------------------------------
     def action_show_fix(self) -> None:
@@ -741,6 +901,28 @@ class TriageApp(App):
         self.query_one("#fix-text", Static).update(text or "the fix output was empty")
         self.query_one("#fix").display = True
         self._set_status("the fix output is on screen · [q] quits")
+
+    # -- the chart, in place, cache only ----------------------------------
+    def action_show_chart(self) -> None:
+        """Draw this window's chart and open the picture beside it."""
+        if self.scan_failed is not None:
+            self._set_status(f"the scan failed ({self.scan_failed}); the chart needs a scan")
+            return
+        if self.metrics is None:
+            self._set_status("the scan is still running; the chart needs it")
+            return
+        self._set_status("drawing the chart (cache only)…")
+        self._chart_worker(int(self.metrics.get("window_hours") or SCAN_HOURS))
+
+    @work(thread=True)
+    def _chart_worker(self, hours: int) -> None:
+        svg_path, png_path = chart_output(self.plan, hours)
+        self.call_from_thread(self._chart_done, svg_path, png_path)
+
+    def _chart_done(self, svg_path: str, png_path: str | None) -> None:
+        written = png_path or svg_path
+        opened = " · the PNG is open" if png_path else ""
+        self._set_status(f"chart written: {written}{opened} · [q] quits")
 
 
 def run_triage(plan: str | None = None, online: bool = False) -> int:

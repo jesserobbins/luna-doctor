@@ -16,9 +16,12 @@ second verdict implementation cannot drift from the CLI's.
 import asyncio
 import json
 import os
+import shutil
+import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import pytest
@@ -100,9 +103,28 @@ def _metrics(**over):
         "unknown_errors": [],
         "saturation_bands": {},
         "declared_plan": None,
+        "by_minute": [],
     }
     m.update(over)
     return m
+
+
+_SPARK_START = "2026-11-02T00:00Z"
+
+
+def _by_minute(pairs, start=_SPARK_START):
+    """by_minute entries from (minute offset, max_concurrent) pairs."""
+    base = datetime.strptime(start, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
+    return [{"minute": (base + timedelta(minutes=offset)).strftime("%Y-%m-%dT%H:%MZ"),
+             "max_concurrent": value, "started": value, "admission_deaths": 0}
+            for offset, value in pairs]
+
+
+def _scan_of(pairs, **over):
+    """Metrics whose 24h window closes at _SPARK_START plus 24h, holding these minutes."""
+    base = datetime.strptime(_SPARK_START, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
+    return _metrics(by_minute=_by_minute(pairs),
+                    scanned_at=base.timestamp() + 24 * 3600, **over)
 
 
 # ---- (a) the six answers steer the lead panel -------------------------------
@@ -728,3 +750,231 @@ class TriageAppLiteralText(unittest.TestCase):
     @staticmethod
     def _text(app, selector) -> str:
         return str(app.query_one(selector).render())
+
+
+# ---- the dashboard's density: four rows a panel, and no more --------------
+class MediumDensityPanels(unittest.TestCase):
+    """The screen orients. `analyze`, `explain` and `capacity` enumerate."""
+
+    def setUp(self):
+        self.cap = _cap(_payload("capacity-2026-11-02.json"))
+
+    def _busy(self):
+        """The busiest window this fixture can make: every lead panel full."""
+        return _metrics(
+            requests=12,
+            by_outcome={"completed": 4, "admission_timeout": 3, "rate_limited": 2,
+                        "org_concurrency_limit": 1, "client_idle_timeout": 2},
+            by_tier={"interactive": 10, "background": 2},
+            saturated=4,
+            capacity={"provenance": "account", "window_days": [
+                {"day": "2026-11-01", "avg_queue_wait_ms": 4200.0}]},
+            saturation_bands={"bands": [{"band": "8-12", "n": 3, "p50": 1.0,
+                                         "p90": 300.0}],
+                              "mid_p90_baseline_s": 60.0, "top_inflation": 5.0,
+                              "top_inflation_flagged": True},
+            slowest_request={"duration": "312.4s", "outcome": "client_idle_timeout",
+                             "headline": "The stream stopped without a finish_reason."},
+        )
+
+    def test_no_panel_holds_more_than_four_rows(self):
+        for _text, key in tui.TRIAGE_CHOICES:
+            with self.subTest(answer=key):
+                self.assertLessEqual(len(tui.account_rows(self._busy(), self.cap)), 4)
+                self.assertLessEqual(len(tui.local_rows(key, self._busy())), 4)
+        self.assertLessEqual(len(tui.verdict_rows(self._busy())), 4)
+
+    def test_the_account_panel_folds_the_ledger_into_the_pool_row(self):
+        rows = tui.account_rows(_metrics(), self.cap)
+        self.assertEqual(4, len(rows), "width, pool, overflow, admission")
+        pool = [text for _badge, text in rows if "priority pool" in text]
+        self.assertEqual(1, len(pool))
+        self.assertIn("sampled at", pool[0], "the sample time kept a row of its own")
+
+    def test_both_latency_tiers_share_one_row(self):
+        rows = tui.local_rows("slow", _metrics())
+        tiers = [text for _badge, text in rows if "latency" in text]
+        self.assertEqual(1, len(tiers))
+        self.assertIn("interactive latency", tiers[0])
+        self.assertIn("background latency", tiers[0])
+
+    def test_the_pressure_classes_share_one_row(self):
+        rows = tui.local_rows("failing", self._busy())
+        named = [text for _badge, text in rows if "rate_limit_error" in text]
+        self.assertEqual(1, len(named))
+        self.assertIn("scheduler admission timeout", named[0])
+
+    def test_the_verdict_panel_ends_with_where_the_report_is(self):
+        rows = tui.verdict_rows(self._busy())
+        self.assertEqual("", rows[-1][0], "a pointer to the report is no one's number")
+        self.assertIn("press d for the full report", rows[-1][1])
+
+
+# ---- the sparkline: the window's shape, re-binned ------------------------
+class ConcurrencySparkline(unittest.TestCase):
+    """by_minute is sparse, so the row is re-binned onto uniform columns."""
+
+    def test_sparse_minutes_are_rebinned_onto_uniform_columns(self):
+        spark = tui.concurrency_sparkline(_scan_of([(0, 2), (720, 9)]), width=4)
+        self.assertEqual(4, len(spark))
+        self.assertNotEqual(" ", spark[0])
+        self.assertEqual(" ", spark[1], "an empty column is a space, not a low bar")
+        self.assertEqual("\u2588", spark[2], "12h later lands in the third column")
+        self.assertEqual(" ", spark[3])
+
+    def test_the_busiest_minute_inside_a_column_is_the_column(self):
+        spark = tui.concurrency_sparkline(_scan_of([(0, 2), (10, 9)]), width=2)
+        self.assertEqual("\u2588 ", spark)
+
+    def test_a_quiet_window_draws_blanks_not_low_bars(self):
+        pairs = [(minute, 17) for minute in range(1400, 1440, 5)]
+        spark = tui.concurrency_sparkline(_scan_of(pairs), width=12)
+        self.assertEqual(" " * 11, spark[:11], "nothing ran there, so nothing is drawn")
+        self.assertNotEqual(" ", spark[11])
+
+    def test_a_dense_window_fills_the_ramp(self):
+        pairs = [(minute, level) for level, minute in
+                 enumerate(range(0, 1440, 120), start=1)]
+        spark = tui.concurrency_sparkline(_scan_of(pairs), width=12)
+        self.assertNotIn(" ", spark)
+        self.assertEqual("\u2581", spark[0])
+        self.assertEqual("\u2588", spark[-1])
+        levels = [tui._SPARK_BLOCKS.index(char) for char in spark]
+        self.assertEqual(sorted(levels), levels, "the ramp only goes up here")
+        self.assertGreaterEqual(len(set(spark)), 4, "the ramp is not two heights")
+
+    def test_the_window_closes_at_the_scans_clock(self):
+        """Activity from 22h ago stays at the left, where it happened. Closing
+        the window on the last active minute instead would draw it at the
+        right edge."""
+        spark = tui.concurrency_sparkline(_scan_of([(0, 5), (20, 17)]), width=12)
+        self.assertEqual(" " * 11, spark[1:])
+        self.assertNotEqual(" ", spark[0])
+
+    def test_without_a_scan_clock_the_window_ends_at_the_last_active_minute(self):
+        spark = tui.concurrency_sparkline(
+            _metrics(by_minute=_by_minute([(0, 5)])), width=4)
+        self.assertEqual(4, len(spark))
+        self.assertEqual(1, sum(char != " " for char in spark))
+        self.assertNotEqual(" ", spark[-1])
+
+    def test_the_caption_names_the_peak_the_row_scales_to(self):
+        self.assertEqual("concurrency across the window · peak 17",
+                         tui.spark_caption(_metrics(peak_concurrency=17)))
+        self.assertEqual("concurrency across the window · peak unknown",
+                         tui.spark_caption(_metrics(peak_concurrency=None)))
+
+    def test_an_empty_window_draws_nothing_at_all(self):
+        self.assertEqual("", tui.concurrency_sparkline(_metrics()))
+        self.assertEqual("", tui.spark_text(_metrics()).plain)
+
+    def test_the_text_is_the_row_then_its_caption(self):
+        metrics = _scan_of([(0, 17)])
+        row, caption = tui.spark_text(metrics, width=8).plain.split("\n")
+        self.assertEqual(8, len(row))
+        self.assertEqual(tui.spark_caption(metrics), caption)
+
+
+# ---- the sparkline on the screen ----------------------------------------
+class TheSparkOnTheScreen(unittest.TestCase):
+    """One quiet line between the evidence panels and the verdict line."""
+
+    def test_the_row_shows_between_the_local_panel_and_the_verdict(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        cap = _cap(_payload("capacity-2026-11-02.json"))
+        with mock.patch.object(tui, "scan",
+                               return_value=(_scan_of([(0, 17), (600, 4)]), cap)):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                ids = [child.id for child in app.query_one("#verdict").children]
+                self.assertEqual(["account", "local", "spark", "verdict-line",
+                                  "moon-legend", "legend"], ids)
+                spark = app.query_one("#spark")
+                self.assertTrue(spark.display)
+                text = str(spark.render())
+                self.assertIn("concurrency across the window · peak 17", text)
+                self.assertTrue(set(text) & set(tui._SPARK_BLOCKS), text)
+                await pilot.press("q")
+
+    def test_a_window_with_no_active_minute_hides_the_line(self):
+        asyncio.run(self._drive_quiet())
+
+    async def _drive_quiet(self):
+        app = tui.TriageApp()
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertFalse(app.query_one("#spark").display,
+                                 "an empty picture is not a shape")
+                await pilot.press("q")
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
+
+    @staticmethod
+    def _status(app) -> str:
+        return str(app.query_one("#status").render())
+
+
+# ---- [c]: the chart, drawn by the command that owns it -------------------
+class TheChartOnAKeypress(unittest.TestCase):
+    """The rendered picture stays one keypress away, drawn for this window."""
+
+    def test_the_chart_asks_the_command_for_this_window_offline(self):
+        with mock.patch.object(tui.cli, "main") as main:
+            svg, png = tui.chart_output("apex", 24)
+        self.addCleanup(shutil.rmtree, os.path.dirname(svg), True)
+        argv = main.call_args.args[0]
+        self.assertEqual("chart", argv[0])
+        self.assertEqual("24h", argv[argv.index("--since") + 1])
+        self.assertIn("--offline", argv)
+        self.assertEqual("apex", argv[argv.index("--plan") + 1])
+        self.assertEqual(svg, argv[argv.index("--out") + 1])
+        self.assertTrue(svg.endswith("chart.svg"), svg)
+        self.assertIsNone(png, "nothing wrote a PNG, so nothing is offered as opened")
+
+    def test_c_confirms_the_path_it_wrote(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        drawn = ("/tmp/luna-doctor-chart/chart.svg",
+                 "/tmp/luna-doctor-chart/chart.png")
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+                mock.patch.object(tui, "chart_output", return_value=drawn) as chart:
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("c")
+                await self._settle(
+                    pilot, lambda: "chart written" in self._status(app))
+                status = self._status(app)
+                self.assertEqual(1, chart.call_count)
+                self.assertIn("chart written: /tmp/luna-doctor-chart/chart.png", status)
+                self.assertIn("[q] quits", status)
+                await pilot.press("q")
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
+
+    @staticmethod
+    def _status(app) -> str:
+        return str(app.query_one("#status").render())
