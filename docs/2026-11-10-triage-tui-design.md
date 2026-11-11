@@ -191,7 +191,7 @@ the long-window stacked-area picture does not read for most humans, while the
    (about 80 columns, 4-5 rows per panel), sparklines (Unicode blocks) carry
    the shapes, prose shrinks to labels. Details move to keypresses.
 2. Sparklines in the dashboard, and the rendered chart stays available on a
-   keypress (g opens it for the chosen window). No braille plots.
+   keypress (c opens it over the scan window, 24h). No braille plots.
 3. The 1h chart stays the default picture and the useful one. The capacity
    rule on every chart is drawn according to its provenance: an authoritative
    (account) rule is a thick, clearly labelled solid line, and a declared rule is
