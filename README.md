@@ -70,11 +70,22 @@ does not wait for the scan. The answer decides which evidence leads the verdict:
 | an agent that seems stuck mid-task | the idle-budget diagnosis |
 | nothing yet, just checking | the traffic summary |
 
-Press `f` for the `fix` output in place, and `q` to quit. The screen reads the
-capacity cache. As on every command that explains the account's numbers, a
-fresh cache is served without network, and a stale one is refreshed with one
-GET past the 5-minute TTL. `--offline` forbids that fetch, and the screen then
-reads whatever the cache holds, marked stale.
+The verdict screen is a dashboard. It holds the account panel, the local panel,
+one sparkline of concurrency across the 24 hour window, the verdict line, and
+the legends. No panel holds more than four rows. The detail lives behind `d`
+for the `analyze` report and `c` for the chart.
+
+The verdict line leads with a moon, and the moon names the status of the window:
+🌕 healthy, 🌗 pressure, 🌑 blocked at admission. A pretty report closes with
+that same legend line, and the screen prints it under the verdict line. A
+terminal that refuses emoji draws `(O)`, `(o)` and `()` in its place.
+
+The screen advertises four keys in its status line. `f` shows the `fix` output
+in place, `d` shows the full `analyze` report, `c` draws the chart, and `q`
+quits. The screen reads the capacity cache. As on every command that explains
+the account's numbers, a fresh cache is served without network, and a stale one
+is refreshed with one GET past the 5-minute TTL. `--offline` forbids that
+fetch, and the screen then reads whatever the cache holds, marked stale.
 
 The screen needs the optional extra. Without it, bare `luna-doctor` keeps the
 linear default run: the account line, the last hour analyzed, and the chart
@@ -88,8 +99,9 @@ echo | luna-doctor                # a pipe: the linear default run
 
 ### What the badges mean
 
-Every number on the verdict screen carries a badge, and one legend line names
-all three:
+Every number on the verdict screen carries a badge. The screen prints two
+legend lines. This one names all three badges, and the line under the verdict
+line keys the moon status:
 
 ```
 ● authoritative (the account reports it) · ○ measured here, a lower bound · ◌ declared, not measured

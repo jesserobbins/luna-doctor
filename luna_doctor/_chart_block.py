@@ -1174,10 +1174,11 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     # ---- footer: two short lines, no more ----------------------------------
     # The marks carry the picture. These two lines carry only what the marks
     # cannot say for themselves: where the rule's number came from, and the one
-    # reading that matters. The rest of what this band used to explain - each
-    # model's measured deadline, the heatmap's reading guide, the account's
-    # day counters, the latency trend - lives in `luna-doctor explain`, which
-    # can say it at length. Prose is no longer the medium here.
+    # reading that matters. The rest of what this band used to explain lives
+    # where it is said at length: each model's admission deadline on
+    # `analyze`'s admission wall row, the account's day counters in
+    # `luna-doctor capacity`, and the heatmap's reading guide and the latency
+    # trend in `luna-doctor explain`. Prose is no longer the medium here.
     if rule_src == "account":
         line1 = "rule: %d from account" % rule_n
         if acct_plan:
