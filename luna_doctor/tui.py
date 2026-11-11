@@ -561,15 +561,17 @@ def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
     renderer gives it. The one arrow marks the action this screen can take in
     place.
 
-    One sentence, not the whole verdict: `analyze` prints the headline and
-    every adjustment in full, and `[d]` shows it on this screen, so the panel
-    states the conclusion and points at the report instead of becoming the
-    report. The last row is that pointer, and there is only one.
+    One sentence, not the whole verdict: the headline is the conclusion, and
+    `analyze` prints it with every adjustment in full while `[d]` shows that
+    report here. So the panel states the headline and points at the report
+    instead of becoming the report. The adjustments are never cut down to fit:
+    a trimmed adjustment reads as a smaller finding than the CLI reported. The
+    last row is the pointer, and there is only one.
     """
-    headline, adjustments, exit_code = cli.verdict(metrics)
+    headline, _adjustments, exit_code = cli.verdict(metrics)
     moon = report.status_moon(exit_code, headline)
     glyph = _GLYPH_STYLE.symbol(moon)
-    line = first_sentence(" ".join([headline, *adjustments]))
+    line = first_sentence(headline)
     rows = [("", f"{glyph} {line}" if glyph else line)]
     rows += [("→", "press [f] for the per-agent fix, or run `luna-doctor fix`"),
              ("", "details: press d for the full analyze report")]
@@ -740,6 +742,31 @@ def _last_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+# analyze answers with 0 (clean), 1 (over capacity) or 2 (nothing measured),
+# and all three print the report the screen shows. Only a capture that is not
+# one of those answers, or that holds nothing but the tool naming its own
+# error, is a command that failed.
+_ANSWER_CODES = (0, 1, 2)
+_ERROR_PREFIXES = ("luna-doctor:", "usage:")
+
+
+def carries_report(code: int, text: str) -> bool:
+    """Did the command print a report, or only its own error line?
+
+    An exit code outside those answers is no report. So is a capture whose
+    every non-blank line is the tool naming a usage or input error: that is a
+    failed command, and a screen that announced it as a report would be
+    telling a reader to read something that is not there. An empty capture is
+    an empty report, which the panel says in its own words.
+    """
+    if code not in _ANSWER_CODES:
+        return False
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return True
+    return any(not line.startswith(_ERROR_PREFIXES) for line in lines)
+
+
 def fix_output(plan: str | None = None) -> str:
     """The `fix` command's own output, cache-only, as text for the screen.
 
@@ -753,19 +780,24 @@ def fix_output(plan: str | None = None) -> str:
     return _captured_main(argv)[1]
 
 
-def detail_output(plan: str | None = None, hours: float = SCAN_HOURS) -> str:
-    """The `analyze` report's own text, cache-only, for the detail panel.
+def detail_output(plan: str | None = None,
+                  hours: float = SCAN_HOURS) -> tuple[int, str]:
+    """The `analyze` report's own text, cache-only and read-only.
 
     `[d]` shows the report the verdict was cut from, so it runs the command
     instead of re-rendering the metrics: one report, one wording, and the
     screen cannot invent a detail the CLI does not print. The window is the
-    scan's own, and `--offline` keeps the promise that the TUI opens no new
-    network behavior.
+    scan's own. `--offline` keeps the promise that the TUI opens no new network
+    behavior, and `--no-store` keeps it read-only: a screen that a person opens
+    and closes must not write a run extraction into the store behind them.
+
+    Returns (exit code, captured text), so a report that failed is never
+    announced as a report that arrived.
     """
-    argv = ["analyze", "--since", f"{hours:g}h", "--offline"]
+    argv = ["analyze", "--since", f"{hours:g}h", "--offline", "--no-store"]
     if plan:
         argv += ["--plan", plan]
-    return _captured_main(argv)[1]
+    return _captured_main(argv)
 
 
 def chart_output(plan: str | None = None,
@@ -937,11 +969,21 @@ class TriageApp(App):
                          f"[c] draws the chart, [q] quits")
 
     # -- the detail panel: the analyze report, or the fix output ----------
-    def _show_detail(self, text: str, empty: str, status: str) -> None:
-        """Fill the one detail panel with a command's own words, and say so."""
-        self.query_one("#detail-text", Static).update(text or empty)
+    def _show_detail(self, command: str, subject: str, code: int, text: str) -> None:
+        """Fill the one detail panel with a command's own words, and say so.
+
+        A command that printed no report is not a report on screen: the panel
+        keeps what it held and the status names that command's own last line
+        instead. `analyze` answering 1 or 2 still printed its report, so those
+        read as the report they are.
+        """
+        if not carries_report(code, text):
+            reason = _last_line(text) or f"exit {code}"
+            self._set_status(f"the {command} command failed: {reason} · [q] quits")
+            return
+        self.query_one("#detail-text", Static).update(text or f"the {subject} was empty")
         self.query_one("#detail").display = True
-        self._set_status(f"{status} · [q] quits")
+        self._set_status(f"the {subject} is on screen · [q] quits")
 
     def action_show_detail(self) -> None:
         """Show the whole `analyze` report the verdict was cut from."""
@@ -956,9 +998,8 @@ class TriageApp(App):
 
     @work(thread=True)
     def _detail_worker(self, hours: int) -> None:
-        self.call_from_thread(self._show_detail, detail_output(self.plan, hours),
-                              "the analyze report was empty",
-                              "the analyze report is on screen")
+        code, text = detail_output(self.plan, hours)
+        self.call_from_thread(self._show_detail, "analyze", "analyze report", code, text)
 
     # -- the fix, in place, cache only ------------------------------------
     def action_show_fix(self) -> None:
@@ -973,9 +1014,10 @@ class TriageApp(App):
 
     @work(thread=True)
     def _fix_worker(self) -> None:
-        self.call_from_thread(self._show_detail, fix_output(self.plan),
-                              "the fix output was empty",
-                              "the fix output is on screen")
+        # fix_output hands back its text alone, so the code is the clean one;
+        # what the capture holds still decides whether it was a report.
+        self.call_from_thread(self._show_detail, "fix", "fix output", 0,
+                              fix_output(self.plan))
 
     # -- the chart, in place, cache only ----------------------------------
     def action_show_chart(self) -> None:

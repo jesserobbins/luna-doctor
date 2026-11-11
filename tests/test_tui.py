@@ -837,6 +837,46 @@ class MediumDensityPanels(unittest.TestCase):
         self.assertEqual(f"{glyph} {headline}", tui.verdict_rows(metrics)[0][1],
                          "the panel states the headline and none of the adjustments")
 
+    def _quiet_with_account(self):
+        """A quiet window whose account block carries admission days.
+
+        The CLI appends CAPACITY_COUNTS_EXCLUDE and an account-versus-local line
+        that opens lowercase, so a panel that reads past the headline draws a
+        550-character row out of prose the reader never asked this screen for.
+        """
+        return _metrics(
+            requests=5,
+            by_outcome={"completed": 5},
+            by_tier={"interactive": 5},
+            by_harness={"pi": 5},
+            peak_concurrency=2,
+            saturated=0,
+            pressure_windows=0,
+            longest_pressure_window=None,
+            latency_s={"interactive": {"n": 5, "p50": 20.0, "p90": 40.0, "max": 60.0},
+                       "background": {"n": 0, "p50": None, "p90": None, "max": None}},
+            admission_conversion={
+                "interactive": {"completed": 5, "admission_timeout": 0,
+                                "admitted_pct": 100.0},
+                "background": {"completed": 0, "admission_timeout": 0,
+                               "admitted_pct": None}},
+            capacity={"provenance": "account", "plan": "teams", "priority_lanes": 12,
+                      "window_days": [{"day": "2026-11-01", "accepted": 10,
+                                       "deferred": 0, "denied": 0,
+                                       "denied_after_wait": 0,
+                                       "avg_queue_wait_ms": None}]},
+        )
+
+    def test_the_verdict_panel_keeps_only_the_headline_of_a_quiet_window(self):
+        """The exclusion paragraph is `analyze`'s, not the dashboard's."""
+        rows = tui.verdict_rows(self._quiet_with_account())
+        for _badge, text in rows:
+            self.assertLessEqual(len(text), 120,
+                                 f"a row the headline did not bound: {text!r}")
+        self.assertIn("none blocked at admission", rows[0][1])
+        prose = " ".join(text for _badge, text in rows)
+        self.assertNotIn("server counts cover only traffic", prose)
+
     def test_the_verdict_panel_ends_with_one_pointer_to_the_report(self):
         rows = tui.verdict_rows(self._busy())
         self.assertEqual("", rows[-1][0], "a pointer to the report is no one's number")
@@ -973,15 +1013,49 @@ class TheSparkOnTheScreen(unittest.TestCase):
 class TheDetailOnAKeypress(unittest.TestCase):
     """`[d]` fills the detail panel with the `analyze` report, cache only."""
 
-    def test_the_detail_is_the_analyze_report_offline(self):
+    def test_the_detail_is_the_read_only_analyze_report(self):
         with mock.patch.object(tui.cli, "main", return_value=0) as main:
-            text = tui.detail_output("apex", 24)
+            code, text = tui.detail_output("apex", 24)
         argv = main.call_args.args[0]
         self.assertEqual("analyze", argv[0])
         self.assertEqual("24h", argv[argv.index("--since") + 1])
         self.assertIn("--offline", argv)
+        # the screen is read-only: a person opening and closing it must not
+        # leave a run extraction in the store
+        self.assertIn("--no-store", argv)
         self.assertEqual("apex", argv[argv.index("--plan") + 1])
+        self.assertEqual(0, code)
         self.assertEqual("", text)
+
+    def test_a_failed_analyze_hands_back_its_code_and_its_error(self):
+        def refused(argv):
+            print("luna-doctor: bad --since value", file=sys.stderr)
+            return 2
+
+        with mock.patch.object(tui.cli, "main", side_effect=refused):
+            code, text = tui.detail_output("apex", 24)
+        self.assertEqual(2, code)
+        self.assertIn("bad --since value", text)
+        self.assertFalse(tui.carries_report(code, text),
+                         "one error line is not a report")
+
+    def test_the_exit_codes_analyze_answers_with_all_carry_a_report(self):
+        """0 clean, 1 over capacity, 2 nothing measured: all three are answers."""
+        report = "5 requests, none blocked at admission, peak concurrency 2.\n"
+        for code in (0, 1, 2):
+            self.assertTrue(tui.carries_report(code, report), code)
+        self.assertTrue(tui.carries_report(2, "No requests found in the window."),
+                        "an empty window is a report that says so")
+
+    def test_a_capture_holding_only_the_tools_own_error_is_no_report(self):
+        self.assertFalse(tui.carries_report(2, "luna-doctor: bad --since value: 'nope'"))
+        self.assertFalse(tui.carries_report(
+            2, "usage: luna-doctor [-h] ...\nluna-doctor: error: unrecognized arguments"))
+        self.assertFalse(tui.carries_report(3, "5 requests, none blocked"),
+                         "a code analyze never answers with is no report")
+
+    def test_an_empty_capture_is_an_empty_report_not_a_failure(self):
+        self.assertTrue(tui.carries_report(0, ""))
 
     def test_d_runs_analyze_and_fills_the_detail_panel(self):
         asyncio.run(self._drive())
@@ -1005,10 +1079,56 @@ class TheDetailOnAKeypress(unittest.TestCase):
                 argv = main.call_args.args[0]
                 self.assertEqual("analyze", argv[0])
                 self.assertIn("--offline", argv)
+                self.assertIn("--no-store", argv)
                 self.assertEqual("apex", argv[argv.index("--plan") + 1])
                 self.assertTrue(app.query_one("#detail").display)
                 self.assertIn("the analyze report is on screen",
                               self._text(app, "#status"))
+                await pilot.press("q")
+
+    def test_a_failed_analyze_is_announced_as_a_failure(self):
+        asyncio.run(self._drive_failure())
+
+    async def _drive_failure(self):
+        app = tui.TriageApp()
+        failed = (2, "luna-doctor: bad --since value: 'nope'")
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+                mock.patch.object(tui, "detail_output", return_value=failed):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("d")
+                await self._settle(
+                    pilot, lambda: "analyze command failed" in self._text(app, "#status"))
+                status = self._text(app, "#status")
+                self.assertIn("the analyze command failed: luna-doctor: bad --since value", status)
+                self.assertNotIn("is on screen", status,
+                                 "a failed command is not a report on screen")
+                self.assertFalse(app.query_one("#detail").display,
+                                 "a failure fills no panel")
+                await pilot.press("q")
+
+    def test_an_over_capacity_report_is_not_a_failure(self):
+        """`analyze` exits 1 when it finds pressure, and that is the report."""
+        asyncio.run(self._drive_pressure())
+
+    async def _drive_pressure(self):
+        app = tui.TriageApp()
+        pressure = (1, "Concurrency pressure across 17 requests: 3 request(s) "
+                       "were blocked at admission, peak concurrency 17.\n")
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+                mock.patch.object(tui, "detail_output", return_value=pressure):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("d")
+                await self._settle(
+                    pilot, lambda: "is on screen" in self._text(app, "#status"))
+                self.assertIn("the analyze report is on screen",
+                              self._text(app, "#status"))
+                self.assertTrue(app.query_one("#detail").display)
                 await pilot.press("q")
 
     @staticmethod
