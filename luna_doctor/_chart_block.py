@@ -9,8 +9,13 @@ luna_doctor.scene), then serialised; nothing here touches SVG syntax.
 Design note -- what the picture is, why each mark exists, and what was
 chosen not to draw.
 
-WHAT. One stacked-area graph: one plot area, one time axis, one vertical
-scale, one stack. The stack's height at any moment is the account's total
+WHAT. One page, one layout, at every window width: the fate panel on top,
+the latency field and its completion bars below it, and under them the one
+stacked-area graph -- one plot area, one time axis, one vertical scale, one
+stack. That layout does not vary with the window: a fifteen-minute question
+and a thirty-day one are drawn the same way, because the picture answers the
+same questions at both scales and a reader who has read one has read them
+all. The stack's height at any moment is the account's total
 concurrent inference requests -- everything in flight at once, which is
 what the gateway prices and what a priority-concurrency limit compares
 against. The stack is layered by band, and a band is one model's traffic
@@ -21,6 +26,8 @@ one agent has traffic in the window. The machine's whole story -- every
 agent, every model, both scheduling classes -- is one stack: the build-up
 the reader is looking for is which bands piled up, for whom, in which
 class, and whether the total crossed what the account is allowed to run.
+Above and below the stack, both drawn in the stack's own time columns: what
+happened to each request, and how long the served ones took.
 
 BAND ORDER. Fixed and deterministic: scheduling class first -- every
 priority-scheduling band below every background-scheduling band -- then,
@@ -34,6 +41,19 @@ the stack where the eye reads totals, and the thin ones cap it.
 
 WHY EACH MARK EXISTS.
 
+Fate panel     what happened to each request, counted per column: served,
+               demoted to background, refused at admission, refused at the
+               account's limit. Counts, not rates, because the denominator
+               per column is small; and from these logs, because the
+               account's own counters are day-granular and cannot answer a
+               window shorter than a day.
+Latency field  duration as a field, not a line: rows are duration on a log
+               scale, columns are time, colour is how many completions
+               landed in that cell, with the per-column p50 and p90 over the
+               same cells. Only completed requests enter it, so a refusal
+               that fails in 200 ms never moves the percentiles.
+Completion bars the count of completions under each column of the field:
+               how much evidence that column's cells are drawn from.
 Stacked area   the core mark: the average concurrent inference requests per
                time column, one band per model, agent and class. Average,
                not per-column maxima, so the stack's height is an honest
@@ -106,8 +126,15 @@ not.
 No priority rule at all when nothing is established: the footer's first
 line says the rule is not established and points at `luna-doctor capacity`,
 which fetches the account's number from the capacity API's cache.
-No latency picture. It shared a frame with the old bars and halved the
-space each story got; latency keeps its own home in `analyze`.
+No per-request timeline. Windows under two hours used to spend the top of
+the page on one bar per request -- a burndown of the window. At a few dozen
+bars it said what a list says, in more space; past that it had to drop rows
+and print how many. The fate panel answers that question as counts in the
+same columns as every other mark, and the stack answers what the bars could
+not: how much of the window this machine was busy, and with whose traffic.
+No latency summary line. A trend over time reads as a trend even when the
+samples under each point differ by an order of magnitude; the field carries
+the distribution, and the per-column percentiles ride over it.
 No plot fills, plot borders, or legend: the data is the ink.
 
 Two deliberate trades. The folded tail: bands below legibility fold into
@@ -117,7 +144,7 @@ is, by definition, the traffic no label could name. And when only one
 agent has traffic in the window the agent suffix is dropped from every
 name: with one agent there is nothing to distinguish, and the title's
 window already says whose traffic this is. A window where no agent had
-timed traffic still draws the one plot area over the requested window --
+timed traffic still draws the whole page over the requested window --
 empty axes and the two honest footer lines, never a bare message.
 """
 
@@ -603,72 +630,6 @@ def _admission_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols):
         x += 22 + 5.2 * len(kind)
 
 
-# ---- the two forms, chosen by the question the window asks ----------------
-# A fifteen-minute or one-hour question is "what happened, request by request".
-# At ~1.5 requests a minute that is a few dozen bars, and every one of them can
-# be drawn: a timeline answers it exactly, with no aggregation to hide behind.
-# A longer window is a distribution question - how much of the time was this
-# machine busy, and which model owns the tail - so an occupancy histogram and a
-# ranked tail answer it, and a time series of an idle machine answers nothing.
-
-SHORT_WINDOW_S = 2 * 3600
-TIMELINE_ROWS = 36
-
-
-def _timeline_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, max_rows, add):
-    """One bar per request, sorted by start. The fifteen-minute question.
-
-    When the window holds more requests than the panel can draw, the slowest
-    are kept and the count of the rest is printed: a picture that silently drops
-    rows is worse than one that says how many it dropped.
-    """
-    rows = [r for r in reqs if getattr(r, "start", None) is not None]
-    rows.sort(key=lambda r: (r.start, getattr(r, "end", None) or r.start))
-    total = len(rows)
-    shown = rows
-    note = ""
-    if total > max_rows:
-        shown = sorted(rows, key=lambda r: -r.duration)[:max_rows]
-        shown.sort(key=lambda r: (r.start, getattr(r, "end", None) or r.start))
-        note = f" · the slowest {max_rows} of {total} are drawn"
-    row_h = max(5.0, min(14.0, (max_rows * 1.0 and 420.0 / max(1, len(shown)))))
-    shapes.append(Text(px, y0 - 8,
-                       f"one bar per request, sorted by start · bar length is "
-                       f"duration · {len(shown)} of {total}{note}",
-                       size=10.5, fill=C["text"]))
-    for i, r in enumerate(shown):
-        y = y0 + 6 + i * row_h
-        x0 = px + (r.start - t0) / max(1e-9, (t1 - t0)) * plot_w
-        end = getattr(r, "end", None) or r.start
-        x1 = px + (end - t0) / max(1e-9, (t1 - t0)) * plot_w
-        outcome = getattr(r, "outcome", "")
-        if outcome in ("admission_timeout", "org_concurrency_limit"):
-            colour = C["flare"]
-        elif getattr(r, "tier", "") == "background":
-            colour = "#5b21b6"
-        else:
-            colour = "#173f8f"
-        shapes.append(Rect(x0, y, max(1.5, x1 - x0), max(2.0, row_h - 2),
-                           fill=colour))
-        # the label rides the right gutter: duration, then what it was
-        label = f"{r.duration:6.1f}s  {(r.model or '?')[:26]}"
-        if outcome != "completed":
-            label += f"  {outcome}"
-        shapes.append(Text(px + plot_w + 10, y + max(2.0, row_h - 2),
-                           label, size=8.5, fill=C["muted"]))
-    below = y0 + 6 + len(shown) * row_h
-    for k in range(0, 7):
-        x = px + plot_w * k / 6
-        shapes.append(Line(x, y0, x, below + 2, stroke=C["grid"]))
-        shapes.append(Text(x, below + 16,
-                           datetime.fromtimestamp(t0 + (t1 - t0) * k / 6,
-                                                  timezone.utc).strftime("%H:%M:%S"),
-                           size=9, fill=C["muted"], anchor="middle"))
-    shapes.append(Text(px, y0 - 24, "navy interactive \u00b7 violet background "
-                                    "\u00b7 red refused", size=9.5, fill=C["muted"]))
-    return below + 26
-
-
 def _occupancy_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1):
     """Share of the window's minutes at each concurrency level.
 
@@ -830,15 +791,18 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     # ---- geometry ---------------------------------------------------------
     pad_l, pad_r = 56, 18
     title_y, sub_y, key_y = 30, 53, 74
-    # Two panels, one time axis. The service panel is fixed height and sits
-    # above; the stack below keeps its own scale and its own unit.
+    # One layout for every window: the fate panel on top, the latency field
+    # and its completion bars in the middle, the concurrency stack below on
+    # its own scale and its own unit. The panels keep fixed heights; the stack
+    # takes what the canvas has left, because it is the mark the picture is
+    # about, and a canvas too short for it grows rather than starving it.
     fate_panel_h = 92
     heat_y0 = 98 + fate_panel_h + 30
-    heat_y1 = heat_y0 + 210
+    heat_y1 = heat_y0 + 150
     count_y0 = heat_y1 + 6
     count_y1 = count_y0 + 22
     top = count_y1 + 26
-    bot = max(top + 100, height - 132)
+    bot = max(top + 140, height - 112)
     xlab_y = bot + 20
 
     label_w = max([_est_w(b["display"], 10) for b in bands] + [40.0])
@@ -892,46 +856,33 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     shapes = []
     add = shapes.append
 
-    # A short window asks "what happened, request by request": at a few dozen
-    # requests the timeline can draw every one of them, which is the only form
-    # that needs no aggregation. A long window asks a distribution question, so
-    # it gets the occupancy histogram and the ranked tail instead.
-    short_window = hours * 3600 <= SHORT_WINDOW_S
-    if short_window:
-        _timeline_panel(shapes, reqs=reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
-                        y0=132, max_rows=TIMELINE_ROWS, add=add)
-        add(Line(px, top - 12, px + plot_w, top - 12, stroke=C["grid"]))
-    else:
-        # Top: what happened to each request in the same columns. Counts, from
-        # these logs, at a resolution the axis can carry - the account's own
-        # counters are day-granular, so they stay out of the picture and
-        # `luna-doctor analyze` reports them beside the local traffic.
-        _admission_panel(shapes, reqs=reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
-                         y0=98, y1=98 + fate_panel_h - 16, n_cols=n_cols)
-        add(Line(px, 98 + fate_panel_h - 8, px + plot_w, 98 + fate_panel_h - 8,
-                 stroke=C["grid"]))
+    # One layout for every window. Top: what happened to each request in the
+    # same columns. Counts, from these logs, at a resolution the axis can
+    # carry - the account's own counters are day-granular, so they stay out of
+    # the picture and `luna-doctor analyze` reports them beside the local
+    # traffic.
+    _admission_panel(shapes, reqs=reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
+                     y0=98, y1=98 + fate_panel_h - 16, n_cols=n_cols)
+    add(Line(px, 98 + fate_panel_h - 8, px + plot_w, 98 + fate_panel_h - 8,
+             stroke=C["grid"]))
 
-    # Middle: for a long window, the latency field. Rows are duration on a log
-    # scale, columns are time, colour is how many completions landed in that
-    # cell, and the count bar underneath says how much evidence each column
-    # holds. A short window already drew every request above, so it skips this.
-    per_col_counts = [0] * n_cols
-    if not short_window:
-        _drawn, per_col_counts = _latency_heatmap(
-            shapes, reqs=timed_reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
-            y0=heat_y0, y1=heat_y1, n_cols=n_cols, col_s=col_s)
-    if not short_window:
-        col_peak = max(per_col_counts or [0])
-        shapes.append(Text(px, count_y0 - 4, "completions per column", size=9,
-                           fill=C["muted"]))
-        for k, n in enumerate(per_col_counts):
-            if not n:
-                continue
-            h = (n / max(1, col_peak)) * (count_y1 - count_y0)
-            x = px + plot_w * k / n_cols
-            shapes.append(Rect(x, count_y1 - h, max(1.0, plot_w / n_cols - 0.4), h,
-                               fill="#9ca3af"))
-        shapes.append(Line(px, count_y1, px + plot_w, count_y1, stroke=C["axis"]))
+    # Middle: the latency field. Rows are duration on a log scale, columns are
+    # time, colour is how many completions landed in that cell, and the count
+    # bar underneath says how much evidence each column holds.
+    _drawn, per_col_counts = _latency_heatmap(
+        shapes, reqs=timed_reqs, t0=t0, t1=t1, px=px, plot_w=plot_w,
+        y0=heat_y0, y1=heat_y1, n_cols=n_cols, col_s=col_s)
+    col_peak = max(per_col_counts or [0])
+    shapes.append(Text(px, count_y0 - 4, "completions per column", size=9,
+                       fill=C["muted"]))
+    for k, n in enumerate(per_col_counts):
+        if not n:
+            continue
+        h = (n / max(1, col_peak)) * (count_y1 - count_y0)
+        x = px + plot_w * k / n_cols
+        shapes.append(Rect(x, count_y1 - h, max(1.0, plot_w / n_cols - 0.4), h,
+                           fill="#9ca3af"))
+    shapes.append(Line(px, count_y1, px + plot_w, count_y1, stroke=C["axis"]))
     add(Line(px, top - 10, px + plot_w, top - 10, stroke=C["grid"]))
 
     # ---- title block ------------------------------------------------------

@@ -376,6 +376,93 @@ class TheChartIsDesignedForDiagnosis(unittest.TestCase):
         self.assertIn("fewer than 5 requests per column", text)
 
 
+class OneLayoutAtEveryWindow(unittest.TestCase):
+    """Jesse, 2026-11-11: the per-request timeline was not a useful thing.
+
+    Up to two hours the picture spent its top on one bar per request -- a
+    burndown of the window, one row each -- and drew a different page from the
+    one a 24h window got. The rows are gone: every window now draws the fate
+    panel, the latency field with its completion bars, and the concurrency
+    stack, in that order, so a fifteen-minute picture and a month-long one are
+    the same page read at different scales.
+    """
+
+    NOW = 1_700_000_000.0
+    # The two colours the retired rows were drawn in: priority navy and
+    # background violet, one bar per request. The fate panel uses neither (its
+    # served and demoted fills are the pale steps of the same hues), so their
+    # absence above the field is the rows' absence, and their presence below
+    # it is the stack.
+    BAND_INK = ("#173f8f", "#5b21b6")
+
+    def _reqs(self, count, hours):
+        """`count` completed requests, evenly spread over the window."""
+        step = hours * 3600.0 / count
+        return [cli.Request(harness="pi", session="s", model="glm-5.3",
+                            start=self.NOW + i * step,
+                            end=self.NOW + i * step + min(90.0, step),
+                            outcome="completed")
+                for i in range(count)]
+
+    def _scene(self, hours, count=60):
+        reqs = self._reqs(count, hours)
+        return cli.build_chart_scene(reqs, cli.analyse(reqs, hours), hours)
+
+    def _text(self, scene):
+        return " ".join(getattr(shape, "s", "") for shape in scene.shapes)
+
+    def _field_title_y(self, scene):
+        """The y of the latency field's own heading: the page's middle seam."""
+        titles = [s for s in scene.shapes
+                  if isinstance(s, cli.Text) and s.s.startswith("request duration")]
+        self.assertEqual(1, len(titles), "the latency field states its scale once")
+        return titles[0].y
+
+    def _panels(self, scene):
+        """The panels the page draws, named by the line each one states."""
+        text = self._text(scene)
+        return {
+            "fate": "refused: admission" in text,
+            "latency field": "request duration, log scale" in text,
+            "completion bars": "completions per column" in text,
+        }
+
+    def test_the_per_request_timeline_is_retired(self):
+        """Gone, not switched off: no rows, and no function that drew them."""
+        self.assertFalse(hasattr(cli, "_timeline_panel"),
+                         "the per-request timeline is retired, not hidden")
+        for hours in (0.25, 1.0, 24.0):
+            text = self._text(self._scene(hours))
+            self.assertNotIn("one bar per request", text,
+                             "a %gh window still draws request-by-request rows" % hours)
+
+    def test_a_short_window_draws_the_same_three_panels_as_a_long_one(self):
+        self.assertEqual(self._panels(self._scene(1.0)),
+                         self._panels(self._scene(24.0)),
+                         "the 1h and 24h pages must be the same page")
+        for hours in (0.25, 1.0, 24.0):
+            self.assertEqual({"fate": True, "latency field": True,
+                              "completion bars": True},
+                             self._panels(self._scene(hours)),
+                             "the %gh page is missing a panel" % hours)
+
+    def test_no_request_row_is_drawn_outside_the_main_plot(self):
+        """The only per-request mark left is the flare tick, in the stack."""
+        for hours in (0.25, 1.0, 24.0):
+            scene = self._scene(hours)
+            seam = self._field_title_y(scene)
+            rows = [s for s in scene.shapes
+                    if isinstance(s, cli.Rect) and s.fill in self.BAND_INK
+                    and s.y < seam]
+            self.assertEqual([], rows,
+                             "a band-coloured bar above the field at %gh is a "
+                             "per-request row" % hours)
+            stack = [s for s in scene.shapes
+                     if isinstance(s, cli.Rect) and s.fill in self.BAND_INK
+                     and s.y >= seam]
+            self.assertTrue(stack, "the stack draws below the field at %gh" % hours)
+
+
 class TheRuleMarkCarriesItsAuthority(unittest.TestCase):
     """Authority is a property of the mark, not only of the label.
 
