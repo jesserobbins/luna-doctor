@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.7.0-alpha.2] - 2026-11-11
+
 ### Changed
 
 - The triage screen is a default dependency. Textual arrives with a plain
