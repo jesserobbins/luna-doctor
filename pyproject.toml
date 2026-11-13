@@ -8,6 +8,12 @@ dynamic = ["version"]
 description = "Diagnose LunaRoute concurrency problems from local agent logs, and emit per-agent config fixes"
 readme = "README.md"
 requires-python = ">=3.9"
+# Textual is the package's only third-party import, and it ships by default: the
+# triage screen is the front door, so an install that quietly lacks it hands a
+# person the linear run and says nothing about the screen. Textual 8.2 is the
+# tested major, and its Python floor is 3.9 like this package's, so the pin needs
+# no environment marker.
+dependencies = ["textual>=8,<9"]
 # PEP 639: the license is an SPDX expression, and the text ships beside it.
 # A `{ file = "LICENSE" }` table puts the whole Apache text into the `License:`
 # metadata field, which PyPI then renders as a wall of boilerplate.
@@ -36,11 +42,10 @@ Changelog = "https://github.com/jesserobbins/luna-doctor/blob/main/CHANGELOG.md"
 luna-doctor = "luna_doctor.cli:main"
 
 [project.optional-dependencies]
-# The triage screen is the only code that imports Textual, so it is the only
-# reason to install it: a machine without the extra keeps the linear default
-# run and its documented 0/1/2 exit codes. Textual 8.2 is the tested major, and
-# its Python floor is 3.9 like this package's, so the pin needs no environment
-# marker.
+# A compatibility alias, not an option. The dependency above already installs
+# Textual, so this entry survives only to keep `pipx install 'luna-doctor[tui]'`
+# and every requirements file that names the extra working. It names the same
+# pin, so an install either way resolves to one tested major.
 tui = ["textual>=8,<9"]
 
 [tool.setuptools]

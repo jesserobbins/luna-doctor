@@ -17,6 +17,16 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Changed
+
+- The triage screen is a default dependency. Textual arrives with a plain
+  `pipx install luna-doctor`, so a bare run in a terminal opens the screen with
+  no extra to name. The first release asked for `luna-doctor[tui]` and lost the
+  front door on any install that did not name it.
+- The `tui` extra is a compatibility alias. It names the same pin, so
+  `pipx install 'luna-doctor[tui]'` and any requirements file that asks for it
+  still work, and the install is the same one.
+
 ## [0.7.0-alpha.1] - 2026-11-11
 
 ### Added

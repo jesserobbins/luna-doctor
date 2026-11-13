@@ -201,3 +201,21 @@ the long-window stacked-area picture does not read for most humans, while the
    🌗 pressure, 🌑 blocked at admission (renderer degrades to ASCII as the
    existing moon does). Each surface that shows a phase shows the legend
    once. This is a status scale, decided by the planner, not decoration.
+
+## Third pass: Textual is a default dependency (planner + Jesse, 2026-11-11)
+
+First use found friction that decided the question. A plain `pipx install
+luna-doctor` lost the front door and said nothing, so the person who ran the
+tool because they were broken met the linear run and never learned a screen
+existed. Ruling: the `tui` extra graduates to a default dependency.
+
+1. `pyproject.toml` names `textual>=8,<9` in `dependencies`. Goal 5 above, and
+   the "no new hard dependency" line under "Left to the builder", are both
+   superseded by this ruling.
+2. The `luna-doctor[tui]` extra stays as a compatibility alias for the same
+   pin, so an install command or a requirements file that names it keeps
+   working. The extra is no longer the way to get the screen.
+3. The import guard in `cli._try_tui_front_door` stays. It no longer answers a
+   machine that chose the linear run. It answers a broken or partial install:
+   a Textual from another interpreter, or a version this module's API calls do
+   not match.

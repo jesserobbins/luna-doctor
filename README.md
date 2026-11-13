@@ -87,12 +87,15 @@ the account's numbers, a fresh cache is served without network, and a stale one
 is refreshed with one GET past the 5-minute TTL. `--offline` forbids that
 fetch, and the screen then reads whatever the cache holds, marked stale.
 
-The screen needs the optional extra. Without it, bare `luna-doctor` keeps the
+The screen ships with the install. Textual, its only dependency, is a default
+dependency, so a plain install gives a terminal the screen. A pipe keeps the
 linear default run: the account line, the last hour analyzed, and the chart
-beside it.
+beside it. The `tui` extra survives as a compatibility alias for the same pin,
+so an install command that names it still works.
 
 ```bash
-pipx install 'luna-doctor[tui]'   # adds the triage screen to the install
+pipx install luna-doctor          # the install includes the triage screen
+pipx install 'luna-doctor[tui]'   # the same install: the extra is an alias
 luna-doctor                       # a terminal: the triage screen
 echo | luna-doctor                # a pipe: the linear default run
 ```
