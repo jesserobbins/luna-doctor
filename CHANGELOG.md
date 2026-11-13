@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.7.0-alpha.3] - 2026-11-13
+
 ### Changed
 
 - The per-request timeline is retired. The chart used to draw one bar per
