@@ -419,8 +419,9 @@ more.
 
 The picture deliberately carries no universal admission deadline, because the
 deadline is per model. It carries no advisory concurrency figure, because advice
-that depends on the plan belongs to `analyze`. It carries no latency picture,
-because latency lives in `analyze`.
+that depends on the plan belongs to `analyze`. Every window draws the same page,
+so the admission panel, the latency field and its completion bars sit above the
+stack at any width. Per-request detail lives in `analyze` and `explain`.
 
 ## Use it as an agent skill
 

@@ -83,12 +83,16 @@ request, run `luna-doctor explain`. The rule that a request waiting for
 admission counts as open until it is served or rejected still holds. The marks
 show it.
 
-The chart does not draw three marks. One is a universal admission deadline,
-because that deadline is per model and `analyze` reports each measured one with
-its count, in the `admission wall` row. The second is an advisory concurrency
-figure, because advice depends on the account and belongs to `analyze` and
-`fix`, not to a ruler here. The third is a latency picture, because latency
-lives in `analyze`.
+The chart draws no universal admission deadline, because that deadline is per
+model and `analyze` reports each measured one with its count, in the
+`admission wall` row. It draws no advisory concurrency figure either, because
+advice depends on the account and belongs to `analyze` and `fix`, not to a
+ruler here.
+
+The latency field is not one of those two, and it did not leave. Every window
+draws it, with its completion bars, above the stack. The window width sets the
+column, so a one-hour picture and a seven-day picture show the same field at
+different resolutions. For one request's own wait, run `luna-doctor explain`.
 
 ## How this playbook ends
 

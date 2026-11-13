@@ -17,6 +17,13 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Changed
+
+- The per-request timeline is retired. The chart used to draw one bar per
+  request for windows up to two hours. Every window now draws the same page:
+  the band stack, the admission panel, the latency field and the completion
+  bars.
+
 ## [0.7.0-alpha.2] - 2026-11-11
 
 ### Changed

@@ -26,8 +26,8 @@ one agent has traffic in the window. The machine's whole story -- every
 agent, every model, both scheduling classes -- is one stack: the build-up
 the reader is looking for is which bands piled up, for whom, in which
 class, and whether the total crossed what the account is allowed to run.
-Above and below the stack, both drawn in the stack's own time columns: what
-happened to each request, and how long the served ones took.
+Above the stack, drawn in the stack's own time columns: what happened to
+each request, and how long the served ones took.
 
 BAND ORDER. Fixed and deterministic: scheduling class first -- every
 priority-scheduling band below every background-scheduling band -- then,

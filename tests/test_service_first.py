@@ -427,6 +427,35 @@ class OneLayoutAtEveryWindow(unittest.TestCase):
             "completion bars": "completions per column" in text,
         }
 
+    def _panel_baseline(self, scene):
+        """The y of the completion bars' baseline: the page's upper seam.
+
+        The page draws two full-width axis hairlines in the axis grey: one
+        under the completion bars, one under the stack. Nothing else in that
+        colour spans the plot, because the grey peak envelope rides inside the
+        stack and never reaches either seam. The upper of the two is the seam
+        between the marks above the stack and the stack itself.
+        """
+        seams = [s for s in scene.shapes
+                 if isinstance(s, cli.Line) and s.y1 == s.y2
+                 and s.stroke == "#9ca3af" and (s.x2 - s.x1) > 500]
+        self.assertTrue(seams, "the page draws no panel baseline")
+        return min(seam.y1 for seam in seams)
+
+    def _stack_rects(self, scene):
+        """The band rects the concurrency stack draws, below that seam.
+
+        A fill alone cannot prove the stack drew: the latency field's busiest
+        cell is `#173f8f`, the same navy as the top band, because the field is
+        one hue linear in count. A fill-only guard therefore passes on the
+        field's own ink. The stack owns everything below the completion bars'
+        baseline.
+        """
+        baseline = self._panel_baseline(scene)
+        return [s for s in scene.shapes
+                if isinstance(s, cli.Rect) and s.fill in self.BAND_INK
+                and s.y > baseline]
+
     def test_the_per_request_timeline_is_retired(self):
         """Gone, not switched off: no rows, and no function that drew them."""
         self.assertFalse(hasattr(cli, "_timeline_panel"),
@@ -457,10 +486,8 @@ class OneLayoutAtEveryWindow(unittest.TestCase):
             self.assertEqual([], rows,
                              "a band-coloured bar above the field at %gh is a "
                              "per-request row" % hours)
-            stack = [s for s in scene.shapes
-                     if isinstance(s, cli.Rect) and s.fill in self.BAND_INK
-                     and s.y >= seam]
-            self.assertTrue(stack, "the stack draws below the field at %gh" % hours)
+            self.assertTrue(self._stack_rects(scene),
+                            "the stack draws below the field at %gh" % hours)
 
 
 class TheRuleMarkCarriesItsAuthority(unittest.TestCase):
