@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.7.0-alpha.1] - 2026-11-11
+
 ### Added
 
 - Bare `luna-doctor` in a terminal opens a triage screen. It asks one question
@@ -33,6 +35,21 @@ Versioning policy:
   linear default run and the documented 0/1/2 exit codes.
 - The bare run takes `--plan`, so one declaration reaches the triage screen and
   the linear default run. On a subcommand, `--plan` stays after the subcommand.
+- The moon names the status of the window on one scale: `🌕` healthy, `🌗`
+  pressure, `🌑` blocked at admission. Every surface that draws a phase moon
+  prints the same one-line legend, so a reader meets the scale one time and
+  never has to infer it. A terminal that refuses the glyphs draws `(O)`, `(o)`
+  and `()` in their place.
+
+### Changed
+
+- The chart puts its own timestamp at the right of the title line, because a
+  picture of a past window is only honest with its own date on it. The footer
+  is two short lines now: where the rule's number came from, and the one
+  reading that matters. The rest of what the footer used to explain lives where
+  it is said at length: the admission wall on `analyze`, the account's day
+  counters on `capacity`, and the reading guide and the latency trend on
+  `explain`.
 
 ### Fixed
 
