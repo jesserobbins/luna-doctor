@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.8.0-alpha.1] - 2026-11-20
+
 ### Added
 
 - The triage screen is a nineteen-row dashboard. It reads one hour, and every
