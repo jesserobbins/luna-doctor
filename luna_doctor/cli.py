@@ -2330,11 +2330,10 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         )
 
     lat = m["latency_s"]["interactive"]
-    if lat["p50"] is not None and lat["p50"] > 60:
+    if lat["p50"] is not None:
         adj.append(
-            f"Even admitted interactive requests have a p50 of {lat['p50']}s end to end; a fixed "
-            f"~{PRE_HEADER_WAIT_S:.0f}s of that is the gateway sending headers. Treat a minute of "
-            f"wait as the floor, not as a fault."
+            f"interactive p50 {lat['p50']}s end to end; about {PRE_HEADER_WAIT_S:.0f}s of "
+            f"that is the fixed wait before headers."
         )
     if m["starved_peer_evidence"]:
         adj.append(

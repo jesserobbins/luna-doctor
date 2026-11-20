@@ -156,9 +156,10 @@ _MOCKUP_ROWS = [
     " blocked      ○        3 ▲ 3 0 × 429",
     " █ = at or over ●12 lanes · over 7m of 60 · peak at %s"
     % _local("2026-11-02T14:07Z"),
-    " p50          ○      95s ▲ 12",
-    " p90          ○     240s ▲ 38",
-    " gateway      ○      25s   · fixed wait before headers",
+    " p50 pri      ○      95s ▲ 12",
+    " p90 pri      ○     240s ▲ 38",
+    " p50 bg       ?            ·",
+    " p90 bg       ?            ·",
     " now          ?            · no capacity cached",
     " peak 1h      ○       17 ▲ 5 lane count unknown",
     " peak 1h      ?            · nothing measured here",
@@ -177,23 +178,29 @@ _LOAD_OVER = [("●", "now          7/12   · background 0/12 · sampled %s"
                % _local("2026-11-02T14:20Z")),
               ("○", "peak 1h       17 ▲ 5 over ●12 by 5"),
               ("○", "blocked        3 ▲ 3 0 × 429")]
-_LATENCY_OVER = [("○", "p50           95s ▲ 12"),
-                 ("○", "p90          240s ▲ 38"),
-                 ("○", "gateway       25s   · fixed wait before headers")]
+# The latency group's four rows: one per tier and percentile. This window sent
+# nothing to the slow tier, so its two rows print `?` - the ordinary shape of a
+# background tier nobody used - and the priority rows carry the move.
+_LATENCY_OVER = [("○", "p50 pri       95s ▲ 12"),
+                 ("○", "p90 pri      240s ▲ 38"),
+                 ("?", "p50 bg           ·"),
+                 ("?", "p90 bg           ·")]
 _LOAD_HEALTHY = [("●", "now          3/12   · background 1/12 · sampled %s"
                  % _local("2026-11-02T14:31Z")),
                  ("○", "peak 1h        4 ▲ 1 never over"),
                  ("○", "blocked        0   · 0 × 429")]
-_LATENCY_HEALTHY = [("○", "p50           31s ▾ 4"),
-                    ("○", "p90           58s ▾ 9"),
-                    ("○", "gateway       25s   · fixed wait before headers")]
+_LATENCY_HEALTHY = [("○", "p50 pri       31s ▾ 4"),
+                    ("○", "p90 pri       58s ▾ 9"),
+                    ("?", "p50 bg           ·"),
+                    ("?", "p90 bg           ·")]
 _LOAD_NOTHING_MEASURED = [("●", "now          4/12   · background 0/12 · sampled %s"
                           % _local("2026-11-02T14:31Z")),
                           ("?", "peak 1h          · nothing measured here"),
                           ("?", "blocked          ·")]
-_LATENCY_NOTHING_MEASURED = [("?", "p50              ·"),
-                             ("?", "p90              ·"),
-                             ("○", "gateway       25s   · fixed wait before headers")]
+_LATENCY_NOTHING_MEASURED = [("?", "p50 pri          ·"),
+                             ("?", "p90 pri          ·"),
+                             ("?", "p50 bg           ·"),
+                             ("?", "p90 bg           ·")]
 _REFUSALS_ROWS = [("○", "429            11 ▲ 11 the account's rate limit"),
                   ("○", "at limit        4 ▲  4 account pool full"),
                   ("○", "background      7 ▲  7 demoted to the slow tier")]
@@ -406,28 +413,50 @@ class RegionMoons(unittest.TestCase):
                            (_LATENCY_NOTHING_MEASURED, tui.REGION_LATENCY)):
             self.assertEqual(tui.moon_glyph("moon"), tui.region_moon(rows, kind))
 
-    def test_the_now_and_gateway_rows_cannot_move_a_moon(self):
-        # `now` has no previous window to move against and `gateway` is a fixed
-        # wait, so neither is evidence a region can be judged on.
-        self.assertEqual(tui.moon_glyph(report.MOON_FULL),
-                         tui.region_moon(_LATENCY_HEALTHY[1:], tui.REGION_LATENCY))
+    def test_a_context_row_cannot_move_a_moon(self):
+        # `now` has no previous window to move against, and a row whose label the
+        # screen cannot read - the retired `gateway` constant is one - carries no
+        # direction at all. Neither is evidence a region can be judged on.
+        measured = tui.moon_glyph(report.MOON_FULL)
+        self.assertEqual(measured,
+                         tui.region_moon(_LATENCY_HEALTHY, tui.REGION_LATENCY))
+        # The same moon from the two rows that measured something, and from those
+        # rows with the two context rows a taller layout would hand the region.
+        self.assertEqual(measured,
+                         tui.region_moon(_LATENCY_HEALTHY[:2], tui.REGION_LATENCY))
         self.assertEqual(
-            tui.region_moon(_LATENCY_HEALTHY, tui.REGION_LATENCY),
+            measured,
             tui.region_moon([("●", "now          12/12   · background 0/12 "
-                             "· sampled %s" % _local("2026-11-02T14:31Z"))]
+                             "· sampled %s" % _local("2026-11-02T14:31Z")),
+                             ("○", "gateway       25s   · fixed wait before headers")]
                             + _LATENCY_HEALTHY, tui.REGION_LATENCY))
 
     def test_a_partly_measured_region_reads_on_what_it_measured(self):
         # One unread percentile does not make the region unknown: it has a
         # measurement that moved, and that is what the moon reports.
-        rows = [("○", "p50           95s ▲ 12"),
-                ("?", "p90              ·")]
+        rows = [("○", "p50 pri       95s ▲ 12"),
+                ("?", "p90 pri          ·"),
+                ("?", "p50 bg           ·"),
+                ("?", "p90 bg           ·")]
         self.assertEqual(tui.moon_glyph(report.MOON_QUARTER),
                          tui.region_moon(rows, tui.REGION_LATENCY))
-        clean = [("○", "p50           31s ▾ 4"),
-                 ("?", "p90              ·")]
+        clean = [("○", "p50 pri       31s ▾ 4"),
+                 ("?", "p90 pri          ·"),
+                 ("?", "p50 bg           ·"),
+                 ("?", "p90 bg           ·")]
         self.assertEqual(tui.moon_glyph(report.MOON_FULL),
                          tui.region_moon(clean, tui.REGION_LATENCY))
+
+    def test_a_background_row_alone_can_read_pressure(self):
+        # The tiers are reported independently and read the same way: a slow tier
+        # whose p90 rose is the latency group's own pressure, even when the
+        # priority rows did not move.
+        rows = [("○", "p50 pri       83s   ▬"),
+                ("○", "p90 pri      202s   ▬"),
+                ("○", "p50 bg       430s ▲ 50"),
+                ("○", "p90 bg       560s ▲ 90")]
+        self.assertEqual(tui.moon_glyph(report.MOON_QUARTER),
+                         tui.region_moon(rows, tui.REGION_LATENCY))
 
     def test_a_row_with_no_known_label_is_context(self):
         rows = [("○", "▁▁▂▁▁▂▂▂▁▁▁▁▂▁▁▂▂▂▁▁▃▄▆███████▆▅"),
@@ -453,7 +482,8 @@ class RegionMoons(unittest.TestCase):
                          tui.region_moon(_LATENCY_HEALTHY, tui.REGION_LATENCY))
 
     def test_every_region_kind_is_named(self):
-        self.assertEqual(("load", "latency", "refusals", "stalls"), tui.REGION_KINDS)
+        self.assertEqual(("load", "latency", "models", "refusals", "stalls"),
+                         tui.REGION_KINDS)
 
 
 # ---- the tie between the two levels ---------------------------------------

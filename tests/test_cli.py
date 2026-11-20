@@ -1489,6 +1489,43 @@ class RateLimitIsConcurrency(unittest.TestCase):
             self.assertNotIn("quota", text.lower(), f"{surface} still says quota")
 
 
+class LatencyAdjustmentStatesTheFact(unittest.TestCase):
+    """The pre-header wait is reported as two numbers, never as a verdict.
+
+    Jesse's ruling (2026-11-20): the adjustment list carries facts and trends, so
+    a p50 above a minute is not a fault and not a floor. The line states the two
+    numbers a reader needs - the end-to-end p50 and the fixed wait inside it - and
+    it prints them at any size, because a threshold would be a judgment about
+    which waits matter.
+    """
+
+    def setUp(self):
+        self.m = _load_cli()
+
+    def _advice(self, duration):
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + duration,
+                               outcome="completed")]
+        _, adj, _ = self.m.verdict(self.m.analyse(reqs, 1.0))
+        return " ".join(adj)
+
+    def test_the_line_names_the_p50_and_the_fixed_wait(self):
+        joined = self._advice(95.0)
+        self.assertIn("interactive p50 95.0s end to end", joined)
+        self.assertIn("about 25s of that is the fixed wait before headers", joined)
+
+    def test_the_line_carries_no_verdict_word(self):
+        joined = self._advice(95.0)
+        for word in ("fault", "floor", "Even", "should", "must", "too slow"):
+            self.assertNotIn(word, joined)
+
+    def test_the_line_prints_below_a_minute_too(self):
+        """A 30s p50 is the same two facts: no threshold decides what prints."""
+        joined = self._advice(30.0)
+        self.assertIn("interactive p50 30.0s end to end", joined)
+
+
 class PerModelDeadlines(unittest.TestCase):
     def setUp(self):
         self.m = _load_cli()

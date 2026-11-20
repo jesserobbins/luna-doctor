@@ -43,8 +43,14 @@ def _cap(in_use, limit, *, plan="apex", sampled_at=_SAMPLED):
     return sources.Capacity(fetched_at=time.time(), **fields)
 
 
+def _model_cell(cell, n, p50, p90):
+    """One `latency_by.by_tier_model` cell, the shape `cli.latency_by` fills."""
+    return {"cell": cell, "n": n, "p50": p50, "p90": p90, "max": p90}
+
+
 def _window(requests, peak, *, blocked=0, rejected=0, at_limit=0, background=0,
             stalled=0, starved=0, p50=None, p90=None, samples=12,
+            bg_p50=None, bg_p90=None, bg_samples=0, models=(),
             slowest=None, admitted=100.0):
     """One analyse() window, reduced to the keys these rows read.
 
@@ -65,7 +71,11 @@ def _window(requests, peak, *, blocked=0, rejected=0, at_limit=0, background=0,
         "by_harness": {"pi": requests},
         "latency_s": {"interactive": {"n": samples, "p50": p50, "p90": p90,
                                       "max": 900.0},
-                      "background": {"n": 0, "p50": None, "p90": None, "max": None}},
+                      "background": {"n": bg_samples, "p50": bg_p50, "p90": bg_p90,
+                                     "max": None}},
+        "latency_by": {"floor": 5, "suppressed": 0,
+                       "by_tier_model": [dict(cell) for cell in models],
+                       "by_tier_harness": [], "by_tier_outcome": []},
         "peak_concurrency": peak,
         "peak_at": None,
         "peak_by_harness": {},
@@ -99,24 +109,68 @@ def _lines(rows):
     return [line for _badge, line in rows]
 
 
+# The per-model half of the latency measurement, as `cli.latency_by` orders it:
+# most completed samples first, and only cells that cleared its floor. Four
+# models here, so the group's three-row cap is exercised, and each one's p50 rose
+# against the window before it.
+BUSY_MODELS = (
+    _model_cell("interactive / glm-5.3", 20, 95.0, 240.0),
+    _model_cell("background / glm-5.3-background", 7, 400.0, 520.0),
+    _model_cell("interactive / claude-opus-lr11", 6, 130.0, 300.0),
+    _model_cell("interactive / gpt-5.1", 5, 60.0, 100.0),
+)
+BUSY_MODELS_BEFORE = (
+    _model_cell("interactive / glm-5.3", 18, 83.0, 202.0),
+    _model_cell("background / glm-5.3-background", 6, 380.0, 470.0),
+    _model_cell("interactive / claude-opus-lr11", 6, 118.0, 260.0),
+    _model_cell("interactive / gpt-5.1", 5, 64.0, 110.0),
+)
+# A clean window's models fell, which is what its full moon needs them to do.
+HEALTHY_MODELS = (
+    _model_cell("interactive / glm-5.3", 9, 31.0, 58.0),
+    _model_cell("interactive / claude-haiku-lr34", 6, 22.0, 40.0),
+)
+HEALTHY_MODELS_BEFORE = (
+    _model_cell("interactive / glm-5.3", 11, 35.0, 67.0),
+    _model_cell("interactive / claude-haiku-lr34", 6, 25.0, 44.0),
+)
+
 # §2.1, §2.3 and §2.4 draw the same window: 42 requests, peak 17 against 12
-# lanes, 3 blocked at admission, 11 refused with a 429.
+# lanes, 3 blocked at admission, 11 refused with a 429, and seven of the 42 sent
+# to the slow tier - which is the only window here whose background percentiles
+# were measured at all.
 def _busy():
     return _window(42, 17, blocked=3, rejected=11, at_limit=4, background=7,
-                   p50=95.0, p90=240.0, admitted=87.0)
+                   p50=95.0, p90=240.0, bg_p50=400.0, bg_p90=520.0, bg_samples=7,
+                   models=BUSY_MODELS, admitted=87.0)
 
 
 def _busy_before():
-    """The window one step back: the mockups' deltas are measured against it."""
-    return _window(40, 12, p50=83.0, p90=202.0, samples=10)
+    """The window one step back: every delta above is measured against it."""
+    return _window(40, 12, p50=83.0, p90=202.0, samples=10,
+                   bg_p50=380.0, bg_p90=470.0, bg_samples=6,
+                   models=BUSY_MODELS_BEFORE)
 
 
 def _healthy():
-    return _window(9, 4, p50=31.0, p90=58.0, samples=9)
+    return _window(9, 4, p50=31.0, p90=58.0, samples=9, models=HEALTHY_MODELS)
 
 
 def _healthy_before():
-    return _window(11, 4, p50=35.0, p90=67.0, samples=11)
+    return _window(11, 4, p50=35.0, p90=67.0, samples=11,
+                   models=HEALTHY_MODELS_BEFORE)
+
+
+def _tier_split():
+    """The busy window's priority percentiles, with the slow tier slower still.
+
+    The priority p50 and p90 did not move; the seven requests on the background
+    tier did. A group that read one latency number for both tiers would call this
+    window slower, and the priority rows are what say it is not.
+    """
+    return _window(42, 17, blocked=3, rejected=11, at_limit=4, background=7,
+                   p50=83.0, p90=202.0, samples=10,
+                   bg_p50=430.0, bg_p90=560.0, bg_samples=7, admitted=87.0)
 
 
 def _empty():
@@ -131,46 +185,157 @@ def _demoted():
     part of the fixture so every region on the screen measured something: a
     region that measured nothing claims no status, and that is a separate case.
     """
-    return _window(42, 4, background=7, p50=31.0, p90=58.0)
+    return _window(42, 4, background=7, p50=31.0, p90=58.0,
+                   models=HEALTHY_MODELS)
 
 
-# ---- the five mockups, verbatim -------------------------------------------
+# ---- the latency group: one row per tier, per percentile ------------------
 class LatencyGroup(unittest.TestCase):
-    """§2.1, §2.2, §2.3 and §2.5: the same three rows, and all that changes."""
+    """Priority and background are two populations, so they are two pairs of rows.
 
-    def test_the_busy_latency_group_is_the_mockups_rows(self):
+    A single latency number per percentile read both tiers as one population, and
+    a demotion - work moving from the priority lanes to the slow tier - then
+    looked exactly like the priority tier getting slower. Each tier's percentiles
+    stand on their own row, with their own badge and their own delta against the
+    same tier in the previous window, so the screen says which tier moved.
+
+    The group is four rows in every window. A tier that measured nothing prints
+    `?` on both of its rows rather than vanishing: a background tier nobody used
+    is the ordinary way to see two `?` rows, and a row that disappears would move
+    every row under it.
+    """
+
+    def test_both_tiers_get_their_own_rows_and_their_own_deltas(self):
         self.assertEqual(_lines(tui.group_rows(
             tui.REGION_LATENCY, _busy(), _busy_before())), [
-            " p50          ○      95s ▲ 12",
-            " p90          ○     240s ▲ 38",
-            " gateway      ○      25s   · fixed wait before headers",
+            " p50 pri      ○      95s ▲ 12",
+            " p90 pri      ○     240s ▲ 38",
+            " p50 bg       ○     400s ▲ 20",
+            " p90 bg       ○     520s ▲ 50",
         ])
 
-    def test_the_healthy_latency_group_is_the_mockups_rows(self):
+    def test_a_background_tier_with_no_sample_prints_two_question_marks(self):
+        """The slow tier was not measured, so it is not a zero: two `?` rows.
+
+        The priority rows keep their numbers and their deltas, which is what
+        "reported independently" means on a window that demoted nothing.
+        """
         self.assertEqual(_lines(tui.group_rows(
             tui.REGION_LATENCY, _healthy(), _healthy_before())), [
-            " p50          ○      31s ▾ 4",
-            " p90          ○      58s ▾ 9",
-            " gateway      ○      25s   · fixed wait before headers",
+            " p50 pri      ○      31s ▾ 4",
+            " p90 pri      ○      58s ▾ 9",
+            " p50 bg       ?            ·",
+            " p90 bg       ?            ·",
         ])
+
+    def test_a_demotion_moves_the_background_rows_and_not_the_priority_ones(self):
+        """Two tiers, two deltas: the priority rows compare priority to priority."""
+        self.assertEqual(_lines(tui.group_rows(
+            tui.REGION_LATENCY, _tier_split(), _busy_before())), [
+            " p50 pri      ○      83s   ▬",
+            " p90 pri      ○     202s   ▬",
+            " p50 bg       ○     430s ▲ 50",
+            " p90 bg       ○     560s ▲ 90",
+        ])
+
+    def test_a_suppressed_tier_prints_no_denominator_on_either_row(self):
+        rows = tui.group_rows(tui.REGION_LATENCY, _empty(), None)
+        self.assertEqual(_lines(rows), [
+            " p50 pri      ?            ·",
+            " p90 pri      ?            ·",
+            " p50 bg       ?            ·",
+            " p90 bg       ?            ·",
+        ])
+        for badge, line in rows:
+            self.assertNotIn("n=", line)
+            self.assertEqual(tui._BADGE_UNKNOWN, badge)
 
     def test_a_window_with_no_lane_count_shows_the_same_latency_rows(self):
         """§2.3 differs from §2.1 above this region and nowhere inside it."""
         self.assertEqual(_lines(tui.group_rows(tui.REGION_LATENCY, _busy(), _busy_before())),
                          _lines(tui.group_rows(tui.REGION_LATENCY, _busy(), _busy_before())))
 
-    def test_a_window_with_nothing_measured_is_the_mockups_rows(self):
-        self.assertEqual(_lines(tui.group_rows(tui.REGION_LATENCY, _empty(), None)), [
-            " p50          ?            ·",
-            " p90          ?            ·",
-            " gateway      ○      25s   · fixed wait before headers",
+    def test_the_fixed_wait_is_not_a_row_here(self):
+        """The gateway's wait is one constant with no trend, and the four tier
+        rows are the group's whole budget: it lives in the CLI's adjustment and
+        in the skill's gateway contract, not on the screen."""
+        lines = _lines(tui.group_rows(tui.REGION_LATENCY, _busy(), _busy_before()))
+        self.assertEqual(4, len(lines))
+        self.assertNotIn("gateway", "".join(lines))
+
+
+# ---- the models group: one model per row --------------------------------
+class ModelsGroup(unittest.TestCase):
+    """The per-model breakdown of the same latency, reached with `[g]`.
+
+    The tier rows answer "which pool"; this group answers "which model", one row
+    per model, each with its own p50, its own delta against the same model in the
+    previous window and its own p90 in the clause. The label is the model's name,
+    because the model is what the row is about; a name longer than the label
+    column is cut to its cells rather than pushed into the badge's column.
+    """
+
+    def test_each_model_gets_its_own_row_number_and_delta(self):
+        self.assertEqual(_lines(tui.group_rows(
+            tui.REGION_MODELS, _busy(), _busy_before())), [
+            " glm-5.3      ○      95s ▲ 12 p90 240s",
+            " glm-5.3-bac… ○     400s ▲ 20 p90 520s",
+            " claude-opus… ○     130s ▲ 12 p90 300s",
         ])
 
-    def test_a_suppressed_percentile_prints_no_denominator(self):
-        rows = tui.group_rows(tui.REGION_LATENCY, _empty(), None)
-        for line in _lines(rows[:2]):
-            self.assertNotIn("n=", line)
-            self.assertEqual(tui._BADGE_UNKNOWN, rows[0][0])
+    def test_a_name_longer_than_the_label_column_is_cut_and_marked(self):
+        """A cut name keeps a marker, so a shortened model never reads as a
+        different one, and the badge keeps its column."""
+        rows = tui.group_rows(tui.REGION_MODELS, _busy(), _busy_before())
+        self.assertEqual("glm-5.3-bac…", rows[1][1][1:13])
+        self.assertEqual(tui.LOAD_LABEL_CELLS, len("glm-5.3-bac…"))
+        self.assertEqual(rows[1][0], rows[1][1][14])
+
+    def test_the_group_ranks_three_models_and_draws_three_rows(self):
+        """`latency_by` carries four models here; the fourth row would move the
+        region under it, and `latency --by model` holds the rest."""
+        cells = (_busy().get("latency_by") or {}).get("by_tier_model")
+        self.assertEqual(4, len(cells))
+        self.assertEqual(3, len(tui.group_rows(tui.REGION_MODELS, _busy(),
+                                               _busy_before())))
+
+    def test_a_model_below_the_floor_is_skipped_rather_than_a_question_mark(self):
+        """An unmeasured model is not a `?` fact about that model: it has no row.
+
+        The windows here measure two models, so the group draws two rows, and the
+        rows it does not draw are models nobody measured enough of.
+        """
+        self.assertEqual(_lines(tui.group_rows(
+            tui.REGION_MODELS, _healthy(), _healthy_before())), [
+            " glm-5.3      ○      31s ▾ 4 p90 58s",
+            " claude-haik… ○      22s ▾ 3 p90 40s",
+        ])
+
+    def test_a_window_that_ranked_no_model_says_so_in_one_row(self):
+        """No cell reached the floor, so there is no model to name and no `?`
+        row per model to print: one row states the fact and claims no status."""
+        rows = tui.group_rows(tui.REGION_MODELS,
+                              _window(42, 17, p50=95.0, p90=240.0),
+                              _busy_before())
+        self.assertEqual(_lines(rows), [
+            " no model     ?            · nothing reached the sample floor",
+        ])
+        self.assertEqual(tui._BADGE_UNKNOWN, rows[0][0])
+        self.assertEqual(tui.moon_glyph("moon"),
+                         tui.region_moon(rows, tui.REGION_MODELS))
+
+    def test_one_model_moving_up_reads_pressure(self):
+        """A row is one model's percentile, and a percentile's direction is its
+        severity here the way it is on a tier row: the model that moved is the
+        row's own fact, and that some model moved is the region's."""
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_QUARTER),
+                         tui.region_moon(tui.group_rows(
+                             tui.REGION_MODELS, _busy(), _busy_before()),
+                             tui.REGION_MODELS))
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_FULL),
+                         tui.region_moon(tui.group_rows(
+                             tui.REGION_MODELS, _healthy(), _healthy_before()),
+                             tui.REGION_MODELS))
 
 
 class RefusalsGroup(unittest.TestCase):
@@ -228,6 +393,16 @@ class StallsGroup(unittest.TestCase):
 
 
 # ---- the grid every evidence row is drawn on -----------------------------
+# The rows each group draws. LATENCY holds four - two percentiles for each of the
+# two tiers - MODELS holds one row per measured model, three at most, and the
+# other two groups keep the three-row shape. The LATENCY group's fourth row is
+# the one place the screen is taller than §3.1's eighteen drawn rows, and it is
+# the same four rows in every window; MODELS is only on screen when `[g]` rings
+# to it, and there it is one row shorter for every model it did not measure.
+GROUP_ROWS = {tui.REGION_LATENCY: 4, tui.REGION_MODELS: 3,
+              tui.REGION_REFUSALS: 3, tui.REGION_STALLS: 3}
+
+
 class TheEvidenceGrid(unittest.TestCase):
     """§3.2: one grid for every data row, and the copy rules on top of it."""
 
@@ -235,10 +410,10 @@ class TheEvidenceGrid(unittest.TestCase):
         self.busy = _busy()
         self.before = _busy_before()
 
-    def test_every_group_holds_three_rows_under_the_budget(self):
+    def test_every_group_holds_its_rows_under_the_budget(self):
         for key in tui.EVIDENCE_GROUPS:
             rows = tui.group_rows(key, self.busy, self.before)
-            self.assertEqual(3, len(rows), key)
+            self.assertEqual(GROUP_ROWS[key], len(rows), key)
             for badge, line in rows:
                 self.assertLessEqual(_cells(line), ROW_BUDGET, line)
                 self.assertEqual(badge, line[14], "the badge left its column")
@@ -256,9 +431,10 @@ class TheEvidenceGrid(unittest.TestCase):
         full = tui.moon_glyph(tui.report.MOON_FULL)
         plain = tui.moon_glyph("moon")
         stressed = _window(42, 17, blocked=3, rejected=11, at_limit=4, background=7,
-                           stalled=2, starved=1, p50=95.0, p90=240.0)
+                           stalled=2, starved=1, p50=95.0, p90=240.0,
+                           models=BUSY_MODELS)
         expected = {tui.REGION_REFUSALS: new, tui.REGION_LATENCY: quarter,
-                    tui.REGION_STALLS: quarter}
+                    tui.REGION_MODELS: quarter, tui.REGION_STALLS: quarter}
         for key in tui.EVIDENCE_GROUPS:
             busy = tui.group_rows(key, stressed, self.before)
             healthy = tui.group_rows(key, _healthy(), _healthy_before())
@@ -266,6 +442,35 @@ class TheEvidenceGrid(unittest.TestCase):
             self.assertEqual(full, tui.region_moon(healthy, key), key)
             self.assertEqual(plain,
                              tui.region_moon(tui.group_rows(key, _empty(), None), key), key)
+
+    def test_the_moon_reads_both_tiers_the_same_way(self):
+        """A percentile's direction is its own severity, whichever tier it read.
+
+        The tier rows wear the label of the percentile they report, so the moon
+        treats `p50 pri` and `p50 bg` alike: a background p90 rising is the
+        latency group reading pressure, and both tiers falling reads clean.
+        """
+        quarter = tui.moon_glyph(tui.report.MOON_QUARTER)
+        full = tui.moon_glyph(tui.report.MOON_FULL)
+        self.assertEqual(quarter, tui.region_moon(
+            tui.group_rows(tui.REGION_LATENCY, _tier_split(), self.before),
+            tui.REGION_LATENCY))
+        self.assertEqual(full, tui.region_moon(
+            tui.group_rows(tui.REGION_LATENCY, _healthy(), _healthy_before()),
+            tui.REGION_LATENCY))
+
+    def test_the_moon_holds_whether_the_group_draws_four_rows_or_five(self):
+        """Four tier rows or five, the same moon: the fifth is context.
+
+        The retired `gateway` row is a measured constant with no direction, so a
+        caller that hands the region five rows - as a layout with room to spare
+        would - still gets the verdict its four tier rows earned.
+        """
+        rows = tui.group_rows(tui.REGION_LATENCY, _busy(), self.before)
+        constant = [("○", "gateway       25s   · fixed wait before headers")]
+        self.assertEqual(4, len(rows))
+        self.assertEqual(tui.region_moon(rows, tui.REGION_LATENCY),
+                         tui.region_moon(rows + constant, tui.REGION_LATENCY))
 
     def test_the_refusals_title_can_read_over_capacity(self):
         """999 429s is a gateway turning work away, and the region says so.
@@ -291,7 +496,8 @@ class TheEvidenceGrid(unittest.TestCase):
         over capacity on the screen that recommends it.
         """
         stressed = _window(42, 17, blocked=3, rejected=11, at_limit=4, background=7,
-                           stalled=2, starved=1, p50=95.0, p90=240.0)
+                           stalled=2, starved=1, p50=95.0, p90=240.0,
+                           models=BUSY_MODELS)
         for metrics in (stressed, _window(999, 17, rejected=999),
                         _demoted(), _healthy()):
             header = tui.moon_glyph(tui.header_moon(metrics))

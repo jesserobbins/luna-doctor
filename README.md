@@ -53,15 +53,18 @@ luna-doctor --version
 
 `luna-doctor` with no arguments, in a terminal, opens the triage screen. The
 screen is a dashboard. It reads the last hour of local logs and the cached
-account capacity, then draws nineteen rows. The rows hold their place in every
-state: only the numbers, the moons and the middle group change.
+account capacity, then draws nineteen rows. The rows above the middle group hold
+their place in every state: only the numbers, the moons and that group change.
 
 | region | rows | the question it answers |
 |---|---|---|
 | status | 2 | over capacity now, and is it getting worse |
 | load | 6 | by how much, and since when |
-| one evidence group | 5 | what kind of trouble |
+| one evidence group | 5 or 6 | what kind of trouble |
 | next | 3 | what to do |
+
+The latency group draws six rows - two percentiles for each of the two tiers -
+and the other groups draw five.
 
 The window is one hour. `w` cycles 1h, 6h and 24h, and every number and the
 picture follow the window. The dashboard holds no 7-day and no 30-day number.
@@ -83,19 +86,32 @@ place.
 
 The screen asks one question, "What are you seeing?", and offers six answers.
 The numbers are on screen while the question is open, and an answer swaps the
-middle group. `g` steps through the same three groups, so the rows under the
+middle group. `g` steps through the same four groups, so the rows under the
 picture can change without an answer:
 
 | answer | the group it picks |
 |---|---|
 | 429 or concurrency errors | `REFUSALS`: the 429s, the refusals at the account's limit, and the requests sent to the background tier |
-| things are slow | `LATENCY`: p50, p90, and the gateway's fixed wait |
+| things are slow | `LATENCY`: a p50 and a p90 for each tier, priority and background |
 | nothing yet, just checking | `LATENCY`: the group a quiet window opens on |
 | requests failing or hanging, "Stream ended without finish_reason", an agent stuck mid-task | `STALLS`: the stalled streams and the slowest request |
+| `g` only | `MODELS`: one row per model, its p50 and its own delta, up to three models by sample count |
+
+The two latency tiers are two measurements, so they are two pairs of rows: a
+priority p50 and a background p50 are never averaged into one number. A tier that
+measured nothing prints `?`, which is what a background tier nobody used looks
+like. Every row of the `MODELS` group is one model's own percentile, with its own
+delta against the same model in the previous window. A model below the sample
+floor has no row at all.
 
 The last row is the `Footer`, and it lists the keys: `f` for the `fix` output,
 `d` for the `analyze` report, `c` for the chart, `g` for the next evidence
 group, `w` for the window, `?` for the help overlay, and `q` to quit.
+
+The gateway's fixed wait before headers is a constant, so it is not a row: the
+`analyze` adjustment states it beside this window's own p50, and
+[`gateway-contract.md`](skills/luna-doctor/references/gateway-contract.md) holds
+the measurement.
 
 The first row dates itself. The cell on its right holds the age of the data and
 counts up while the screen is open: `age 2m`, and `age 16m stale` once the data

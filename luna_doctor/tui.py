@@ -1,4 +1,10 @@
-"""The triage screen: a dashboard of nineteen rows, in every one of its states.
+"""The triage screen: a dashboard of nineteen rows, twenty with LATENCY on it.
+
+The evidence group is the one region whose height changes: LATENCY draws four
+rows, one per tier and percentile, because a priority p50 and a background p50
+are two measurements; REFUSALS and STALLS draw three. So the screen carries
+eighteen drawn rows when those two groups are up and nineteen when LATENCY is,
+plus the Textual `Footer` under them.
 
 Bare `luna-doctor` on a terminal opens this instead of argparse help: it fixes
 four regions on the screen - the status header, LOAD, one evidence group and
@@ -8,9 +14,9 @@ the window it lands on.
 
 Everything that decides what a reader sees is a pure function: the header and
 its moons, the three LOAD rows, the evidence groups, the NEXT region, the two
-key lines, and `dashboard_lines`, which assembles them into the eighteen rows
-the screen draws. The Textual `Footer` renders the bindings and is the
-nineteenth. Each builder is a function of a metrics dict, the previous
+key lines, and `dashboard_lines`, which assembles them into the rows the screen
+draws. The Textual `Footer` renders the bindings and is the last row. Each
+builder is a function of a metrics dict, the previous
 window, a Capacity payload and the chosen answer, so the suite can test the
 whole screen offline and without a terminal. Only TriageApp needs Textual,
 which is the optional `luna-doctor[tui]` extra: this module imports it at the
@@ -89,16 +95,11 @@ _LEAD = {
     "checking": "latency",
 }
 
-# The three regions an answer can select, in the order the scale rises. `load` is
-# not one of them: it is on the screen in every state.
-EVIDENCE_GROUPS = ("latency", "refusals", "stalls")
-
-# The answer each group is named by when a person steps through the groups
-# themselves (`[g]`): the answer that reports that group's own symptom. Spelled
-# as strings for the same reason `_LEAD` is - this table is read at import time
-# and the region names are declared further down.
-_ANSWER_FOR_GROUP = {"latency": "slow", "refusals": "concurrency",
-                     "stalls": "stuck"}
+# The evidence groups, in the order `[g]` rings them. `load` is not one of them:
+# it is on the screen in every state. Three of the four answer a symptom a person
+# can pick (`_LEAD`); `models` is the per-model breakdown of the same latency, so
+# `[g]` is how it is reached - no answer on the list means a model.
+EVIDENCE_GROUPS = ("latency", "models", "refusals", "stalls")
 
 _BADGE_UNKNOWN = badges.badge_for(sources.PROV_UNKNOWN)
 _BADGE_MEASURED = badges.badge_for(sources.PROV_MEASURED)
@@ -131,7 +132,7 @@ def window_cycle(hours) -> int:
 
 
 def next_group(group_key: str) -> str:
-    """The evidence group `[g]` moves to: latency -> refusals -> stalls -> back.
+    """The evidence group `[g]` moves to: latency -> models -> refusals -> stalls.
 
     A ring like `window_cycle`'s, and closed the same way: a group the dashboard
     does not offer lands on the first one rather than on a group the screen
@@ -385,9 +386,11 @@ def age_cell(scan_now, wall_now, stale_after_s: float = AGE_STALE_AFTER_S) -> st
 
 REGION_LOAD = "load"
 REGION_LATENCY = "latency"
+REGION_MODELS = "models"
 REGION_REFUSALS = "refusals"
 REGION_STALLS = "stalls"
-REGION_KINDS = (REGION_LOAD, REGION_LATENCY, REGION_REFUSALS, REGION_STALLS)
+REGION_KINDS = (REGION_LOAD, REGION_LATENCY, REGION_MODELS, REGION_REFUSALS,
+                REGION_STALLS)
 
 
 class _RowFact(NamedTuple):
@@ -399,10 +402,12 @@ class _RowFact(NamedTuple):
     text: str
 
 
-# The row labels the regions draw (§3.3, §8 item 4), longest first so `at limit`
-# never reads as a row called `at`. A row that starts with none of these is
-# context this module cannot read a number out of, and it never moves a moon.
-_ROW_LABELS = ("peak", "now", "blocked", "p50", "p90", "gateway", "429",
+# The row labels that carry a severity rule (§3.3, §8 item 4), longest first so
+# `at limit` never reads as a row called `at`. A label outside this table - a
+# model's own name in the MODELS group is one - is still that row's label; it
+# carries no rule here, so the sets below are what decide whether it can move a
+# moon.
+_ROW_LABELS = ("peak", "now", "blocked", "p50", "p90", "429",
                "at limit", "background", "stalled", "starved", "slowest")
 _ROW_LABEL = re.compile(
     r"^(%s)\b" % "|".join(re.escape(label) for label in
@@ -411,16 +416,20 @@ _ROW_LABEL = re.compile(
 _FIRST_INT = re.compile(r"\d+")
 _WINDOW_LABEL = re.compile(r"\d+h$")
 
-# Rows that carry no severity: `now` is the account's instantaneous occupancy and
-# has no previous window to move against, and `gateway` is a fixed wait. Neither
-# can darken a region, and neither can lighten one.
-_CONTEXT_LABELS = ("now", "gateway")
+# Rows that carry no severity: `now` is the account's instantaneous occupancy,
+# and it has no previous window to move against. It can neither darken a region
+# nor lighten one.
+_CONTEXT_LABELS = ("now",)
 
 # What the rows have to say, as closed sets of labels. `blocked` is the darkest
 # in the LOAD region, because those requests never got in at all; a stall is
 # pressure in the region that reports one (§4.2).
 _BLOCK_LABELS = ("blocked",)
 _PRESSURE_LABELS = ("stalled", "starved")
+# Both tiers' rows read as the percentile they report: `p50 pri` and `p50 bg` are
+# one label because a percentile's direction is its own severity, whichever tier
+# it measured. A row's label is its first word, so the tier suffix never hides a
+# row from the moon.
 _LATENCY_LABELS = ("p50", "p90")
 
 # The two ways work never ran, as the REFUSALS region draws them (§2.4): the
@@ -445,14 +454,21 @@ _UP_ARROW = "▲"
 def _row_fact(badge, text) -> _RowFact:
     """One (badge, text) row, read as a label, a count and its own words.
 
-    The count is the first integer after the label, because the number column
-    precedes the delta column (§3.2) and a row prints its own number first. A
-    `1h` window label is the label's unit, not a row's number.
+    The label is the row's own label cell: one of the region words above, or
+    whatever else the row put there - a model name labels its own row. The count
+    is the first integer after that cell, because the number column precedes the
+    delta column (§3.2) and a row prints its own number first, so the `p90 240s`
+    a qualifier carries is never mistaken for it. A `1h` window label is the
+    label's unit, not a row's number.
     """
     body = (text or "").strip()
     match = _ROW_LABEL.match(body)
-    label = match.group(1).lower() if match else ""
-    tokens = body[match.end():].split() if match else []
+    if match:
+        label = match.group(1).lower()
+        tokens = body[match.end():].split()
+    else:
+        label = body[:LOAD_LABEL_CELLS].strip().lower()
+        tokens = body[LOAD_LABEL_CELLS:].split()
     if label == "peak" and tokens and _WINDOW_LABEL.match(tokens[0]):
         tokens = tokens[1:]
     count = None
@@ -510,7 +526,8 @@ def _region_pressure(evidence, region_kind: str) -> bool:
     clean window whose peak happened to move (§2.2). A latency region adds its
     own direction, because a percentile has no wall to cross and the move is the
     whole story (§2.1: p90 240s rising reads pressure; §2.2: p90 58s falling
-    reads clean).
+    reads clean). The MODELS region reads the same way one model at a time: it
+    holds nothing but percentiles, so a row moving up is that model's direction.
     """
     for fact in evidence:
         if fact.label in _PRESSURE_LABELS and fact.count:
@@ -521,6 +538,12 @@ def _region_pressure(evidence, region_kind: str) -> bool:
     if region_kind == REGION_LATENCY:
         return any(_UP_ARROW in fact.text for fact in evidence
                    if fact.label in _LATENCY_LABELS)
+    if region_kind == REGION_MODELS:
+        # Every row in this region is one model's own percentile, labelled by the
+        # model's name, so the arrow on any row is that model's direction and
+        # reads the way a tier's does. Which model moved is the row's own fact;
+        # whether any did is the region's.
+        return any(_UP_ARROW in fact.text for fact in evidence)
     return False
 
 
@@ -1110,35 +1133,121 @@ def _seconds_cell(value) -> str:
     return "%ds" % int(round(value)) if value >= 10 else "%.1fs" % value
 
 
-def _latency_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
-    """LATENCY: the interactive p50 and p90, then the gateway's fixed wait.
+# The two latency tiers, in the order the group reads them: the work the account
+# admits at its priority lanes, then the work the gateway sent to the slow tier.
+# Each tier is measured from its own completed requests, so each one keeps its
+# own rows and its own delta. The short label rides the row because two tiers of
+# one percentile would otherwise read as the same row printed twice.
+LATENCY_TIERS = (("pri", "interactive"), ("bg", "background"))
 
-    The percentiles are completed interactive requests only, each badged ○
-    because it measures these logs and so is a lower bound. A percentile with no
-    sample prints `?` and no number: a suppressed percentile never prints its
-    denominator (§6.3 item 19). The gateway row is the documented wait every
-    request pays before headers, so it has no trend - `·`, never an arrow - and
-    it is context, not severity, when the region reads its own moon.
+# The two percentiles each tier prints, p50 first.
+LATENCY_PERCENTILES = ("p50", "p90")
+
+
+def _latency_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
+    """LATENCY: the p50 and the p90 of each tier, on four rows of their own.
+
+    A priority p50 and a background p50 are two measurements of two populations,
+    so they are two rows, each badged ○ because it measures these logs and so is
+    a lower bound. A tier with no sample prints `?` and no number on both of its
+    rows - a suppressed percentile never prints its denominator (§6.3 item 19) -
+    and a background tier nobody used is the ordinary way to see that: two `?`
+    rows say the slow tier was not read, which is a fact and not a zero.
+
+    Each row's delta compares that tier against the same tier in the previous
+    window, so a demotion that moved work between the tiers can never be read as
+    the priority rows moving. The gateway's fixed wait is not here: it is one
+    constant for every window, it has no trend, and it is in the CLI's own
+    adjustment and in the skill's gateway contract.
     """
-    tier = (metrics.get("latency_s") or {}).get("interactive") or {}
-    before = ((previous or {}).get("latency_s") or {}).get("interactive") or {}
-    measured = _sampled(tier)
-    before_measured = _sampled(before)
+    tiers = metrics.get("latency_s") or {}
+    before_tiers = (previous or {}).get("latency_s") or {}
     rows = []
-    for label in ("p50", "p90"):
-        number = _seconds_cell(tier.get(label)) if measured else ""
-        earlier = _seconds_cell(before.get(label)) if before_measured else ""
+    for tier_label, tier_key in LATENCY_TIERS:
+        tier = tiers.get(tier_key) or {}
+        before = before_tiers.get(tier_key) or {}
+        measured = _sampled(tier)
+        before_measured = _sampled(before)
+        for percentile in LATENCY_PERCENTILES:
+            number = _seconds_cell(tier.get(percentile)) if measured else ""
+            earlier = _seconds_cell(before.get(percentile)) if before_measured else ""
+            rows.append(_EvidenceRow(
+                "%s %s" % (percentile, tier_label),
+                _BADGE_MEASURED if number else _BADGE_UNKNOWN,
+                number,
+                (_delta_move(round(tier[percentile]), round(before[percentile]),
+                             metrics, previous)
+                 if number and earlier else None),
+                ""))
+    return rows
+
+
+# How many models the MODELS group ranks: the three with the most completed
+# samples, like every other three-row group here. A fourth row would move every
+# row under it, and the rest of the ranking is in `latency --by model`.
+MODEL_ROWS = 3
+
+
+def _model_name(cell) -> str:
+    """The model a `latency_by` cell names: its part after the tier.
+
+    `cli.latency_by` labels a cell `"<tier> / <model>"`, and the model's own name
+    is what a reader compares across windows, so the row is labelled with it.
+    """
+    if not isinstance(cell, str):
+        return "(unknown)"
+    _tier, _sep, model = cell.partition(" / ")
+    return model or cell
+
+
+def _label_cell(name: str) -> str:
+    """One model's name in the label column, cut where the column ends.
+
+    A model name is a log slug (letters, digits, `-`, `.`), so one character is
+    one cell. A name longer than the 12-cell label column keeps its first eleven
+    cells and a `…`: a row that silently printed a shorter name would read as a
+    different model.
+    """
+    if len(name) <= LOAD_LABEL_CELLS:
+        return name
+    return name[:LOAD_LABEL_CELLS - 1] + "\u2026"
+
+
+def _model_rows(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
+    """MODELS: one row per model that measured, three at most.
+
+    `latency_by.by_tier_model` is the per-model half of the same measurement the
+    tier rows print: one cell per model with at least `latency_by.floor`
+    completed samples, sorted by sample count. Each row is that model's own p50,
+    with its own delta against the same model in the previous window and its p90
+    in the clause, so a slow model cannot be read as the whole window being slow.
+
+    A model below the sample floor has no cell and so no row: an unmeasured model
+    is not a `?` fact about that model, it is a model nobody measured enough of.
+    A window where nothing reached the floor draws one row that says so rather
+    than four `?` rows that would name models as if they had been read.
+    """
+    cells = (metrics.get("latency_by") or {}).get("by_tier_model") or []
+    before_cells = ((previous or {}).get("latency_by") or {}).get("by_tier_model") or []
+    earlier_by_cell = {cell.get("cell"): cell for cell in before_cells}
+    rows = []
+    for cell in cells[:MODEL_ROWS]:
+        number = _seconds_cell(cell.get("p50"))
+        earlier_cell = earlier_by_cell.get(cell.get("cell")) or {}
+        earlier = _seconds_cell(earlier_cell.get("p50"))
+        p90 = _seconds_cell(cell.get("p90"))
         rows.append(_EvidenceRow(
-            label,
+            _label_cell(_model_name(cell.get("cell"))),
             _BADGE_MEASURED if number else _BADGE_UNKNOWN,
             number,
-            (_delta_move(round(tier[label]), round(before[label]), metrics, previous)
+            (_delta_move(round(cell["p50"]), round(earlier_cell["p50"]),
+                         metrics, previous)
              if number and earlier else None),
-            ""))
-    rows.append(_EvidenceRow("gateway", _BADGE_MEASURED,
-                             "%ds" % int(round(cli.PRE_HEADER_WAIT_S)), None,
-                             "fixed wait before headers"))
-    return rows
+            "p90 %s" % p90 if p90 else ""))
+    if rows:
+        return rows
+    return [_EvidenceRow("no model", _BADGE_UNKNOWN, "", None,
+                         "nothing reached the sample floor")]
 
 
 # What happened to the slowest request, in words. The explain digest carries the
@@ -1236,6 +1345,7 @@ def _stalls_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
 
 _GROUPS = {
     REGION_LATENCY: _latency_group,
+    REGION_MODELS: _model_rows,
     REGION_REFUSALS: _refusals_group,
     REGION_STALLS: _stalls_group,
 }
@@ -1377,13 +1487,15 @@ def key_lines(metrics: dict | None = None, cap=None) -> list[str]:
     return [line, _moon_key(not_established)]
 
 
-# ---- the screen: the eighteen rows the dashboard draws, in order ----------
+# ---- the screen: the rows the dashboard draws, in order -------------------
 #
-# Nineteen rows, always, in the four regions §3.1 fixes: the header and its rule,
-# LOAD's six, the evidence group's five, NEXT's three, and the two key lines. The
-# Textual Footer is the nineteenth and renders the bindings. Positions never
-# move between states; only the contents of the evidence group change with the
-# answer, which is why the reading order is the decision order.
+# Nineteen drawn rows, in the four regions §3.1 fixes: the header and its rule,
+# LOAD's six, the evidence group's six, NEXT's three, and the two key lines. The
+# Textual Footer draws under them and renders the bindings. The group's six is
+# where the one variable lives: LATENCY holds four rows and the other two hold
+# three, so a screen with REFUSALS or STALLS on it is one row shorter. Every row
+# above the group keeps its place in every state; only the group's own contents
+# change with the answer, which is why the reading order is the decision order.
 RULE_CELLS = 76      # the rule runs from the left edge to the header's own margin
 RULE = "\u2500" * RULE_CELLS
 
@@ -1392,6 +1504,7 @@ RULE = "\u2500" * RULE_CELLS
 _REGION_WORDS = {
     REGION_LOAD: "LOAD",
     REGION_LATENCY: "LATENCY",
+    REGION_MODELS: "MODELS",
     REGION_REFUSALS: "REFUSALS",
     REGION_STALLS: "STALLS",
 }
@@ -1424,10 +1537,12 @@ NO_PICTURE_CAPTION = "no picture: nothing measured in the last hour"
 
 def dashboard_lines(choice_key: str, metrics: dict, previous, cap,
                    wall_now=None) -> list[str]:
-    """The dashboard's eighteen drawn rows, in the order the screen draws them.
+    """The dashboard's drawn rows, in the order the screen draws them.
 
-    `choice_key` is the answer the person picked; it selects the evidence group
-    and never withholds a row (§8 item 6). `previous` is the equal-length window
+    `choice_key` names the evidence group on screen. It is the answer the person
+    picked, or - when `[g]` has cycled to a group no answer selects, as MODELS
+    is - that group's own kind; the two say the same thing here, and neither
+    withholds a row (§8 item 6). `previous` is the equal-length window
     the scan read before this one, and it decides the delta column and nothing
     else. The rows are the builders' own strings, verbatim: the LOAD and evidence
     rows carry their badges and indent, the NEXT region carries its imperative
@@ -1446,7 +1561,8 @@ def dashboard_lines(choice_key: str, metrics: dict, previous, cap,
     """
     metrics = metrics or {}
     hours = _window_hours(metrics)
-    group_key = pick_lead(choice_key)
+    group_key = (choice_key if choice_key in EVIDENCE_GROUPS
+                 else pick_lead(choice_key))
     load = load_rows(metrics, cap, hours, previous, wall_now)
     group = group_rows(group_key, metrics, previous)
     lanes, source = resolved_lanes(metrics, cap)
@@ -1589,7 +1705,7 @@ def styled_lines(lines: list[str]) -> Text:
 # The vocabulary still has to live where a person can ask for it, so `[?]` opens
 # one overlay: every binding in one line each, the two gloss lines spelled out,
 # what the drill-downs run, and the account whose capacity the numbers are. It is
-# a modal screen, so the eighteen rows under it are untouched and closing it
+# a modal screen, so the rows under it are untouched and closing it
 # restores exactly what was there - no re-scan, no moved row.
 HELP_KEYS = (
     ("f", "show the fix for this window"),
@@ -1689,7 +1805,7 @@ class HelpScreen(ModalScreen):
     """The help overlay: one screen, opened and closed by `[?]` or `esc`.
 
     A Textual `ModalScreen` rather than an inline panel, because the dashboard's
-    nineteen rows are a contract: an overlay that pushed rows around would move
+    rows are a contract: an overlay that pushed rows around would move
     every number under it, and one that carved a column out of it would break the
     grid. This one covers the screen and hands it back exactly as it was - the
     widgets underneath are never touched, and closing it re-scans nothing.
@@ -1942,14 +2058,14 @@ def chart_output(plan: str | None = None,
 
 # ---- the screen -----------------------------------------------------------
 class TriageApp(App):
-    """The dashboard, mounted once the scan lands: nineteen rows, five states.
+    """The dashboard, mounted once the scan lands: one screen, five states.
 
     The scan and the cache-only capacity read run in a thread worker while the
     screen says it is reading, so a person is never waiting on a blank terminal.
     The dashboard fills the moment the result arrives, with the group the current
-    answer selects: the six answers choose which three evidence rows stand under
-    the picture, and they never withhold a number (§8 item 6). The key bindings
-    live in the `Footer`, which renders `BINDINGS` and is the nineteenth row.
+    answer selects: the six answers choose which evidence group stands under the
+    picture, and they never withhold a number (§8 item 6). The key bindings live
+    in the `Footer`, which draws under the rows and renders `BINDINGS`.
 
     The app opens no network behavior of its own: run_triage(online=True)
     refreshes the cache once before the screen opens, exactly like `--online` on
@@ -1987,8 +2103,11 @@ class TriageApp(App):
         self.previous: dict | None = None
         self.capacity = None
         self.choice: str = DEFAULT_CHOICE
+        # The evidence group on screen. An answer sets it (`_select`) and `[g]`
+        # rings it, which is how a group no answer names - MODELS - is reached.
+        self.group: str = pick_lead(DEFAULT_CHOICE)
         self.scan_failed: str | None = None
-        # The eighteen rows as last drawn, so the one-second age tick can tell
+        # The rows as last drawn, so the one-second age tick can tell
         # whether anything on the screen actually changed before repainting.
         self.drawn: list[str] = []
 
@@ -2074,21 +2193,21 @@ class TriageApp(App):
 
     # -- the dashboard ----------------------------------------------------
     def _show_dashboard(self, metrics: dict) -> None:
-        """Draw the whole screen: the eighteen rows, and no question above them.
+        """Draw the whole screen: the rows, and no question above them.
 
         The dashboard is up the moment the scan lands, holding the group the
-        current answer selects. The answer list then stands down: nineteen rows
-        are the contract, and a list of answers beside them would move every row
-        under it. The status line is cleared with it - the scan status was a
-        restatement of the header, and the header is on the screen now.
+        current answer selects. The answer list then stands down: the region
+        heights are the contract, and a list of answers beside them would move
+        every row under it. The status line is cleared with it - the scan status
+        was a restatement of the header, and the header is on the screen now.
         """
-        lines = dashboard_lines(self.choice, metrics, self.previous,
+        lines = dashboard_lines(self.group, metrics, self.previous,
                                 self.capacity, wall_now=time.time())
         self.drawn = lines
         self.query_one("#dashboard", Static).update(styled_lines(lines))
         # The ask stands down to no rows instead of `display: none`: hiding the
         # focused list blurs it, and Textual then rebuilds the Footer a frame
-        # later - a frame in which the screen is one row short of its nineteen.
+        # later - a frame in which the screen is one row short of its contract.
         self.query_one("#ask").styles.height = 0
         self.query_one("#dashboard").display = True
         self._set_status("")
@@ -2104,7 +2223,7 @@ class TriageApp(App):
         """
         if self.metrics is None or not self.drawn:
             return
-        lines = dashboard_lines(self.choice, self.metrics, self.previous,
+        lines = dashboard_lines(self.group, self.metrics, self.previous,
                                 self.capacity, wall_now=time.time())
         if lines == self.drawn:
             return
@@ -2130,14 +2249,15 @@ class TriageApp(App):
             self._select(key)
 
     def action_cycle_group(self) -> None:
-        """Show the next evidence group: latency -> refusals -> stalls -> latency.
+        """Show the next evidence group: latency -> models -> refusals -> stalls.
 
-        `[g]` is for the person who wants the other three rows without answering
-        the question again. It selects the answer that names the group - the list
-        still holds the same six answers - and redraws, so the title, the three
-        rows and NEXT move and nothing else on the screen does.
+        `[g]` is for the person who wants the other groups without answering the
+        question again, and it is the only way to the per-model breakdown. It
+        rings the group the screen is showing, so the title, the group's rows and
+        NEXT move and nothing else on the screen does.
         """
-        self._select(_ANSWER_FOR_GROUP[next_group(pick_lead(self.choice))])
+        self.group = next_group(self.group)
+        self._redraw()
 
     def _select(self, choice_key: str) -> None:
         """Point the dashboard at one answer's group, redrawing it if it can.
@@ -2147,6 +2267,11 @@ class TriageApp(App):
         given twice.
         """
         self.choice = choice_key
+        self.group = pick_lead(choice_key)
+        self._redraw()
+
+    def _redraw(self) -> None:
+        """Draw the group on screen, or say why the screen cannot move yet."""
         if self.scan_failed is not None:
             self._set_status(f"the scan failed ({self.scan_failed}); "
                              f"there is no dashboard to show")

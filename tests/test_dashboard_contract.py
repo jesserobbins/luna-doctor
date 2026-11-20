@@ -1,18 +1,24 @@
-"""The dashboard contract: nineteen rows, seventy-eight cells, no sentences.
+"""The dashboard contract: nineteen rows, twenty with LATENCY, 78 cells.
 
 The dashboard redesign decided a screen, and this file holds the screen to that
 decision with properties over the drawn rows instead of over prose: every row
-fits 78 cells, the screen is nineteen rows in each of the five states, `█` means
-the account's lane count and nothing else, no row ends a sentence, no row names
-a day or a 7-day or 30-day window, the severity and trend words are closed
-sets, and the moon on a region title explains the moon on the header.
+fits 78 cells, the screen is eighteen drawn rows and nineteen when the LATENCY
+group's four tier rows are on it, `█` means the account's lane count and nothing
+else, no row ends a sentence, no row names a day or a 7-day or 30-day window,
+the severity and trend words are closed sets, and the moon on a region title
+explains the moon on the header.
+
+The one row latitude is the ruling that made the tiers independent: the LATENCY
+group draws a p50 and a p90 for each tier, four rows where the other two groups
+draw three, and the gateway's fixed wait - a constant with no trend - left the
+group so the screen grew by one row rather than two.
 
 The rows come from `tui.dashboard_lines(choice_key, metrics, previous, cap)`:
 the one pure function that draws the dashboard, in the order the screen draws
-it, without the Textual `Footer`. It returns eighteen plain strings - the rows
-the app mounts - and the app must draw exactly those, so that the screen tested
-here and the screen a person opens are one screen. The `Footer` is the
-nineteenth row: it renders the bindings and adds no number of its own.
+it, without the Textual `Footer`. It returns the plain strings the app mounts,
+and the app must draw exactly those, so that the screen tested here and the
+screen a person opens are one screen. The `Footer` draws under them: it renders
+the bindings and adds no number of its own.
 Everything else here is measured off those strings, so a row that moves, wraps,
 grows a sentence or wears a second moon fails.
 
@@ -48,11 +54,12 @@ FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 # is the hard cap on any row in any state.
 ROW_BUDGET = 78
 
-# The screen is nineteen rows in every state: the eighteen the mockups draw,
-# plus the Textual Footer that renders the bindings. The builders draw the
-# eighteen; the Footer is the nineteenth and adds no number of its own.
+# The screen is eighteen drawn rows in a state whose evidence group holds three,
+# and nineteen when LATENCY holds four: two percentiles for each of two tiers,
+# which is one more than the gateway row it retired. The builders draw those; the
+# Textual Footer draws under them and adds no number of its own.
 DRAWN_ROWS = 18
-SCREEN_ROWS = DRAWN_ROWS + 1
+LATENCY_GROUP_ROWS = {"LATENCY": 4, "REFUSALS": 3, "STALLS": 3}
 
 # The scan clock the five states are pinned to, and the one-hour window that
 # closes at it. The burst in the busy hour peaks at 14:07Z, which is one of the
@@ -77,7 +84,7 @@ HEDGES = re.compile(
 
 # The evidence group titles. Region 3 is the only region whose title and rows
 # change, and `LOAD` is the only title that never does.
-EVIDENCE_GROUPS = ("LATENCY", "REFUSALS", "STALLS")
+EVIDENCE_GROUPS = ("LATENCY", "MODELS", "REFUSALS", "STALLS")
 REGION_TITLES = ("LOAD",) + EVIDENCE_GROUPS
 
 _BLOCKS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
@@ -193,7 +200,7 @@ def _clock_epoch(clock: str = CLOCK) -> float:
 
 
 def _metrics(*, requests, peak, minutes, outcomes, tiers, latency,
-             capacity) -> dict:
+             capacity, models=()) -> dict:
     """What analyse() produces, reduced to the keys the dashboard reads."""
     dead = outcomes.get("admission_timeout", 0)
     done = outcomes.get("completed", 0)
@@ -207,6 +214,9 @@ def _metrics(*, requests, peak, minutes, outcomes, tiers, latency,
         "by_tier": dict(tiers),
         "by_harness": {"pi": requests},
         "latency_s": {tier: dict(values) for tier, values in latency.items()},
+        "latency_by": {"floor": 5, "suppressed": 0,
+                       "by_tier_model": [dict(cell) for cell in models],
+                       "by_tier_harness": [], "by_tier_outcome": []},
         "admission_conversion": {
             "interactive": {"completed": done, "admission_timeout": dead,
                             "admitted_pct": admitted},
@@ -251,6 +261,17 @@ _BUSY_DAY = {"day": "2026-11-01", "accepted": 900, "denied_after_wait": 1213,
 # The status moons, through the one gate that owns glyphs.
 GLYPHS = Style(color=False, emoji=True, motion=False)
 
+# The per-model half of the busy hour's latency: three models cleared
+# `latency_by`'s floor, one of them on the slow tier, so the MODELS group has
+# exactly the three rows a `[g]`-reached group draws.
+_BUSY_MODELS = (
+    {"cell": "interactive / glm-5.3", "n": 20, "p50": 95.0, "p90": 240.0, "max": 300.0},
+    {"cell": "background / glm-5.3-background", "n": 7, "p50": 400.0, "p90": 520.0,
+     "max": 600.0},
+    {"cell": "interactive / claude-opus-lr11", "n": 6, "p50": 130.0, "p90": 300.0,
+     "max": 340.0},
+)
+
 _PRESSURED_OUTCOMES = {"completed": 39, "admission_timeout": 3, "rate_limited": 11,
                        "org_concurrency_limit": 4}
 # The same hour with no admission block in it and no lane count to judge it
@@ -273,7 +294,7 @@ class Screen:
         self.lanes = lanes
 
     def lines(self) -> list[str]:
-        """The eighteen rows the dashboard draws, in the screen's order."""
+        """The rows the dashboard draws, in the screen's order."""
         return list(tui.dashboard_lines(self.choice, self.metrics, self.previous, self.cap))
 
     def __str__(self) -> str:
@@ -298,13 +319,15 @@ def _screens() -> list[Screen]:
         tiers={"interactive": 35, "background": 7},
         latency={"interactive": {"n": 39, "p50": 95.0, "p90": 240.0, "max": 300.0},
                  "background": {"n": 7, "p50": 400.0, "p90": 520.0, "max": 600.0}},
-        capacity=_capacity_block(_payload(busy_now), window_days=[_BUSY_DAY]))
+        capacity=_capacity_block(_payload(busy_now), window_days=[_BUSY_DAY]),
+        models=_BUSY_MODELS)
     quieter = _metrics(
         requests=35, peak=12, minutes=_OK_MINUTES,
         outcomes={"completed": 35},
         tiers={"interactive": 35},
         latency={"interactive": {"n": 35, "p50": 83.0, "p90": 202.0, "max": 260.0}},
-        capacity=_capacity_block(_payload(calm_now), window_days=[_DAY]))
+        capacity=_capacity_block(_payload(calm_now), window_days=[_DAY]),
+        models=_BUSY_MODELS)
     calm = _metrics(
         requests=9, peak=4, minutes=_OK_MINUTES,
         outcomes={"completed": 9},
@@ -349,21 +372,31 @@ class RowGeometry(unittest.TestCase):
                     cells(line), ROW_BUDGET,
                     f"the {screen} screen draws a {cells(line)}-cell row: {line!r}")
 
-    def test_the_screen_is_nineteen_rows_in_every_state(self):
-        """Eighteen drawn rows, one per position, plus the Textual Footer.
+    def test_the_screen_is_the_designed_height_in_every_state(self):
+        """Eighteen drawn rows plus the Footer, and one more when LATENCY is up.
 
         The count is the contract, not the content: a region that grows or drops
         a row moves every row under it, which is the scan pattern the design
-        forbids. The window with no traffic keeps its picture's two rows, empty,
-        rather than handing their place to the regions below.
+        forbids. The one exception is the ruling this file records - LATENCY's
+        second tier earns two rows of its own - so the group that is on screen
+        decides the height and nothing else does. The window with no traffic
+        keeps its picture's two rows, empty, rather than handing their place to
+        the regions below.
         """
         for screen in SCREENS:
             lines = screen.lines()
+            group = tui.pick_lead(screen.choice).upper()
+            expected = DRAWN_ROWS + LATENCY_GROUP_ROWS[group] - 3
             self.assertEqual(
-                DRAWN_ROWS, len(lines),
-                f"the {screen} screen draws {len(lines)} rows, not {DRAWN_ROWS}: "
+                expected, len(lines),
+                f"the {screen} screen draws {len(lines)} rows, not {expected}: "
                 + repr(lines))
-        self.assertEqual(19, SCREEN_ROWS, "the Footer is the nineteenth row")
+            title = next(i for i, line in enumerate(lines)
+                         if line.split()[:1] == [group])
+            end = next(i for i in rule_rows(lines) if i > title)
+            self.assertEqual(
+                LATENCY_GROUP_ROWS[group], end - title - 1,
+                f"the {screen} screen's {group} group holds {end - title - 1} rows")
 
     def test_the_two_ends_of_the_screen_are_chrome(self):
         """The header is the first row and the two key lines are the last two.
@@ -397,6 +430,25 @@ class RowGeometry(unittest.TestCase):
             chosen[screen.name] = groups[0]
         self.assertEqual("REFUSALS", chosen["refusals"])
         self.assertEqual("LATENCY", chosen["over capacity"])
+
+    def test_the_models_group_draws_one_row_per_model_on_the_same_grid(self):
+        """MODELS is reached with `[g]`, and it keeps §3.1's eighteen drawn rows.
+
+        One row per measured model, three at most, on the same 78-cell grid: the
+        region that `[g]` adds is a group, not a taller screen, so the Footer is
+        still the row under the key lines.
+        """
+        screen = SCREENS[0]
+        lines = tui.dashboard_lines("models", screen.metrics, screen.previous,
+                                    screen.cap)
+        self.assertEqual(DRAWN_ROWS, len(lines))
+        self.assertTrue(lines[9].startswith("MODELS "), lines[9])
+        self.assertEqual(3, len(tui.group_rows(tui.REGION_MODELS, screen.metrics,
+                                               screen.previous)))
+        for line in lines:
+            self.assertLessEqual(cells(line), ROW_BUDGET,
+                                 f"the models screen draws a wide row: {line!r}")
+            self.assertTrue(tui.dashboard_ok_row(line), line)
 
     def test_the_load_region_keeps_its_six_rows(self):
         """Title, three numbers, the picture's two rows: always six.
@@ -601,13 +653,14 @@ class TheAssembledScreen(unittest.TestCase):
     row on the screen even when no builder produced it.
     """
 
-    def test_the_rendered_screen_is_nineteen_rows(self):
+    def test_the_rendered_screen_is_the_designed_height(self):
+        """Twenty rows with LATENCY on it, and the Footer is the last of them."""
         screen = SCREENS[0]
         rows, scanned = _rendered(screen)
         self.assertTrue(scanned, "the scan never reached the screen, so nothing was drawn")
         drawn = [row for row in rows if row.strip()]
         self.assertEqual(
-            SCREEN_ROWS, len(drawn),
+            DRAWN_ROWS + 1 + LATENCY_GROUP_ROWS["LATENCY"] - 3, len(drawn),
             "the assembled screen paints these rows at 80x24:\n" + "\n".join(drawn))
         for row in drawn:
             self.assertLessEqual(cells(row), ROW_BUDGET,
@@ -636,7 +689,7 @@ def _rendered(screen: Screen, size=(80, 24)) -> tuple:
                 for _attempt in range(200):
                     await pilot.pause(0.02)
                     # The Footer is composed a frame after the rows land, so the
-                    # frame a person sees is the one that holds all nineteen.
+                    # frame a person sees is the one that holds all of them.
                     if app.metrics is not None and any(
                             "quit" in row for row in _painted(app)):
                         break

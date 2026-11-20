@@ -1,4 +1,4 @@
-"""The triage screen's data contract: one answer in, eighteen rows out.
+"""The triage screen's data contract: one answer in, the designed rows out.
 
 Every assertion reads the rows `tui.dashboard_lines` builds or the widgets the
 app mounts, so the suite runs offline and needs no terminal. Textual is an
@@ -190,6 +190,16 @@ def _dash(**over):
     return metrics
 
 
+def _models(busy=True):
+    """The per-model cells `cli.latency_by` fills, most samples first."""
+    cells = (("interactive / glm-5.3", 20, 95.0, 240.0),
+             ("background / glm-5.3-background", 7, 400.0, 520.0),
+             ("interactive / claude-opus-lr11", 6, 130.0, 300.0))
+    return {"floor": 5, "suppressed": 0, "by_tier_harness": [], "by_tier_outcome": [],
+            "by_tier_model": [{"cell": cell, "n": n, "p50": p50, "p90": p90, "max": p90}
+                              for cell, n, p50, p90 in cells]}
+
+
 def _busy(**over):
     """The owner's window: 42 requests, peak 17 against 12 lanes, 3 blocked."""
     metrics = _dash(
@@ -198,7 +208,8 @@ def _busy(**over):
         by_tier={"interactive": 35, "background": 7},
         peak_concurrency=17,
         latency_s={"interactive": {"n": 39, "p50": 95.0, "p90": 240.0, "max": 300.0},
-                   "background": {"n": 7, "p50": 400.0, "p90": 520.0, "max": 600.0}})
+                   "background": {"n": 7, "p50": 400.0, "p90": 520.0, "max": 600.0}},
+        latency_by=_models())
     metrics.update(over)
     return metrics
 
@@ -209,6 +220,7 @@ def _busy_before():
         requests=40, by_outcome={"completed": 40}, by_tier={"interactive": 40},
         peak_concurrency=12, latency_s={"interactive": {"n": 35, "p50": 83.0,
                                                         "p90": 202.0, "max": 260.0}},
+        latency_by=_models(),
         by_minute=_by_minute(((1, 3), (20, 5), (40, 4)), start=_HOUR_START))
 
 
@@ -225,6 +237,20 @@ def _empty():
     """An hour with no traffic at all: nothing was measured here."""
     return _dash(requests=0, by_outcome={}, by_tier={}, peak_concurrency=None,
                  saturated=0, latency_s={}, by_minute=[])
+
+
+# The rows the screen draws for each answer: every group holds three rows except
+# LATENCY, which holds one row per tier and percentile. The Footer draws under
+# them and is not one of these.
+ROWS_FOR_ANSWER = {"slow": 19, "checking": 19, "concurrency": 18, "stuck": 18,
+                   "failing": 18, "finish_reason": 18}
+
+# The height of the group a region title names, read off the answer that selects
+# it: `[g]` can put any of the three on screen, and LATENCY is the taller one.
+ROWS_FOR_GROUP = {"latency": ROWS_FOR_ANSWER["slow"],
+                  "models": ROWS_FOR_ANSWER["slow"] - 1,
+                  "refusals": ROWS_FOR_ANSWER["concurrency"],
+                  "stalls": ROWS_FOR_ANSWER["stuck"]}
 
 
 def _painted(app) -> list[str]:
@@ -287,11 +313,18 @@ class TriageChoices(unittest.TestCase):
             [tui.pick_lead(key) for _text, key in tui.TRIAGE_CHOICES])
 
     def test_the_selection_names_a_region_the_screen_draws(self):
-        """One spelling per concept: the selector answers in the same three
-        region kinds `region_moon` and the region title use."""
-        self.assertEqual(
-            set(tui.EVIDENCE_GROUPS),
-            {tui.pick_lead(key) for _text, key in tui.TRIAGE_CHOICES})
+        """One spelling per concept: the selector answers in the same region
+        kinds `region_moon` and the region title use.
+
+        The six answers reach three of the four groups; MODELS is the per-model
+        reading of the same latency, so no answer on the list means it and `[g]`
+        is how a person gets there.
+        """
+        selected = {tui.pick_lead(key) for _text, key in tui.TRIAGE_CHOICES}
+        self.assertEqual({tui.REGION_LATENCY, tui.REGION_REFUSALS,
+                          tui.REGION_STALLS}, selected)
+        self.assertEqual(selected | {tui.REGION_MODELS},
+                         set(tui.EVIDENCE_GROUPS))
         for group in tui.EVIDENCE_GROUPS:
             self.assertIn(group, tui.REGION_KINDS)
             self.assertNotEqual(tui.REGION_LOAD, group)
@@ -327,8 +360,10 @@ class TheDashboardsOrder(unittest.TestCase):
         self.cap = _cap(_payload("capacity-2026-11-02.json"))
 
     def test_the_rows_run_header_load_evidence_next(self):
+        # The default answer is "just checking", so the group on screen is LATENCY
+        # and it draws its four tier rows.
         lines = _lines(cap=self.cap)
-        self.assertEqual(18, len(lines))
+        self.assertEqual(19, len(lines))
         self.assertTrue(lines[0].startswith(tui.moon_glyph(tui.header_moon(_busy()))))
         self.assertEqual(tui.RULE, lines[1])
         self.assertTrue(lines[2].startswith("LOAD "))
@@ -336,17 +371,17 @@ class TheDashboardsOrder(unittest.TestCase):
         self.assertTrue(lines[7].startswith(" "), "its caption sits under it")
         self.assertEqual(tui.RULE, lines[8])
         self.assertTrue(lines[9].startswith("LATENCY "))
-        self.assertEqual(tui.RULE, lines[13])
-        self.assertTrue(lines[14].startswith("NEXT  "))
-        self.assertTrue(lines[15].startswith("→ luna-doctor "))
-        self.assertEqual(tui.key_lines(_busy(), self.cap), lines[16:])
+        self.assertEqual(tui.RULE, lines[14])
+        self.assertTrue(lines[15].startswith("NEXT  "))
+        self.assertTrue(lines[16].startswith("→ luna-doctor "))
+        self.assertEqual(tui.key_lines(_busy(), self.cap), lines[17:])
 
     def test_the_answer_swaps_the_evidence_group_and_nothing_above_it(self):
         slow = _lines("slow", cap=self.cap)
         refusals = _lines("concurrency", cap=self.cap)
         self.assertEqual(slow[:9], refusals[:9], "a region above the group moved")
         self.assertTrue(refusals[9].startswith("REFUSALS "))
-        self.assertNotEqual(slow[10:13], refusals[10:13])
+        self.assertNotEqual(slow[10:14], refusals[10:13])
 
     def test_the_header_word_and_moon_come_from_the_cli_verdict(self):
         """One verdict: the header asks `cli.verdict` and `report.status_moon`,
@@ -371,21 +406,21 @@ class TheDashboardsOrder(unittest.TestCase):
         peak = [line for line in lines if line.strip().startswith("peak")]
         self.assertEqual(1, len(peak))
         self.assertNotIn("lower bound", peak[0])
-        self.assertIn("(a lower bound)", lines[16])
+        self.assertIn("(a lower bound)", lines[17])
 
     def test_the_two_key_lines_close_the_screen(self):
         """§6.2 item 10: provenance on one line, the moons on the other."""
         lines = _lines(cap=self.cap)
-        self.assertIn("account", lines[16])
-        self.assertIn(tui.moon_glyph(report.MOON_NEW), lines[17])
-        for line in (lines[16], lines[17]):
+        self.assertIn("account", lines[17])
+        self.assertIn(tui.moon_glyph(report.MOON_NEW), lines[18])
+        for line in (lines[17], lines[18]):
             self.assertLessEqual(_cells(line), tui.HEADER_CELLS)
 
     def test_a_window_that_claims_no_status_keys_the_plain_moon(self):
         """A key to a glyph nobody drew is decoration; a glyph on screen is not."""
         lines = _lines("slow", _empty(), None, self.cap)
         self.assertEqual(tui.moon_glyph("moon"), lines[0][0])
-        self.assertTrue(lines[17].startswith(tui.moon_glyph("moon")))
+        self.assertTrue(lines[18].startswith(tui.moon_glyph("moon")))
 
     def test_the_region_titles_name_what_the_delta_compares(self):
         lines = _lines(cap=self.cap)
@@ -450,16 +485,15 @@ class TheKilledRows(unittest.TestCase):
                 for word in banned:
                     self.assertNotIn(word, line, f"{answer}: {line!r}")
 
-    def test_the_two_latency_tiers_never_share_a_row_again(self):
-        """The tier split was one number's worth of information; the latency
-        group carries the interactive p50, p90 and the gateway's fixed wait."""
+    def test_each_latency_tier_keeps_its_own_rows(self):
+        """The tier split was one number's worth of information; the latency group
+        carries a p50 and a p90 for each tier, and the labels say which is which."""
         lines = _lines("slow", self.metrics, _busy_before(), self.cap)
-        latency = lines[10:13]
-        self.assertIn("p50", latency[0])
-        self.assertIn("p90", latency[1])
-        self.assertIn("gateway", latency[2])
-        for line in latency:
-            self.assertNotIn("background", line)
+        latency = lines[10:14]
+        self.assertEqual(["p50 pri", "p90 pri", "p50 bg", "p90 bg"],
+                         [line[1:13].strip() for line in latency])
+        self.assertIn("400s", latency[2], "the background tier's own p50")
+        self.assertIn("520s", latency[3], "the background tier's own p90")
 
     def test_the_slow_tier_appears_only_where_a_refusal_explains_it(self):
         refusals = _lines("concurrency", self.metrics, _busy_before(), self.cap)
@@ -518,9 +552,9 @@ class EveryNullIsUnknown(unittest.TestCase):
         lines = _lines("slow", metrics, _busy_before(), None)
         self.assertIn("max", lines[0], "the header names the declared plan")
         self.assertIn("%s4 lanes" % badges.BADGE_DECLARED, lines[0])
-        self.assertIn("Hold 4 in flight", lines[14], "the advice reads the declaration")
-        self.assertTrue(lines[16].endswith("%s declared" % badges.BADGE_DECLARED),
-                        lines[16])
+        self.assertIn("Hold 4 in flight", lines[15], "the advice reads the declaration")
+        self.assertTrue(lines[17].endswith("%s declared" % badges.BADGE_DECLARED),
+                        lines[17])
 
 
 # ---- the age of the dashboard's data, live --------------------------------
@@ -564,7 +598,7 @@ class TheAgeOfTheData(unittest.TestCase):
         lines = tui.dashboard_lines("slow", _busy(), _busy_before(), self.cap,
                                     _CLOCK + 120)
         self.assertTrue(lines[0].endswith("age 2m"), lines[0])
-        self.assertEqual(18, len(lines), "the age lives in a row, it does not add one")
+        self.assertEqual(19, len(lines), "the age lives in a row, it does not add one")
 
     def test_a_quiet_call_dates_the_scan_it_was_given(self):
         """No wall clock names no moment: the data is as old as its own scan."""
@@ -708,11 +742,13 @@ class BothPoolsOnTheNowRow(unittest.TestCase):
 
 # ---- every row on the fixed grid, in every state, with an aged scan -------
 class TheGridHoldsInEveryState(unittest.TestCase):
-    """Eighteen rows, 78 cells, five states - and the age never breaks either.
+    """The designed height, 78 cells, five states - and the age breaks neither.
 
     The age is a new cell in an existing row, so the contract that has to survive
     it is the old one: the geometry does not move, and no row outgrows the
-    budget, however long the screen has been open.
+    budget, however long the screen has been open. The height is the group's:
+    LATENCY holds four rows and the other two hold three, which is the one place
+    the screen is taller than the eighteen rows the mockups draw.
     """
 
     def _states(self):
@@ -727,12 +763,13 @@ class TheGridHoldsInEveryState(unittest.TestCase):
              _cap(_degraded_payload())),
         ]
 
-    def test_every_state_is_eighteen_rows_inside_the_budget(self):
+    def test_every_state_is_the_designed_height_inside_the_budget(self):
         for name, answer, metrics, previous, cap in self._states():
             for wall_now in (None, (metrics.get("scanned_at") or 0) + 3600):
                 lines = tui.dashboard_lines(answer, metrics, previous, cap,
                                             wall_now)
-                self.assertEqual(18, len(lines), name)
+                self.assertEqual(ROWS_FOR_ANSWER[answer], len(lines),
+                                 f"{name}: {answer}")
                 for line in lines:
                     self.assertLessEqual(_cells(line), tui.ROW_CELLS,
                                          f"{name}: {line!r}")
@@ -740,7 +777,7 @@ class TheGridHoldsInEveryState(unittest.TestCase):
 
     def test_the_age_is_a_cell_and_not_a_row(self):
         lines = tui.dashboard_lines("slow", _busy(), _busy_before(), None)
-        self.assertEqual(18, len(lines))
+        self.assertEqual(19, len(lines))
         self.assertEqual(1, sum(1 for line in lines if "age " in line))
 
 
@@ -802,17 +839,16 @@ class TheEmptyWindow(unittest.TestCase):
         self.assertNotRegex(peak, r"\d+$", "a peak nobody measured quotes no number")
 
     def test_the_latency_rows_say_what_is_missing(self):
-        p50, p90, gateway = self.lines[10:13]
-        self.assertIn("p50", p50)
-        self.assertIn("p90", p90)
-        self.assertIn("gateway", gateway)
-        for line in (p50, p90):
+        tier_rows = self.lines[10:14]
+        self.assertEqual(["p50 pri", "p90 pri", "p50 bg", "p90 bg"],
+                         [line[1:13].strip() for line in tier_rows])
+        for line in tier_rows:
             self.assertIn(tui._BADGE_UNKNOWN, line)
             self.assertNotRegex(line, r"\d+s", "no percentile was measured here")
 
     def test_the_next_row_widens_the_window_instead_of_naming_a_number(self):
-        self.assertIn("Nothing measured in the last hour", self.lines[14])
-        self.assertIn("--since 6h", self.lines[15])
+        self.assertIn("Nothing measured in the last hour", self.lines[15])
+        self.assertIn("--since 6h", self.lines[16])
 
 
 # ---- (f) the stalls group carries the slowest digest ----------------------
@@ -874,7 +910,7 @@ class TheHelpOverlay(unittest.TestCase):
 
     The dashboard carries one imperative and two gloss lines on purpose (§7 rule
     2), so the rest of the vocabulary lives here. It is a modal screen, which is
-    what lets the eighteen rows underneath stay exactly where they were.
+    what lets the rows underneath stay exactly where they were.
     """
 
     # Textual's own key name for the glyph on the cap.
@@ -1006,7 +1042,7 @@ class TheSeverityColours(unittest.TestCase):
         styled = tui.styled_lines(self.lines)
         self.assertEqual("\n".join(self.lines), str(styled))
         self.assertEqual(_cells("\n".join(self.lines)), _cells(str(styled)))
-        self.assertEqual(18, len(str(styled).splitlines()))
+        self.assertEqual(19, len(str(styled).splitlines()))
 
     def test_the_status_word_wears_its_moons_colour(self):
         name = tui.header_moon(_busy())
@@ -1054,7 +1090,7 @@ class TheSeverityColours(unittest.TestCase):
                 # it rather than counting whatever the first frame happened to hold.
                 await self._settle(pilot, lambda: any("quit" in row for row in _painted(app)))
                 painted = [row for row in _painted(app) if row.strip()]
-                self.assertEqual(19, len(painted), "the mono screen lost a row")
+                self.assertEqual(20, len(painted), "the mono screen lost a row")
                 self.assertEqual(self.lines, self._dashboard(app))
                 await pilot.press("q")
 
@@ -1217,15 +1253,16 @@ class TheWindowKeyOnTheScreen(unittest.TestCase):
 
 
 class TheGroupKeyOnTheScreen(unittest.TestCase):
-    """[g] steps through the evidence groups: latency -> refusals -> stalls.
+    """[g] steps through the groups: latency -> models -> refusals -> stalls.
 
     The answer list is only up while the scan runs, so this is how a person asks
-    for the other three rows afterwards. The groups are a ring, and the ring
-    never moves a row: the title, the three rows and NEXT change, and the
-    nineteen-row geometry holds.
+    for another group afterwards, and it is the only way to the per-model
+    breakdown. The groups are a ring: every row above the group keeps its place,
+    and the screen's height is the height of the group on screen - four tier rows
+    for LATENCY, three for the other three.
     """
 
-    def test_next_group_rings_the_three_groups(self):
+    def test_next_group_rings_the_evidence_groups(self):
         seen, group = [], tui.EVIDENCE_GROUPS[0]
         for _step in range(len(tui.EVIDENCE_GROUPS)):
             seen.append(group)
@@ -1235,7 +1272,7 @@ class TheGroupKeyOnTheScreen(unittest.TestCase):
         self.assertEqual(tui.EVIDENCE_GROUPS[0], tui.next_group("prose"),
                          "a group the dashboard does not offer lands on the first")
 
-    def test_g_cycles_the_group_and_keeps_the_nineteen_rows(self):
+    def test_g_cycles_the_group_and_each_group_keeps_its_height(self):
         asyncio.run(self._drive())
 
     async def _drive(self):
@@ -1252,19 +1289,29 @@ class TheGroupKeyOnTheScreen(unittest.TestCase):
                 await self._settle(pilot, lambda: app.metrics is not None)
                 opened = self._dashboard(app)
                 self.assertTrue(opened[9].startswith("LATENCY "), opened[9])
+                self.assertEqual(ROWS_FOR_GROUP["latency"], len(opened))
                 titles = []
-                for _press in range(3):
+                for _press in range(4):
                     await pilot.press("g")
                     await pilot.pause()
                     drawn = self._dashboard(app)
-                    self.assertEqual(18, len(drawn), "a group never grows the screen")
+                    title = drawn[9].split()[0].lower()
+                    self.assertEqual(ROWS_FOR_GROUP[title], len(drawn),
+                                     "the group on screen decides the height")
                     self.assertEqual(opened[:9], drawn[:9],
                                      "a region above the group moved")
-                    titles.append(drawn[9].split()[0])
-                self.assertEqual(["REFUSALS", "STALLS", "LATENCY"], titles)
+                    if title == "models":
+                        # The group `[g]` exists for: one row per model, the
+                        # model's name in the label cell and its p90 in the clause.
+                        self.assertIn(" glm-5.3", drawn[10], drawn[10])
+                        self.assertIn("p90 240s", drawn[10], drawn[10])
+                        self.assertIn("400s", drawn[11], drawn[11])
+                    titles.append(title.upper())
+                self.assertEqual(["MODELS", "REFUSALS", "STALLS", "LATENCY"],
+                                 titles)
                 painted = [row for row in _painted(app) if row.strip()]
-                self.assertEqual(19, len(painted),
-                                 "the eighteen rows and the Footer, still")
+                self.assertEqual(ROWS_FOR_GROUP["latency"] + 1, len(painted),
+                                 "the drawn rows and the Footer under them")
                 await pilot.press("q")
 
     @staticmethod
@@ -1318,7 +1365,7 @@ class TheDashboardOnTheScreen(unittest.TestCase):
     screen.
     """
 
-    def test_the_scan_lands_as_the_eighteen_rows_and_the_footer(self):
+    def test_the_scan_lands_as_the_designed_rows_and_the_footer(self):
         asyncio.run(self._drive())
 
     async def _drive(self):
@@ -1329,7 +1376,8 @@ class TheDashboardOnTheScreen(unittest.TestCase):
             async with app.run_test(size=(80, 24)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
                 drawn = self._dashboard(app)
-                self.assertEqual(18, len(drawn.splitlines()), drawn)
+                self.assertEqual(ROWS_FOR_ANSWER[tui.DEFAULT_CHOICE],
+                                 len(drawn.splitlines()), drawn)
                 self.assertTrue(drawn.splitlines()[0].startswith(
                     tui.moon_glyph(tui.header_moon(_busy()))))
                 self.assertIn("LATENCY", drawn)
