@@ -1,26 +1,26 @@
-"""The triage screen: one question, one hour, one provenance-badged verdict.
+"""The triage screen: a dashboard of nineteen rows, in every one of its states.
 
-Bare `luna-doctor` on a terminal opens this instead of argparse help: it asks
-what the person is seeing, scans the last hour of local logs and the cached
-account capacity while the question is on screen, and lands on one verdict with
-the next action. `[w]` cycles the window 1h -> 6h -> 24h, and every number and
-the picture are re-read for the window it lands on.
+Bare `luna-doctor` on a terminal opens this instead of argparse help: it fixes
+four regions on the screen - the status header, LOAD, one evidence group and
+NEXT - and fills them the moment the scan of the last hour lands. `[w]` cycles
+the window 1h -> 6h -> 24h, and every number and the picture are re-read for
+the window it lands on.
 
-Everything that decides what a reader sees - TRIAGE_CHOICES, pick_lead, the
-three row builders and build_verdict_rows - is a pure function of a metrics
-dict, a Capacity payload and the chosen answer, so the suite can test it
-offline and without a terminal. Only TriageApp needs Textual, which is the
-optional `luna-doctor[tui]` extra: this module imports it at the top, and the
-caller (cli.main) guards the import so a machine without the extra falls back
-to the linear path.
+Everything that decides what a reader sees is a pure function: the header and
+its moons, the three LOAD rows, the evidence groups, the NEXT region, the two
+key lines, and `dashboard_lines`, which assembles them into the eighteen rows
+the screen draws. The Textual `Footer` renders the bindings and is the
+nineteenth. Each builder is a function of a metrics dict, the previous
+window, a Capacity payload and the chosen answer, so the suite can test the
+whole screen offline and without a terminal. Only TriageApp needs Textual,
+which is the optional `luna-doctor[tui]` extra: this module imports it at the
+top, and the caller (cli.main) guards the import so a machine without the
+extra falls back to the linear path.
 
-The panels are in ranked-trust order: what the account reports first (●), then
-what this machine's logs show (○), then the verdict. Every number carries its
-badge, and one legend line names all three.
-
-The screen is an orientation dashboard, not a report: no panel holds more than
-four rows, one sparkline carries the window's shape, and the detail stays in
-`analyze`, `explain`, `capacity` and `chart`, which the screen shells out to.
+The dashboard is not a report: a data row is a label, a badge, a number, a
+delta and one fact, exactly one row carries an imperative, and the detail stays
+in `analyze`, `explain`, `capacity` and `chart`, which the screen shells out
+to.
 """
 
 from __future__ import annotations
@@ -35,12 +35,11 @@ from datetime import datetime, timezone
 from typing import NamedTuple
 
 from rich.cells import cell_len
-from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
-from textual.widgets import Label, ListItem, ListView, Static
+from textual.containers import Vertical, VerticalScroll
+from textual.widgets import Footer, Label, ListItem, ListView, Static
 
 from luna_doctor import attribution, badges, baseline, cli, explain, report, sources
 from luna_doctor.style import Style
@@ -59,10 +58,6 @@ SPARK_WIDTH = 60
 # Eight blocks, lowest first: the ramp cli.duration_sparkline prints.
 _SPARK_BLOCKS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
 
-PANEL_ACCOUNT = "What the account reports (authoritative)"
-PANEL_LOCAL = "What this machine's logs show (informative, a lower bound)"
-PANEL_VERDICT = "Verdict"
-
 # The six on-screen answers, in the order the design draws them.
 TRIAGE_CHOICES: list[tuple[str, str]] = [
     ("Requests failing or hanging", "failing"),
@@ -72,6 +67,11 @@ TRIAGE_CHOICES: list[tuple[str, str]] = [
     ("Agent seems stuck mid-task", "stuck"),
     ("Nothing yet, just checking", "checking"),
 ]
+
+# The answer the dashboard opens on: the group a quiet screen shows. A person
+# answers before the scan lands, and the dashboard fills with that answer's
+# group either way.
+DEFAULT_CHOICE = "checking"
 
 # Which evidence group each answer selects. The answer chooses which three rows
 # stand under the picture; it never gates the screen, and it never changes
@@ -126,24 +126,6 @@ def _count(value):
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
-
-
-def _sec(value) -> str:
-    return "unknown" if value is None else f"{value}s"
-
-
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(\"'\u2018\u201c])")
-
-
-def first_sentence(text: str) -> str:
-    """The first sentence of a piece of CLI prose, stripped.
-
-    A sentence ends at a full stop, a question mark or an exclamation mark
-    followed by whitespace and something that starts a sentence. The screen
-    keeps one sentence of the verdict's prose, so this is the seam that
-    decides where the report takes over.
-    """
-    return _SENTENCE_END.split((text or "").strip(), maxsplit=1)[0].strip()
 
 
 # ---- the header: the conclusion, its direction, and the width -------------
@@ -483,15 +465,18 @@ def regions_satisfy_invariant(header_glyph: str,
 # naming a field. The rest (one imperative, active voice, units in the label, a
 # one-clause qualifier) are read by a person. A helper the suite can call is what
 # keeps the mechanical three from drifting.
-_SENTENCE_STOP = re.compile(r"[.!]")
+# A full stop ends a sentence when it ends a word: the dot in a duration
+# (`312.4s`) or a version is part of the number, not the end of a sentence.
+_SENTENCE_STOP = re.compile(r"\.(?=\s|$)|!")
 _FIELD_PAREN = re.compile(r"\([^)]*[`_][^)]*\)")
 
 
 def dashboard_ok_row(text: str) -> bool:
     """Whether one row obeys the copy rules and the width budget (§3.2, §7).
 
-    - No sentence-final stop: a full stop or an exclamation mark means a sentence
-      arrived, and a row is not a sentence. `?` is allowed where it is the unknown
+    - No sentence-final stop: a full stop that ends a word, or an exclamation
+      mark, means a sentence arrived, and a row is not a sentence. The dot in
+      `312.4s` is a decimal, not a stop. `?` is allowed where it is the unknown
       glyph (`? lanes`, `? plan`) and rejected at the end of a row, where it
       would be a question.
     - No row wider than 78 terminal cells, measured in cells rather than code
@@ -509,36 +494,6 @@ def dashboard_ok_row(text: str) -> bool:
     return not _FIELD_PAREN.search(text)
 
 
-# ---- the account panel: what the account reports (●) -----------------------
-def account_rows(metrics: dict, cap) -> list[tuple[str, str]]:
-    """The account's own numbers, one row per fact, badged ●.
-
-    Every row is read from the Capacity payload with its nulls intact: a null
-    is unknown and gets the "?" badge with its reason, never a zero. The
-    priority pool's occupancy is qualified by its ledger, so a count served
-    beside a ledger that is not "up" is advisory and never wears the
-    authoritative badge. The two overflow-pool null shapes stay apart: a cap
-    that could not be read is unknown, a zero cap is a closed pool. Refusal
-    words appear only where the admission counts put them.
-
-    A plan the person declared still gets its row when no payload is cached:
-    --plan exists so the ◌ declared width can appear at the front door, and a
-    missing payload is no reason to hide a declaration the reader typed.
-    """
-    if cap is None:
-        rows = [(_BADGE_UNKNOWN,
-                 "the account did not answer: no capacity payload is cached "
-                 "(`luna-doctor capacity --online` fetches one)")]
-        if (metrics or {}).get("declared_plan"):
-            rows.append(_width_row(metrics, None))
-        return rows
-    rows = [_width_row(metrics, cap)]
-    rows.extend(_occupancy_rows(cap))
-    rows.extend(_overflow_rows(cap))
-    rows.extend(_admission_rows(cap))
-    return rows
-
-
 def resolved_lanes(metrics: dict, cap) -> tuple:
     """The priority concurrency this screen judges against, and whose it is.
 
@@ -551,303 +506,6 @@ def resolved_lanes(metrics: dict, cap) -> tuple:
     served = config.to_dict() if hasattr(config, "to_dict") else None
     return attribution.resolve_priority_concurrency(
         served, (metrics or {}).get("declared_plan"))
-
-
-def _width_row(metrics: dict, cap) -> tuple[str, str]:
-    """The priority concurrency the verdict is judged against, and whose it is.
-
-    attribution.resolve_priority_concurrency decides account first, then a
-    --plan declaration, and this row wears the badge that decision reports:
-    ● when the account said the number, ◌ when a person declared it.
-    """
-    value, source = resolved_lanes(metrics, cap)
-    if value is None:
-        return (_BADGE_UNKNOWN,
-                "priority concurrency not reported by the account, and no --plan "
-                "declared (unknown)")
-    where = "" if source == "account" else f" ({source})"
-    return (badges.badge_for(source),
-            f"priority concurrency {value}, {badges.badge_help(source)}{where}")
-
-
-def _occupancy_rows(cap) -> list[tuple[str, str]]:
-    """The priority pool's live occupancy, with the ledger and sample behind it.
-
-    The flat `now` fields cover the priority pool only. The occupancy is
-    qualified by the ledger: when the ledger is not "up", the count is
-    advisory and the row says it may be stale or missing, because a pool line
-    that looks authoritative over an unhealthy ledger is a claim nobody
-    measured. The ledger and the sample time share this row: the dashboard
-    orients, and `capacity` prints the whole block.
-    """
-    now = cap.now
-    if now is None:
-        return [(_BADGE_UNKNOWN, "live occupancy not reported by the account (unknown)")]
-    in_use, limit, available = (cli._cap_field(now, "in_use"),
-                                cli._cap_field(now, "limit"),
-                                cli._cap_field(now, "available"))
-    if in_use is None and limit is None:
-        occupancy = "occupancy unknown (not reported)"
-    elif in_use is None:
-        occupancy = f"in use unknown (not reported) · limit {limit}"
-    elif limit is None:
-        occupancy = f"in use {in_use} · limit unknown (not reported)"
-    else:
-        occupancy = f"in use {in_use} of {limit} priority concurrent requests"
-    if available is not None:
-        occupancy += f" · {available} available"
-    ledger = cli._cap_field(now, "ledger")
-    sampled = cli._cap_field(now, "sampled_at")
-    saturated = cli._cap_field(now, "saturated")
-    if saturated is not None:
-        occupancy += f" · saturated: {cli._cap_flag(saturated)}"
-    if ledger == "up":
-        # A row that prints an unread count or an unread sample time is not a
-        # line the account reported, so it must not wear the account's badge.
-        known = in_use is not None and sampled is not None
-        badge = (badges.badge_for(sources.PROV_ACCOUNT) if known else _BADGE_UNKNOWN)
-        text = (f"priority pool {occupancy} · ledger up, sampled at "
-                f"{cli._cap_unknown(sampled)}")
-    else:
-        badge = _BADGE_UNKNOWN
-        text = (f"priority pool {occupancy}, but the ledger is "
-                f"{cli._cap_unknown(ledger)}, so the count may be stale or "
-                f"missing · sampled at {cli._cap_unknown(sampled)}")
-    if getattr(cap, "stale", False):
-        text += "; the cache is past its time to live, so run `luna-doctor capacity --online`"
-    return [(badge, text)]
-
-
-def _overflow_rows(cap) -> list[tuple[str, str]]:
-    """The overflow pool, as its own row: overflow traffic never appears in the
-    priority pool's in_use.
-
-    The wording is the capacity report's own (`cli._cap_pool_now`), so both
-    surfaces name the same shapes with the same words. An absent block is
-    unknown, not a closed pool. The two null shapes are different facts and are
-    rendered differently: `limit: null` is a cap that could not be read,
-    `limit: 0` is a closed pool the account is entitled to no overflow on, which
-    is never saturated. The saturated flag is reported as an observation
-    ("saturated: yes"), never as a refusal.
-
-    The authoritative badge follows the same rule as the priority pool's
-    occupancy row: a cap beside a count nobody could read is not a line the
-    account reported. A closed pool rests on its cap alone, so it keeps ●.
-    """
-    pool = cli._cap_field(getattr(cap, "now", None), "background")
-    text = "overflow pool: " + cli._cap_pool_now(pool)
-    limit = cli._cap_field(pool, "limit")
-    if limit == 0 and not isinstance(limit, bool):
-        return [(badges.badge_for(sources.PROV_ACCOUNT), text)]
-    if pool is not None:
-        text += f" · saturated: {cli._cap_flag(cli._cap_field(pool, 'saturated'))}"
-    read = limit is not None and cli._cap_field(pool, "in_use") is not None
-    badge = badges.badge_for(sources.PROV_ACCOUNT) if read else _BADGE_UNKNOWN
-    return [(badge, text)]
-
-
-# The admission counts as the report's prose names them: the API field name is
-# a field name, and "denied" here is the same class the CLI calls a block.
-_ADMISSION_CLASSES = (
-    ("denied_after_wait", "denied after waiting"),
-    ("denied", "blocked at admission"),
-    ("deferred", "deferred"),
-)
-
-
-def _admission_rows(cap) -> list[tuple[str, str]]:
-    """The admission record over complete UTC days, beside the days it covers.
-
-    The counts are the API's own; the wording is the capacity report's ("denied
-    after waiting", "blocked at admission"), so the same class reads the same
-    way on both surfaces, and the days a count happened on are named where the
-    list stays short. The in-progress day is never included by the API.
-    """
-    days = sources.capacity_admission_days(cap)
-    if not days:
-        return [(_BADGE_UNKNOWN,
-                 "the account's admission record is not available (unknown)")]
-    totals: dict[str, int] = {}
-    for _day, entry in days:
-        for name, _phrase in _ADMISSION_CLASSES:
-            value = _count(entry.get(name))
-            if value:
-                totals[name] = totals.get(name, 0) + value
-    window = f"admission last {len(days)} complete UTC day(s) through {days[-1][0]}"
-    if not totals:
-        return [(badges.badge_for(sources.PROV_ACCOUNT),
-                 f"{window}: no request was blocked at admission or after waiting")]
-    bits = []
-    for name, phrase in _ADMISSION_CLASSES:
-        if not totals.get(name):
-            continue
-        bit = f"{phrase} {totals[name]}"
-        if name == "denied_after_wait":
-            named = [day for day, entry in days if _count(entry.get(name))]
-            if 0 < len(named) <= 4:
-                bit += f" on {', '.join(named)}"
-        bits.append(bit)
-    return [(badges.badge_for(sources.PROV_ACCOUNT),
-             f"{window}: " + " · ".join(bits))]
-
-
-# ---- the local panel: what this machine's logs show (○) --------------------
-def local_rows(choice_key: str, metrics: dict) -> list[tuple[str, str]]:
-    """What this machine's logs show, badged ○: informative, a lower bound.
-
-    Every count here is a measurement of these logs, so other machines are
-    invisible and the peak is a floor, not a total. Nothing sums a measured
-    count with a configured width. The answer picks which evidence follows the
-    peak (pick_lead), so the classes the person named come first.
-
-    This panel is the screen's old local column, and `group_rows` is what
-    replaces it: the same three facts on the fixed grid, selected by the same
-    answer. Until the panel goes, it dispatches on that group so one selector
-    answers for both surfaces.
-    """
-    rows = []
-    peak = _count(metrics.get("peak_concurrency"))
-    if peak is None:
-        rows.append((_BADGE_MEASURED,
-                     "peak concurrency not measured in this window"))
-    else:
-        rows.append((_BADGE_MEASURED,
-                     f"peak {peak} concurrent, {badges.badge_help(sources.PROV_MEASURED)} "
-                     f"- other machines are invisible to these logs"))
-    group = pick_lead(choice_key)
-    if group == REGION_LATENCY:
-        rows.extend(_latency_rows(metrics))
-    elif group == REGION_STALLS:
-        rows.extend(_stuck_rows(metrics))
-    else:
-        rows.extend(_admission_evidence_rows(metrics))
-    return rows
-
-
-def _outcome_rows(metrics: dict, classes) -> list[tuple[str, str]]:
-    """One row naming every outcome class the answer is about that counted.
-
-    The classes share the row: the dashboard orients, and `analyze` still
-    prints each class on its own line with its own count.
-    """
-    by_outcome = metrics.get("by_outcome") or {}
-    bits = []
-    for name, phrase in classes:
-        count = _count(by_outcome.get(name))
-        if count:
-            bits.append(f"{count} request(s) {phrase}")
-    if not bits:
-        return []
-    return [(_BADGE_MEASURED, " · ".join(bits))]
-
-
-_PRESSURE_CLASSES = (
-    ("admission_timeout", "blocked at admission here (`scheduler admission timeout`)"),
-    ("rate_limited", "rejected with a 429 (`rate_limit_error`)"),
-    ("org_concurrency_limit", "rejected at the account's concurrent-request limit"),
-    ("client_idle_timeout", "stalled until the harness's own idle budget killed them"),
-)
-
-
-def _admission_evidence_rows(metrics: dict) -> list[tuple[str, str]]:
-    """The local admission and saturation evidence behind the admission lead."""
-    rows = _outcome_rows(metrics, _PRESSURE_CLASSES)
-    saturated = _count(metrics.get("saturated"))
-    if saturated:
-        rows.append((_BADGE_MEASURED,
-                     f"{saturated} request(s) sat at the concurrency ceiling here"))
-    background = _count((metrics.get("by_tier") or {}).get("background"))
-    if background:
-        rows.append((_BADGE_MEASURED,
-                     f"{background} request(s) ran on the -background tier"))
-    if not rows:
-        rows.append((_BADGE_MEASURED,
-                     "no request here was blocked at admission, rejected with a 429, "
-                     "or demoted to the -background tier"))
-    return rows
-
-
-def _latency_rows(metrics: dict) -> list[tuple[str, str]]:
-    """The latency answer: the account's queue wait, then the local latencies.
-
-    The queue wait is the account's own admission measure, so it wears the
-    account badge even though it answers a latency question; a null there means
-    nobody waited that day, and cli._cap_wait says exactly that rather than a
-    zero. The local numbers are completed requests only, and both tiers share
-    one row so the panel stays short. The band row is the one shape a reader
-    cannot get from the percentiles, so it keeps a row of its own.
-    """
-    rows = [_queue_wait_row(metrics)]
-    tiers = []
-    for tier in ("interactive", "background"):
-        lat = (metrics.get("latency_s") or {}).get(tier) or {}
-        if _count(lat.get("n")):
-            tiers.append(f"{tier} latency n={lat['n']} p50={_sec(lat.get('p50'))} "
-                         f"p90={_sec(lat.get('p90'))}")
-    if tiers:
-        rows.append((_BADGE_MEASURED, " · ".join(tiers)))
-    bands = metrics.get("saturation_bands") or {}
-    if bands.get("top_inflation_flagged"):
-        top = (bands.get("bands") or [])[-1]
-        rows.append((_BADGE_MEASURED,
-                     f"p90 {_sec(top.get('p90'))} at concurrency {top.get('band')} "
-                     f"against a mid-band p90 of {_sec(bands.get('mid_p90_baseline_s'))}"))
-    if len(rows) == 1:
-        rows.append((_BADGE_MEASURED,
-                     "no completed request in this window, so no latency was measured"))
-    return rows
-
-
-def _queue_wait_row(metrics: dict) -> tuple[str, str]:
-    """The account's queue wait on the most recent complete UTC day it reports.
-
-    avg_queue_wait_ms is the account's own measure, so the row wears the account
-    badge. A window with no complete day in the account's record still gets a
-    row: the dimension is unknown, and a missing queue-wait line would read as
-    "nobody waited".
-    """
-    days = (metrics.get("capacity") or {}).get("window_days") or []
-    for day in reversed(days):
-        if isinstance(day, dict) and "avg_queue_wait_ms" in day:
-            return (badges.badge_for(sources.PROV_ACCOUNT),
-                    f"queue wait, the account's most recent complete UTC day "
-                    f"({day.get('day')}): {cli._cap_wait(day.get('avg_queue_wait_ms'))}")
-    return (_BADGE_UNKNOWN,
-            "queue wait: the account reports no complete UTC day inside this window "
-            "(unknown)")
-
-
-def _stuck_rows(metrics: dict) -> list[tuple[str, str]]:
-    """The idle-budget diagnosis, plus one row from `explain --slowest`.
-
-    "Agent seems stuck" binds to the client_idle_timeout class *and* to the
-    explain --slowest panel (the builder-check decision), so one bounded row
-    carries the slowest request's own why, and the whole panel stays in
-    `luna-doctor explain`.
-    """
-    stalled = _count((metrics.get("by_outcome") or {}).get("client_idle_timeout"))
-    if stalled:
-        rows = [(_BADGE_MEASURED,
-                 f"{stalled} request(s) stalled until the harness's own idle budget killed "
-                 f"them (`client_idle_timeout`: the stream ended without a finish_reason)")]
-    else:
-        rows = [(_BADGE_MEASURED,
-                 "no request in these logs ended on `client_idle_timeout`, so nothing "
-                 "here shows the harness's idle budget stopping a stream")]
-    slow = metrics.get("slowest_request") or {}
-    if slow.get("headline"):
-        rows.append((_BADGE_MEASURED,
-                     f"the slowest request here took {slow.get('duration', 'unknown')} "
-                     f"({slow.get('outcome', 'unknown')}): {slow['headline']}"))
-    else:
-        # The digest is None for more than one reason - an empty window, an
-        # explain that raised, a request set with nothing to rank - and this
-        # row cannot tell them apart. It states the one fact it has: no request
-        # was ranked, and why is not established here.
-        rows.append((_BADGE_MEASURED,
-                     "the slowest request here is not established (unknown): this "
-                     "scan ranked none, and it recorded no reason why"))
-    return rows
 
 
 # ---- the sparkline: the window's shape in one row of blocks ---------------
@@ -968,14 +626,21 @@ def concurrency_sparkline(metrics: dict, *, width: int = SPARK_WIDTH,
 
 
 def spark_caption(metrics: dict, *, width: int = SPARK_WIDTH,
-                  lanes: int | None = None) -> str:
+                  lanes: int | None = None,
+                  source: str = sources.PROV_ACCOUNT) -> str:
     """The picture's one-line key: which scale it is, and when the peak was.
 
     A lane-scaled picture states what `█` means and converts the count of `█`
     cells into its unit - minutes over the lane count - so the row is
-    quantitatively readable and not merely suggestive. A peak-scaled picture
-    says so instead, and names the peak's clock either way. A window with no
-    active minute has no picture, and an empty picture has no caption.
+    quantitatively readable and not merely suggestive. A minute count of zero
+    reads `never over`, not `over 0m of 60m`: a zero minutes-over is the clean
+    case, and the caption says it in words. A peak-scaled picture says so
+    instead, and names the peak's clock either way. A window with no active
+    minute has no picture, and an empty picture has no caption.
+
+    `source` is whose lane count the wall is - `resolved_lanes`'s own source, so
+    the caption's badge is `●` only when the account reported the number and
+    `◌` when a person declared it.
     """
     picture = _window_picture(metrics, width)
     if picture is None:
@@ -988,24 +653,10 @@ def spark_caption(metrics: dict, *, width: int = SPARK_WIDTH,
         return f"scale: this window · peak at {peak_at}"
     over = sum(1 for value in picture.columns if value >= lanes)
     minutes_over = int(round(over * picture.minutes_per_column))
-    return (f"{_SPARK_BLOCKS[-1]} = at or over {badges.BADGE_ACCOUNT}{lanes} lanes"
-            f" · over {minutes_over}m of {picture.total_minutes}m"
-            f" · peak at {peak_at}")
-
-
-def spark_text(metrics: dict, *, width: int = SPARK_WIDTH,
-               lanes: int | None = None) -> Text:
-    """The sparkline and its caption as one quiet block of two lines.
-
-    Empty when the window holds no active minute: an empty picture is not a
-    shape, and the screen hides the line rather than drawing a flat one.
-    """
-    blocks = concurrency_sparkline(metrics, width=width, lanes=lanes)
-    if not blocks:
-        return Text("")
-    text = Text(blocks)
-    text.append("\n" + spark_caption(metrics, width=width, lanes=lanes), style="dim")
-    return text
+    span = ("over %dm of %dm" % (minutes_over, picture.total_minutes)
+            if minutes_over else "never over")
+    return (f"{_SPARK_BLOCKS[-1]} = at or over {badges.badge_for(source)}{lanes} lanes"
+            f" · {span} · peak at {peak_at}")
 
 
 # ---- the LOAD region: three rows on one fixed grid ------------------------
@@ -1021,8 +672,7 @@ def spark_text(metrics: dict, *, width: int = SPARK_WIDTH,
 # is the kill list rather than an oversight: the 30d/7d admission record, the
 # overflow pool's per-day rollups, the queue wait on the account's most recent
 # complete UTC day and the saturation-band comparison are drill-down facts, and
-# the dashboard does not carry them again. They keep their old rows in
-# `account_rows` and `local_rows` until the screen swaps to these.
+# the dashboard does not carry them at all.
 LOAD_LABEL_CELLS = 12
 LOAD_NUMBER_CELLS = 8
 LOAD_DELTA_CELLS = 3
@@ -1573,76 +1223,79 @@ def key_lines(metrics: dict | None = None, cap=None) -> list[str]:
     return [line, _moon_key(not_established)]
 
 
-# ---- the verdict panel: the CLI's own verdict, never a second one ----------
-def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
-    """The verdict line, the action, and where the rest of it lives.
+# ---- the screen: the eighteen rows the dashboard draws, in order ----------
+#
+# Nineteen rows, always, in the four regions §3.1 fixes: the header and its rule,
+# LOAD's six, the evidence group's five, NEXT's three, and the two key lines. The
+# Textual Footer is the nineteenth and renders the bindings. Positions never
+# move between states; only the contents of the evidence group change with the
+# answer, which is why the reading order is the decision order.
+RULE_CELLS = 76      # the rule runs from the left edge to the header's own margin
+RULE = "\u2500" * RULE_CELLS
 
-    The badge column stays empty: a verdict is a conclusion drawn from the rows
-    above it, not a number one source reported. The text is `cli.verdict`'s own
-    headline, so the TUI cannot disagree with the CLI about what the window
-    means. The status moon leads the headline, read from
-    `report.status_moon` - the same helper the pretty renderer asks. The legend
-    for that scale is not a row here: `status_legend` returns it, and the screen
-    prints it as its own quiet line under the panel, the weight the pretty
-    renderer gives it. The one arrow marks the action this screen can take in
-    place.
+# The words the region titles print, one per region kind. `LOAD` is the only one
+# on the screen in every state.
+_REGION_WORDS = {
+    REGION_LOAD: "LOAD",
+    REGION_LATENCY: "LATENCY",
+    REGION_REFUSALS: "REFUSALS",
+    REGION_STALLS: "STALLS",
+}
 
-    One sentence, not the whole verdict: the headline is the conclusion, and
-    `analyze` prints it with every adjustment in full while `[d]` shows that
-    report here. So the panel states the headline and points at the report
-    instead of becoming the report. The adjustments are never cut down to fit:
-    a trimmed adjustment reads as a smaller finding than the CLI reported. The
-    last row is the pointer, and there is only one.
+
+def region_title(region_kind: str, region_rows: list[tuple[str, str]],
+                 window_hours) -> str:
+    """One region's title row: its name, the moon its own rows earn, its basis.
+
+    The moon comes from `region_moon` over the very rows the region draws, so a
+    title can never claim a state its numbers do not show. The right-hand cell
+    names what the delta column compares against - the previous window of the
+    same length - and lands at the header's own right edge, so the screen has
+    one margin.
     """
-    headline, _adjustments, exit_code = cli.verdict(metrics)
-    moon = report.status_moon(exit_code, headline)
-    glyph = _GLYPH_STYLE.symbol(moon)
-    line = first_sentence(headline)
-    rows = [("", f"{glyph} {line}" if glyph else line)]
-    rows += [("→", "press [f] for the per-agent fix, or run `luna-doctor fix`"),
-             ("", "details: press d for the full analyze report")]
-    return rows
+    if region_kind not in _REGION_WORDS:
+        raise KeyError(region_kind)
+    name = "%s %s" % (_REGION_WORDS[region_kind],
+                      region_moon(region_rows, region_kind))
+    basis = "vs previous %s" % _window_cell(window_hours)
+    gap = max(1, HEADER_CELLS - cell_len(name) - cell_len(basis))
+    return name + " " * gap + basis
 
 
-def status_legend(metrics: dict) -> str:
-    """The one-line legend for the status moons, or "" when no phase is drawn.
+def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
+    """The dashboard's eighteen drawn rows, in the order the screen draws them.
 
-    It is the same sentence the pretty renderer closes with, from the same
-    table, and the screen prints it as its own muted line: a key to a scale is
-    not a conclusion, so it never wears the verdict panel's bold.
+    `choice_key` is the answer the person picked; it selects the evidence group
+    and never withholds a row (§8 item 6). `previous` is the equal-length window
+    the scan read before this one, and it decides the delta column and nothing
+    else. The rows are the builders' own strings, verbatim: the LOAD and evidence
+    rows carry their badges and indent, the NEXT region carries its imperative
+    and command, and the two key lines carry the palette.
+
+    A window with no active minute draws no picture and no caption: an empty
+    picture is not a shape. Both rows stay, blank, because the position of every
+    region under them is part of the contract.
     """
-    headline, _adjustments, exit_code = cli.verdict(metrics)
-    if report.status_moon(exit_code, headline) not in report.MOON_PHASES:
-        return ""
-    return _GLYPH_STYLE.moon_legend()
-
-
-def build_verdict_rows(choice_key: str, metrics: dict, cap) -> list[tuple[str, str]]:
-    """Every (badge, text) row of the verdict screen, in ranked-trust order."""
-    return (account_rows(metrics, cap)
-            + local_rows(choice_key, metrics)
-            + verdict_rows(metrics))
-
-
-def panel_text(heading: str, rows, *, bold: bool = False) -> Text:
-    """One panel: its heading, then one line per row.
-
-    The badge is what a reader sorts on, so it leads the line. A row with no
-    badge is a conclusion (the verdict and its action), and it is not given a
-    source it does not have. Measured rows render dimmed, the verdict bold.
-    """
-    text = Text()
-    text.append(heading, style="bold")
-    for badge, line in rows:
-        text.append("\n")
-        row = f"{badge} {line}" if badge else line
-        if bold:
-            text.append(row, style="bold")
-        elif badge == _BADGE_MEASURED:
-            text.append(row, style="dim")
-        else:
-            text.append(row)
-    return text
+    metrics = metrics or {}
+    hours = _window_hours(metrics)
+    group_key = pick_lead(choice_key)
+    load = load_rows(metrics, cap, hours, previous)
+    group = group_rows(group_key, metrics, previous)
+    lanes, source = resolved_lanes(metrics, cap)
+    blocks = concurrency_sparkline(metrics, lanes=lanes)
+    caption = spark_caption(metrics, lanes=lanes, source=source)
+    # The picture and its caption sit one cell in from the rule's left edge.
+    picture = (" " + blocks) if blocks else ""
+    caption_line = (" " + caption) if caption else ""
+    lines = [header_line(metrics, previous, cap, hours), RULE,
+             region_title(REGION_LOAD, load, hours)]
+    lines += [line for _badge, line in load]
+    lines += [picture, caption_line, RULE,
+              region_title(group_key, group, hours)]
+    lines += [line for _badge, line in group]
+    lines += [RULE]
+    lines += [line for _badge, line in next_rows(metrics, cap, group_key)]
+    return lines + key_lines(metrics, cap)
 
 
 # ---- the scan: the same collect() and analyse() cmd_analyze calls ----------
@@ -1742,26 +1395,6 @@ def slowest_request_digest(reqs, metrics: dict):
         "outcome": doc.get("outcome"),
         "headline": doc.get("headline", ""),
     }
-
-
-def scan_status(metrics: dict, cap, online: bool = False) -> str:
-    """The scan's own line: what was read, never a verdict.
-
-    It names the request count and the account's plan and width, and it says
-    "not reported" where a number is missing rather than leaving a gap a reader
-    would fill with a zero.
-    """
-    n = _count(metrics.get("requests")) or 0
-    bits = [f"✓ {n} request(s) in the last {int(metrics.get('window_hours') or WINDOW_HOURS)}h"]
-    if cap is None:
-        bits.append("account capacity: not cached (unknown)")
-    else:
-        plan = cli._cap_unknown(cli._cap_field(cap.config, "plan"))
-        width = cli._cap_unknown(cli._cap_field(cap.config, "priority_lanes"))
-        bits.append(f"account: plan {plan} · priority concurrency {width}")
-    if online:
-        bits.append("the cache was refreshed by --online")
-    return " · ".join(bits)
 
 
 def _captured_main(argv: list[str]) -> tuple[int, str]:
@@ -1885,35 +1518,38 @@ def chart_output(plan: str | None = None,
 
 # ---- the screen -----------------------------------------------------------
 class TriageApp(App):
-    """The triage screen: one question, then one badged verdict.
+    """The dashboard, mounted once the scan lands: nineteen rows, five states.
 
     The scan and the cache-only capacity read run in a thread worker while the
-    question is on screen, so the answer is never blocked. The app opens no
-    network behavior of its own: run_triage(online=True) refreshes the cache
-    once before the screen opens, exactly like `--online` on the CLI.
+    screen says it is reading, so a person is never waiting on a blank terminal.
+    The dashboard fills the moment the result arrives, with the group the current
+    answer selects: the six answers choose which three evidence rows stand under
+    the picture, and they never withhold a number (§8 item 6). The key bindings
+    live in the `Footer`, which renders `BINDINGS` and is the nineteenth row.
+
+    The app opens no network behavior of its own: run_triage(online=True)
+    refreshes the cache once before the screen opens, exactly like `--online` on
+    the CLI.
     """
 
     TITLE = "luna-doctor triage"
 
     CSS = """
     Screen { background: $surface; }
+    #ask { height: 1fr; }
     #question { padding: 1 2 0 2; text-style: bold; }
     #choices { margin: 1 2 0 2; height: auto; max-height: 10; border: round $primary; }
-    #status { padding: 1 2; color: $text-muted; }
-    #verdict { display: none; padding: 0 2; }
-    .panel { border: round $primary; padding: 0 1; margin: 1 0 0 0; height: auto; }
-    #verdict-line { border: round $accent; }
-    #spark { padding: 1 2 0 2; }
-    #legend, #moon-legend { padding: 1 2; color: $text-muted; }
+    #status { padding: 0 2; color: $text-muted; height: auto; }
+    #dashboard { display: none; height: 1fr; }
     #detail { display: none; border: round $secondary; padding: 0 1; }
     """
 
     BINDINGS = [
-        Binding("c", "show_chart", "chart"),
-        Binding("d", "show_detail", "detail"),
         Binding("f", "show_fix", "fix"),
-        Binding("q", "quit", "quit"),
+        Binding("d", "show_detail", "detail"),
+        Binding("c", "show_chart", "chart"),
         Binding("w", "cycle_window", "window"),
+        Binding("q", "quit", "quit"),
     ]
 
     def __init__(self, plan: str | None = None, online: bool = False) -> None:
@@ -1924,32 +1560,32 @@ class TriageApp(App):
         self.metrics: dict | None = None
         self.previous: dict | None = None
         self.capacity = None
-        self.pending_choice: str | None = None
+        self.choice: str = DEFAULT_CHOICE
         self.scan_failed: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("What are you seeing?", id="question")
-        yield ListView(
-            *[ListItem(Label(text), id=key) for text, key in TRIAGE_CHOICES],
-            id="choices")
+        # The ask and the dashboard occupy the same region, so the Footer under
+        # them never moves when the scan lands: a layout that shifts between the
+        # question and the answer would redraw the row a person is pressing.
+        with Vertical(id="ask"):
+            yield Static("What are you seeing?", id="question")
+            yield ListView(
+                *[ListItem(Label(text), id=key) for text, key in TRIAGE_CHOICES],
+                id="choices")
         # markup=False: this line repeats the CLI's words, and those name keys
-        # as [f] and [q]. As Rich markup, the brackets and what they hold vanish.
+        # as [f] and [w]. As Rich markup, the brackets and what they hold vanish.
         yield Static("", id="status", markup=False)
-        with VerticalScroll(id="verdict"):
-            yield Static("", id="account", classes="panel")
-            yield Static("", id="local", classes="panel")
-            # the picture between the evidence and the conclusion it supports
-            yield Static("", id="spark")
-            yield Static("", id="verdict-line", classes="panel")
-            # its own line, in the muted weight every legend on this screen
-            # wears: the verdict panel above it is bold, and a key is not a
-            # conclusion
-            yield Static("", id="moon-legend")
-            yield Static(badges.legend_line(), id="legend")
+        # markup=False for the same reason: the dashboard's command row names
+        # the key that runs it as [f], and a bracketed word is not markup here.
+        yield Static("", id="dashboard", markup=False)
         with VerticalScroll(id="detail"):
             # markup=False: this panel prints a command's own words, and the
             # fix block may name a tier as [agents].
             yield Static("", id="detail-text", markup=False)
+        # show_command_palette=False: the footer's job here is the five keys
+        # this screen binds, and Textual's palette hint would push the row past
+        # the 78-cell budget the dashboard is drawn to.
+        yield Footer(show_command_palette=False)
 
     def on_mount(self) -> None:
         self._set_status(f"scanning local logs… (last {self.window_hours}h)")
@@ -1985,54 +1621,60 @@ class TriageApp(App):
 
     def _scan_failed(self, reason: str) -> None:
         self.scan_failed = reason
-        self._set_status(f"the scan failed ({reason}); no verdict is available")
+        self._set_status(f"the scan failed ({reason}); there is no dashboard to show")
 
     def _scan_done(self, metrics: dict, previous: dict | None, cap) -> None:
-        self.metrics = metrics
         self.previous = previous
         self.capacity = cap
-        self._set_status(scan_status(metrics, cap, self.online))
-        if self.pending_choice is not None:
-            self._show_verdict(self.pending_choice)
+        self._show_dashboard(metrics)
+        self.call_after_refresh(self._land, metrics)
+
+    def _land(self, metrics: dict) -> None:
+        """Publish the scan the screen has drawn, once that frame is behind us.
+
+        `self.metrics` is what the keys and the suite read to know the dashboard
+        is ready, so it is set after the frame that drew it rather than in the
+        middle of the frame: a reader then never sees a scan the screen has not
+        shown, and the Footer's row is composed before anyone asks for it.
+        """
+        self.metrics = metrics
+
+    # -- the dashboard ----------------------------------------------------
+    def _show_dashboard(self, metrics: dict) -> None:
+        """Draw the whole screen: the eighteen rows, and no question above them.
+
+        The dashboard is up the moment the scan lands, holding the group the
+        current answer selects. The answer list then stands down: nineteen rows
+        are the contract, and a list of answers beside them would move every row
+        under it. The status line is cleared with it - the scan status was a
+        restatement of the header, and the header is on the screen now.
+        """
+        lines = dashboard_lines(self.choice, metrics, self.previous,
+                                self.capacity)
+        self.query_one("#dashboard", Static).update("\n".join(lines))
+        # The ask stands down to no rows instead of `display: none`: hiding the
+        # focused list blurs it, and Textual then rebuilds the Footer a frame
+        # later - a frame in which the screen is one row short of its nineteen.
+        self.query_one("#ask").styles.height = 0
+        self.query_one("#dashboard").display = True
+        self._set_status("")
 
     # -- the answer -------------------------------------------------------
     def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """The answer swaps the evidence group and NEXT, and nothing above them."""
         key = event.item.id
         if key is None:
             return
+        self.choice = key
         if self.scan_failed is not None:
-            self._set_status(f"the scan failed ({self.scan_failed}); there is no verdict to show")
+            self._set_status(f"the scan failed ({self.scan_failed}); "
+                             f"there is no dashboard to show")
             return
-        self.pending_choice = key
         if self.metrics is None:
-            self._set_status("the scan is still running; the verdict appears when it finishes")
+            self._set_status("the scan is still running; the dashboard appears "
+                             "when it finishes")
             return
-        self._show_verdict(key)
-
-    def _show_verdict(self, key: str) -> None:
-        self.query_one("#account", Static).update(
-            panel_text(PANEL_ACCOUNT, account_rows(self.metrics, self.capacity)))
-        self.query_one("#local", Static).update(
-            panel_text(PANEL_LOCAL, local_rows(key, self.metrics)))
-        self.query_one("#verdict-line", Static).update(
-            panel_text(PANEL_VERDICT, verdict_rows(self.metrics), bold=True))
-        legend = status_legend(self.metrics)
-        moon_legend = self.query_one("#moon-legend", Static)
-        moon_legend.update(legend)
-        # no phase drawn means no key: an empty line would be decoration
-        moon_legend.display = bool(legend)
-        lanes, _source = resolved_lanes(self.metrics, self.capacity)
-        spark = spark_text(self.metrics, lanes=lanes)
-        spark_line = self.query_one("#spark", Static)
-        spark_line.update(spark)
-        # no active minute means no picture: a blank line is not a shape
-        spark_line.display = bool(spark.plain)
-        self.query_one("#question").display = False
-        self.query_one("#choices").display = False
-        self.query_one("#verdict").display = True
-        self._set_status(f"{scan_status(self.metrics, self.capacity, self.online)} · "
-                         f"[f] shows the fix, [d] the full report, "
-                         f"[c] draws the chart, [q] quits")
+        self._show_dashboard(self.metrics)
 
     # -- the detail panel: the analyze report, or the fix output ----------
     def _show_detail(self, command: str, subject: str, code: int, text: str) -> None:
@@ -2045,11 +1687,11 @@ class TriageApp(App):
         """
         if not carries_report(code, text):
             reason = _last_line(text) or f"exit {code}"
-            self._set_status(f"the {command} command failed: {reason} · [q] quits")
+            self._set_status(f"the {command} command failed: {reason}")
             return
         self.query_one("#detail-text", Static).update(text or f"the {subject} was empty")
         self.query_one("#detail").display = True
-        self._set_status(f"the {subject} is on screen · [q] quits")
+        self._set_status(f"the {subject} is on screen")
 
     def action_show_detail(self) -> None:
         """Show the whole `analyze` report the verdict was cut from."""
@@ -2105,11 +1747,11 @@ class TriageApp(App):
 
     def _chart_done(self, svg_path: str, png_path: str | None, error: str) -> None:
         if error:
-            self._set_status(f"the chart failed: {error} · [q] quits")
+            self._set_status(f"the chart failed: {error}")
             return
         written = png_path or svg_path
         opened = " · the PNG is open" if png_path else ""
-        self._set_status(f"chart written: {written}{opened} · [q] quits")
+        self._set_status(f"chart written: {written}{opened}")
 
 
 def run_triage(plan: str | None = None, online: bool = False) -> int:

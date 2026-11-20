@@ -1,16 +1,21 @@
-"""The triage screen's data contract: one answer in, three badged panels out.
+"""The triage screen's data contract: one answer in, eighteen rows out.
 
-Every assertion reads the (badge, text) rows the panels are built from, so the
-suite runs offline and needs no terminal: what is tested here is the
-data-to-widget mapping, not pixels. Textual is an optional extra
-(`luna-doctor[tui]`), so this file imports it only when it is installed -
-`tui.py` imports Textual at the top by design, and the caller guards that
-import.
+Every assertion reads the rows `tui.dashboard_lines` builds or the widgets the
+app mounts, so the suite runs offline and needs no terminal. Textual is an
+optional extra (`luna-doctor[tui]`), so this file imports it only when it is
+installed - `tui.py` imports Textual at the top by design, and the caller guards
+that import.
 
-The order the rows come in is the design's ranked-trust order: what the account
-reports (authoritative), then what this machine's logs show (informative, a
-lower bound), then the verdict. The verdict rows come from `cli.verdict`, so a
-second verdict implementation cannot drift from the CLI's.
+The order is the design's own (§3.1 of the dashboard brief): the status header
+and its rule, LOAD's six rows, the evidence group the answer selects, NEXT, and
+the two key lines. The header's word and moon are `cli.verdict`'s and
+`report.status_moon`'s, so the screen cannot hold a second verdict about the
+window - and it never prints the CLI's headline sentence.
+
+The rows this file does *not* find matter as much as the ones it does. The
+30-day admission record, the overflow pool, the ledger sentence, the saturation
+flag, the API field names and the hand-written key hints are drill-down facts:
+the kill list (§6) keeps them off the dashboard, and `Footer` renders the keys.
 """
 
 import asyncio
@@ -18,9 +23,9 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import threading
 import time
+import unicodedata
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -80,7 +85,7 @@ def _degraded_payload():
 
 
 def _metrics(**over):
-    """What analyse() produces, reduced to the keys the verdict reads."""
+    """What analyse() produces, reduced to the keys the screen reads."""
     m = {
         "window_hours": 24,
         "requests": 17,
@@ -112,6 +117,27 @@ def _metrics(**over):
 
 _SPARK_START = "2026-11-02T00:00Z"
 _HOUR_START = "2026-11-02T14:00Z"
+
+# The mockups' clock: 14:32Z, when the one-hour window closes.
+_CLOCK = datetime(2026, 11, 2, 14, 32, tzinfo=timezone.utc).timestamp()
+
+# The account's live sample, microseconds and all: the `now` row prints the
+# minute and nothing finer.
+_SAMPLED = "2026-11-02T14:20:43.95670792Z"
+
+# The complete UTC day the account block carries. It is a drill-down fact, and
+# the dashboard must never print it (§6.3).
+_DAY = {"day": "2026-11-01", "accepted": 900, "denied_after_wait": 1213,
+        "deferred": 180123, "avg_queue_wait_ms": 144544.82}
+
+
+def _served(*, fresh=True, now=None):
+    """The `metrics.capacity` block: fresh by default, calendar attached."""
+    return {"provenance": sources.PROV_ACCOUNT, "plan": "apex",
+            "priority_lanes": 12, "now_fresh": fresh,
+            "now": dict(now if now is not None else
+                        {"in_use": 7, "limit": 12, "sampled_at": _SAMPLED}),
+            "window_days": [dict(_DAY)]}
 
 
 def _by_minute(pairs, start=_SPARK_START):
@@ -146,6 +172,72 @@ def _busy_hour():
     pairs += [(offset, 12) for offset in range(4, 11)]
     pairs += [(offset, 3) for offset in range(11, 60)]
     return _hour_scan(pairs)
+
+
+# ---- the dashboard's windows, as the mockups draw them ---------------------
+# Seven minutes at or over the account's 12 lanes, peaking at 17 on 14:35Z.
+_OVER_MINUTES = ((1, 2), (7, 4), (20, 4), (31, 9), (32, 12), (33, 14), (34, 16),
+                 (35, 17), (36, 15), (37, 13), (38, 12), (44, 6), (52, 4), (59, 2))
+# A quiet hour: nothing reaches the lane count, so the picture draws no `█`.
+_OK_MINUTES = ((1, 1), (8, 3), (20, 4), (32, 3), (44, 3), (52, 1), (59, 1))
+
+
+def _dash(**over):
+    """One dashboard window: the hour that closed at 14:32Z."""
+    metrics = _metrics(window_hours=1, scanned_at=_CLOCK, capacity=_served(),
+                       by_minute=_by_minute(_OVER_MINUTES, start=_HOUR_START))
+    metrics.update(over)
+    return metrics
+
+
+def _busy(**over):
+    """The owner's window: 42 requests, peak 17 against 12 lanes, 3 blocked."""
+    metrics = _dash(
+        requests=42,
+        by_outcome={"completed": 28, "admission_timeout": 3, "rate_limited": 11},
+        by_tier={"interactive": 35, "background": 7},
+        peak_concurrency=17,
+        latency_s={"interactive": {"n": 39, "p50": 95.0, "p90": 240.0, "max": 300.0},
+                   "background": {"n": 7, "p50": 400.0, "p90": 520.0, "max": 600.0}})
+    metrics.update(over)
+    return metrics
+
+
+def _busy_before():
+    """The window before it: quieter, and wide enough for a delta."""
+    return _dash(
+        requests=40, by_outcome={"completed": 40}, by_tier={"interactive": 40},
+        peak_concurrency=12, latency_s={"interactive": {"n": 35, "p50": 83.0,
+                                                        "p90": 202.0, "max": 260.0}},
+        by_minute=_by_minute(((1, 3), (20, 5), (40, 4)), start=_HOUR_START))
+
+
+def _healthy():
+    """A clean hour: 9 requests, peak 4 under 12 lanes, nothing blocked."""
+    return _dash(
+        requests=9, by_outcome={"completed": 9}, by_tier={"interactive": 9},
+        peak_concurrency=4, saturated=0,
+        latency_s={"interactive": {"n": 9, "p50": 31.0, "p90": 58.0, "max": 90.0}},
+        by_minute=_by_minute(_OK_MINUTES, start=_HOUR_START))
+
+
+def _empty():
+    """An hour with no traffic at all: nothing was measured here."""
+    return _dash(requests=0, by_outcome={}, by_tier={}, peak_concurrency=None,
+                 saturated=0, latency_s={}, by_minute=[])
+
+
+def _lines(choice_key="slow", metrics=None, previous=None, cap=None):
+    return tui.dashboard_lines(choice_key,
+                               _busy() if metrics is None else metrics,
+                               _busy_before() if previous is None else previous,
+                               cap)
+
+
+def _cells(text):
+    """A string's width in terminal cells: a wide glyph is two cells."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in text)
 
 
 # ---- (a) the six answers select the evidence group -------------------------
@@ -188,181 +280,252 @@ class TriageChoices(unittest.TestCase):
         group a quiet screen shows - the same three rows as "slow"."""
         self.assertEqual(tui.REGION_LATENCY, tui.pick_lead("checking"))
 
+    def test_the_screen_opens_on_the_answer_a_quiet_screen_shows(self):
+        self.assertEqual("checking", tui.DEFAULT_CHOICE)
+        self.assertEqual(tui.REGION_LATENCY, tui.pick_lead(tui.DEFAULT_CHOICE))
+
     def test_every_answer_has_a_visible_label(self):
         for text, _key in tui.TRIAGE_CHOICES:
             self.assertTrue(text.strip())
 
 
-# ---- (b) three panels in ranked-trust order --------------------------------
-class RankedTrustOrder(unittest.TestCase):
+# ---- (b) the order: header, LOAD, evidence, NEXT, keys ---------------------
+class TheDashboardsOrder(unittest.TestCase):
+    """§3.1: the reading order is the decision order, in every state."""
+
     def setUp(self):
         self.cap = _cap(_payload("capacity-2026-11-02.json"))
-        self.metrics = _metrics()
 
-    def test_the_rows_run_account_then_local_then_verdict(self):
-        account = tui.account_rows(self.metrics, self.cap)
-        local = tui.local_rows("failing", self.metrics)
-        verdict = tui.verdict_rows(self.metrics)
-        self.assertTrue(account and local and verdict)
-        self.assertEqual(account + local + verdict,
-                         tui.build_verdict_rows("failing", self.metrics, self.cap))
+    def test_the_rows_run_header_load_evidence_next(self):
+        lines = _lines(cap=self.cap)
+        self.assertEqual(18, len(lines))
+        self.assertTrue(lines[0].startswith(tui.moon_glyph(tui.header_moon(_busy()))))
+        self.assertEqual(tui.RULE, lines[1])
+        self.assertTrue(lines[2].startswith("LOAD "))
+        self.assertTrue(lines[6].startswith(" "), "the picture is the sixth row")
+        self.assertTrue(lines[7].startswith(" "), "its caption sits under it")
+        self.assertEqual(tui.RULE, lines[8])
+        self.assertTrue(lines[9].startswith("LATENCY "))
+        self.assertEqual(tui.RULE, lines[13])
+        self.assertTrue(lines[14].startswith("NEXT  "))
+        self.assertTrue(lines[15].startswith("→ luna-doctor "))
+        self.assertEqual(tui.key_lines(_busy(), self.cap), lines[16:])
 
-    def test_the_account_width_is_authoritative(self):
-        rows = [row for row in tui.account_rows(self.metrics, self.cap)
-                if "priority concurrency" in row[1]]
-        self.assertEqual(1, len(rows))
-        self.assertEqual(badges.BADGE_ACCOUNT, rows[0][0])
-        self.assertIn("12", rows[0][1])
+    def test_the_answer_swaps_the_evidence_group_and_nothing_above_it(self):
+        slow = _lines("slow", cap=self.cap)
+        refusals = _lines("concurrency", cap=self.cap)
+        self.assertEqual(slow[:9], refusals[:9], "a region above the group moved")
+        self.assertTrue(refusals[9].startswith("REFUSALS "))
+        self.assertNotEqual(slow[10:13], refusals[10:13])
 
-    def test_the_local_peak_is_a_lower_bound(self):
-        rows = [row for row in tui.local_rows("concurrency", self.metrics)
-                if "peak" in row[1]]
-        self.assertEqual(1, len(rows))
-        self.assertEqual(badges.BADGE_MEASURED, rows[0][0])
-        self.assertIn("lower bound", rows[0][1])
+    def test_the_header_word_and_moon_come_from_the_cli_verdict(self):
+        """One verdict: the header asks `cli.verdict` and `report.status_moon`,
+        the same pair the CLI prints, and reads the word off that glyph."""
+        headline, _adjustments, code = cli.verdict(_busy())
+        name = report.status_moon(code, headline)
+        first = _lines(cap=self.cap)[0]
+        self.assertTrue(first.startswith(tui.moon_glyph(name) + " "), first)
+        self.assertIn(tui.status_word(name), first)
 
-    def test_the_verdict_row_is_the_cli_verdict_not_a_second_one(self):
-        head, _adjustments, _code = cli.verdict(_metrics())
-        first = tui.verdict_rows(self.metrics)[0]
-        self.assertIn(head, first[1], "the verdict line repeats the CLI's own headline")
-        self.assertEqual("", first[0],
-                         "a verdict is a conclusion, so it wears no source badge")
+    def test_the_screen_never_prints_the_headline_sentence(self):
+        """§6.1 item 1: the prose left, and the header states its facts."""
+        headline, adjustments, _code = cli.verdict(_busy())
+        drew = "\n".join(_lines(cap=self.cap))
+        self.assertNotIn(headline, drew)
+        for adjustment in adjustments:
+            self.assertNotIn(adjustment, drew)
 
-    def test_the_verdict_row_leads_with_the_status_moon_the_cli_earns(self):
-        """One status scale on both surfaces: the moon comes from the same
-        helper the pretty renderer asks."""
-        head, _adjustments, code = cli.verdict(_metrics())
-        rows = tui.verdict_rows(self.metrics)
-        glyph = tui._GLYPH_STYLE.symbol(report.status_moon(code, head))
-        self.assertEqual(f"{glyph} {head}", rows[0][1])
-        self.assertEqual("\U0001F311", glyph,
-                         "3 blocked admissions earns the new moon")
+    def test_the_lower_bound_caveat_lives_in_the_key_not_the_peak_row(self):
+        """§6.1 item 3: one caveat, stated once, in the `○` key line."""
+        lines = _lines(cap=self.cap)
+        peak = [line for line in lines if line.strip().startswith("peak")]
+        self.assertEqual(1, len(peak))
+        self.assertNotIn("lower bound", peak[0])
+        self.assertIn("(a lower bound)", lines[16])
 
-    def test_the_legend_is_its_own_line_not_a_row_of_the_bold_panel(self):
-        """The panel is bold and the legend is a key, so the screen prints the
-        legend at the pretty renderer's quiet weight: its own muted line."""
-        legend = tui.status_legend(_metrics())
-        for phase in ("\U0001F315", "\U0001F317", "\U0001F311"):
-            self.assertIn(phase, legend)
-        self.assertNotIn("healthy", " ".join(text for _b, text in
-                                             tui.verdict_rows(self.metrics)))
+    def test_the_two_key_lines_close_the_screen(self):
+        """§6.2 item 10: provenance on one line, the moons on the other."""
+        lines = _lines(cap=self.cap)
+        self.assertIn("account", lines[16])
+        self.assertIn(tui.moon_glyph(report.MOON_NEW), lines[17])
+        for line in (lines[16], lines[17]):
+            self.assertLessEqual(_cells(line), tui.HEADER_CELLS)
 
-    def test_a_verdict_that_claims_no_status_prints_no_legend(self):
-        empty = _metrics(requests=0, by_outcome={}, by_tier={}, by_harness={},
-                         pressure_windows=0, longest_pressure_window=None)
-        self.assertEqual("", tui.status_legend(empty))
+    def test_a_window_that_claims_no_status_keys_the_plain_moon(self):
+        """A key to a glyph nobody drew is decoration; a glyph on screen is not."""
+        lines = _lines("slow", _empty(), None, self.cap)
+        self.assertEqual(tui.moon_glyph("moon"), lines[0][0])
+        self.assertTrue(lines[17].startswith(tui.moon_glyph("moon")))
+
+    def test_the_region_titles_name_what_the_delta_compares(self):
+        lines = _lines(cap=self.cap)
+        self.assertTrue(lines[2].endswith("vs previous 1h"), lines[2])
+        self.assertTrue(lines[9].endswith("vs previous 1h"), lines[9])
+        self.assertEqual(tui.HEADER_CELLS, _cells(lines[2]))
+        self.assertEqual(tui.HEADER_CELLS, _cells(lines[9]))
+
+    def test_the_picture_rows_stay_when_the_window_drew_no_picture(self):
+        """§2.5: the empty-picture rule hides the drawing, not the positions."""
+        lines = _lines("slow", _empty(), None, self.cap)
+        self.assertEqual(["", ""], lines[6:8])
+        self.assertEqual(tui.RULE, lines[8])
+
+    def test_an_unknown_answer_is_a_caller_bug(self):
+        with self.assertRaises(KeyError):
+            _lines("prose", cap=self.cap)
 
 
-# ---- (c) the degraded payload: every null is unknown ----------------------
-class DegradedPayload(unittest.TestCase):
-    """config: null and a null `now` block. The account panel says whose
-    silence it is, and no field the payload nulled reads as a zero."""
+# ---- (c) the kill list: the rows that left the dashboard -------------------
+class TheKilledRows(unittest.TestCase):
+    """§6: every fact below survives in `analyze`, `capacity` or `explain`.
+
+    The dashboard is nineteen rows, so a fact that cannot change between two
+    glances - a 30-day total, a rollup, a ledger's health - is in the report and
+    not here. Each assertion names the row that used to carry it.
+    """
+
+    # The three answers that select a group, so every group's rows are read.
+    ANSWERS = ("slow", "concurrency", "stuck")
+
+    # What the account block and the metrics carry, and the screen must not say.
+    BANNED = ("30 complete", "deferred", "denied after waiting", "overflow",
+              "saturated", "available", "ledger", "request(s)", "n=",
+              "queue wait", "details:", "press d", "press [f]",
+              "last 30", "last 7d", "30d", "7d")
 
     def setUp(self):
-        self.cap = _cap(_degraded_payload())
-        self.rows = tui.account_rows(_metrics(), self.cap)
-
-    def test_the_width_says_the_account_did_not_report_it(self):
-        width = [text for _badge, text in self.rows if "priority concurrency" in text]
-        self.assertTrue(width)
-        self.assertIn("not reported by the account", width[0])
-
-    def test_the_occupancy_row_does_not_look_authoritative(self):
-        occupancy = [row for row in self.rows
-                     if "occupancy" in row[1] or "in use" in row[1]]
-        self.assertTrue(occupancy)
-        for badge, text in occupancy:
-            self.assertNotEqual(badges.BADGE_ACCOUNT, badge,
-                                f"a null occupancy wore the account badge: {text!r}")
-
-    def test_no_null_field_renders_as_a_zero_or_a_none(self):
-        for _badge, text in self.rows:
-            self.assertNotIn("None", text)
-            self.assertNotRegex(text, r"(?<![\w.])0(?![\w.])",
-                                f"a null became a zero: {text!r}")
-
-    def test_a_missing_payload_says_the_account_did_not_answer(self):
-        rows = tui.account_rows(_metrics(), None)
-        self.assertEqual(1, len(rows))
-        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), rows[0][0])
-        self.assertIn("the account did not answer", rows[0][1])
-
-    def test_a_declared_plan_still_reaches_a_machine_with_no_payload(self):
-        """--plan exists so the ◌ declared width can appear at the front door,
-        so a missing capacity payload must not hide the declaration."""
-        rows = tui.account_rows({"declared_plan": "max"}, None)
-        self.assertIn("the account did not answer", rows[0][1])
-        declared = [row for row in rows if row[0] == badges.BADGE_DECLARED]
-        self.assertEqual(1, len(declared))
-        self.assertIn("priority concurrency 4", declared[0][1])
-        self.assertIn("declared", declared[0][1])
-        self.assertIn("plan max", declared[0][1])
-
-
-# ---- (d) an empty window says what is missing ------------------------------
-class EmptyWindow(unittest.TestCase):
-    def test_the_verdict_says_what_is_missing_rather_than_a_number(self):
-        metrics = _metrics(requests=0, by_outcome={}, by_tier={}, by_harness={},
-                           saturated=0, pressure_windows=0,
-                           longest_pressure_window=None)
-        rows = tui.verdict_rows(metrics)
-        low = " ".join(text for _badge, text in rows).lower()
-        self.assertIn("no request", low)
-        self.assertIn("window", low)
-        self.assertNotIn("peak", low, "nothing was measured, so no peak is quoted")
-
-
-# ---- (e) "agent seems stuck" names the idle-timeout class ------------------
-class StuckAnswer(unittest.TestCase):
-    def test_the_stuck_answer_names_the_idle_timeout_outcome(self):
-        metrics = _metrics(by_outcome={"completed": 12, "client_idle_timeout": 3},
-                           requests=15)
-        rows = tui.local_rows("stuck", metrics)
-        named = [text for _badge, text in rows if "client_idle_timeout" in text]
-        self.assertTrue(named, "the stuck answer must name the class it reads")
-        self.assertIn("3", named[0])
-
-    def test_a_window_without_a_stall_says_so(self):
-        rows = tui.local_rows("stuck", _metrics(by_outcome={"completed": 17}))
-        named = [text for _badge, text in rows if "client_idle_timeout" in text]
-        self.assertTrue(named)
-        self.assertIn("no request", named[0])
-
-    def test_the_stuck_answer_adds_one_slowest_request_row(self):
-        """The builder-check decision binds "agent seems stuck" to the
-        explain --slowest panel as well, so one bounded row carries that
-        request's own why - not the whole panel."""
-        metrics = _metrics(slowest_request={
+        self.cap = _cap(_payload("capacity-2026-11-02.json"))
+        self.metrics = _busy(slowest_request={
             "duration": "312.4s", "outcome": "client_idle_timeout",
             "headline": "The stream stopped without a finish_reason."})
-        rows = [row for row in tui.local_rows("stuck", metrics)
-                if "slowest request" in row[1]]
-        self.assertEqual(1, len(rows))
-        self.assertEqual(badges.BADGE_MEASURED, rows[0][0])
-        self.assertIn("312.4s", rows[0][1])
-        self.assertIn("client_idle_timeout", rows[0][1])
-        self.assertIn("finish_reason", rows[0][1])
 
-    def test_a_window_with_nothing_to_rank_says_so(self):
-        rows = [row for row in tui.local_rows("stuck", _metrics())
-                if "slowest" in row[1]]
-        self.assertEqual(1, len(rows))
-        self.assertIn("not established (unknown)", rows[0][1])
+    def test_no_row_carries_a_calendar_or_a_rollup(self):
+        for answer in self.ANSWERS:
+            for line in _lines(answer, self.metrics, _busy_before(), self.cap):
+                for word in self.BANNED:
+                    self.assertNotIn(word, line, f"{answer}: {line!r}")
 
-    def test_an_unranked_row_claims_no_cause_it_did_not_establish(self):
-        """A digest that is None may be an explain that raised, not an empty
-        window: the row states that nothing was ranked, never why."""
-        with mock.patch.object(tui.explain, "slowest", side_effect=RuntimeError("boom")):
-            digest = tui.slowest_request_digest(["req"], _metrics())
-        self.assertIsNone(digest)
-        rows = [row for row in tui.local_rows("stuck", _metrics(slowest_request=digest))
-                if "slowest" in row[1]]
-        self.assertEqual(1, len(rows))
-        self.assertNotIn("usable interval", rows[0][1])
-        self.assertNotIn("no request", rows[0][1])
-        self.assertIn("not established (unknown)", rows[0][1])
+    def test_no_row_names_an_api_field_or_a_backtick(self):
+        banned = ("rate_limit_error", "scheduler admission timeout",
+                  "client_idle_timeout", "org_concurrency_limit",
+                  "admission_timeout", "starved_peer_evidence", "`")
+        for answer in self.ANSWERS:
+            for line in _lines(answer, self.metrics, _busy_before(), self.cap):
+                for word in banned:
+                    self.assertNotIn(word, line, f"{answer}: {line!r}")
 
-    def test_the_slowest_digest_uses_the_explain_machinery(self):
+    def test_the_two_latency_tiers_never_share_a_row_again(self):
+        """The tier split was one number's worth of information; the latency
+        group carries the interactive p50, p90 and the gateway's fixed wait."""
+        lines = _lines("slow", self.metrics, _busy_before(), self.cap)
+        latency = lines[10:13]
+        self.assertIn("p50", latency[0])
+        self.assertIn("p90", latency[1])
+        self.assertIn("gateway", latency[2])
+        for line in latency:
+            self.assertNotIn("background", line)
+
+    def test_the_slow_tier_appears_only_where_a_refusal_explains_it(self):
+        refusals = _lines("concurrency", self.metrics, _busy_before(), self.cap)
+        self.assertIn("background", refusals[12])
+        self.assertIn("demoted to the slow tier", refusals[12])
+
+    def test_no_row_repeats_a_key_that_the_footer_renders(self):
+        """§6.2 item 11: the Footer renders the bindings, so no row lists them."""
+        drew = "\n".join(_lines("slow", self.metrics, _busy_before(), self.cap))
+        for hint in ("[d]", "[c]", "[q]", "shows the fix", "the full report"):
+            self.assertNotIn(hint, drew)
+
+    def test_no_row_is_a_sentence(self):
+        for answer in self.ANSWERS:
+            for line in _lines(answer, self.metrics, _busy_before(), self.cap):
+                self.assertFalse(line.rstrip().endswith((".", "!", "?")), line)
+
+    def test_every_row_fits_the_budget(self):
+        for answer in self.ANSWERS:
+            for line in _lines(answer, self.metrics, _busy_before(), self.cap):
+                self.assertLessEqual(_cells(line), tui.ROW_CELLS, line)
+                self.assertTrue(tui.dashboard_ok_row(line), line)
+
+
+# ---- (d) every null is unknown, never a zero ------------------------------
+class EveryNullIsUnknown(unittest.TestCase):
+    """config: null and a null `now` block. The rows say what is missing, and no
+    field the payload nulled reads as a zero (§7 rule 8)."""
+
+    def test_the_now_row_says_why_there_is_no_sample(self):
+        lines = _lines("slow", _busy(), _busy_before(),
+                       _cap(_degraded_payload()))
+        now = [line for line in lines if line.strip().startswith("now")]
+        self.assertEqual(1, len(now))
+        self.assertIn("?", now[0])
+        self.assertIn("no live sample", now[0])
+        self.assertNotRegex(now[0], r"\d+/\d+")
+
+    def test_no_row_renders_none_or_a_bare_zero(self):
+        for line in _lines("slow", _busy(), _busy_before(),
+                           _cap(_degraded_payload())):
+            self.assertNotIn("None", line)
+            self.assertNotRegex(line, r"(?<![\w.])0(?![\w.])",
+                                f"a null became a zero: {line!r}")
+
+    def test_a_missing_payload_says_the_lane_count_is_unknown(self):
+        """§2.3: the honest degradation - the hour is measured, the wall is not."""
+        lines = _lines("slow", _busy(), _busy_before(), None)
+        self.assertIn("? lanes", lines[0])
+        self.assertIn("lane count unknown", lines[4])
+        self.assertIn("scale: this window", lines[7])
+
+    def test_a_declared_plan_reaches_a_machine_with_no_payload(self):
+        """--plan exists so the ◌ declared width can appear at the front door."""
+        metrics = _busy(declared_plan="max")
+        lines = _lines("slow", metrics, _busy_before(), None)
+        self.assertIn("max", lines[0], "the header names the declared plan")
+        self.assertIn("%s4 lanes" % badges.BADGE_DECLARED, lines[0])
+        self.assertIn("Hold 4 in flight", lines[14], "the advice reads the declaration")
+        self.assertTrue(lines[16].endswith("%s declared" % badges.BADGE_DECLARED),
+                        lines[16])
+
+
+# ---- (e) an empty window says what is missing -----------------------------
+class TheEmptyWindow(unittest.TestCase):
+    """No traffic in the window: the rows say `?` with a reason, never a number."""
+
+    def setUp(self):
+        self.cap = _cap(_payload("capacity-2026-11-02.json"))
+        self.lines = _lines("slow", _empty(), None, self.cap)
+
+    def test_the_peak_and_blocked_rows_print_the_unknown_glyph(self):
+        peak, blocked = self.lines[4], self.lines[5]
+        self.assertTrue(peak.startswith(" peak 1h"), peak)
+        self.assertIn("%s " % tui._BADGE_UNKNOWN, peak)
+        self.assertIn("nothing measured here", peak)
+        self.assertIn(tui._BADGE_UNKNOWN, blocked)
+        self.assertNotRegex(peak, r"\d+$", "a peak nobody measured quotes no number")
+
+    def test_the_latency_rows_say_what_is_missing(self):
+        p50, p90, gateway = self.lines[10:13]
+        self.assertIn("p50", p50)
+        self.assertIn("p90", p90)
+        self.assertIn("gateway", gateway)
+        for line in (p50, p90):
+            self.assertIn(tui._BADGE_UNKNOWN, line)
+            self.assertNotRegex(line, r"\d+s", "no percentile was measured here")
+
+    def test_the_next_row_widens_the_window_instead_of_naming_a_number(self):
+        self.assertIn("Nothing measured in the last hour", self.lines[14])
+        self.assertIn("--since 6h", self.lines[15])
+
+
+# ---- (f) the stalls group carries the slowest digest ----------------------
+class TheSlowestDigest(unittest.TestCase):
+    """The stuck answer reaches the explain --slowest panel.
+
+    One row of the stalls group carries that request's own why - not the whole
+    panel, which stays in `luna-doctor explain`.
+    """
+
+    def test_the_digest_uses_the_explain_machinery(self):
         """One digest, from explain's own selectors: nothing here re-derives a
         reason from the metrics."""
         doc = {"headline": "The stream stopped without a finish_reason.",
@@ -376,197 +539,25 @@ class StuckAnswer(unittest.TestCase):
                          digest)
         slow.assert_called_once_with(["req"], 1)
 
-    def test_the_slowest_digest_is_none_without_requests_or_on_failure(self):
+    def test_the_digest_is_none_without_requests_or_on_failure(self):
         self.assertIsNone(tui.slowest_request_digest([], _metrics()))
         with mock.patch.object(tui.explain, "slowest", side_effect=RuntimeError("boom")):
             self.assertIsNone(tui.slowest_request_digest(["req"], _metrics()))
 
+    def test_the_stalls_group_carries_the_duration_and_what_happened(self):
+        metrics = _busy(slowest_request={
+            "duration": "312.4s", "outcome": "client_idle_timeout",
+            "headline": "The stream stopped without a finish_reason."})
+        slowest = tui.dashboard_lines("stuck", metrics, _busy_before(), None)[11]
+        self.assertIn("312.4s", slowest)
+        self.assertIn("the idle budget killed it", slowest)
 
-# ---- (e2) "things are slow" reports the account's queue wait ----------------
-class SlowAnswer(unittest.TestCase):
-    def _rows(self, metrics):
-        return [row for row in tui.local_rows("slow", metrics)
-                if "queue wait" in row[1]]
-
-    def test_the_latest_complete_day_carries_the_queue_wait(self):
-        metrics = _metrics(capacity={"provenance": "account", "window_days": [
-            {"day": "2026-10-31", "avg_queue_wait_ms": 4200.0},
-            {"day": "2026-11-01", "avg_queue_wait_ms": 181478.12}]})
-        rows = self._rows(metrics)
-        self.assertEqual(1, len(rows))
-        self.assertEqual(badges.BADGE_ACCOUNT, rows[0][0],
-                         "the queue wait is the account's own measure")
-        self.assertIn("2026-11-01", rows[0][1])
-        self.assertIn("181.5s", rows[0][1])
-
-    def test_a_day_nobody_waited_says_so_rather_than_a_zero(self):
-        metrics = _metrics(capacity={"provenance": "account", "window_days": [
-            {"day": "2026-11-01", "avg_queue_wait_ms": None}]})
-        rows = self._rows(metrics)
-        self.assertIn("no waiting that day", rows[0][1])
-        self.assertNotIn("0.0s", rows[0][1])
-
-    def test_without_an_account_day_the_queue_wait_is_unknown(self):
-        rows = self._rows(_metrics())
-        self.assertEqual(1, len(rows))
-        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), rows[0][0])
-        self.assertIn("unknown", rows[0][1])
-
-    def test_the_latency_rows_still_carry_the_local_percentiles(self):
-        rows = tui.local_rows("slow", _metrics())
-        self.assertTrue(any("interactive latency" in text for _badge, text in rows))
-
-
-# ---- (f) the occupancy line is qualified by the ledger --------------------
-class LedgerQualifiedOccupancy(unittest.TestCase):
-    def test_a_ledger_that_is_not_up_makes_the_count_advisory(self):
-        payload = _payload("capacity-2026-11-02.json")
-        payload["data"]["now"]["ledger"] = "degraded"
-        rows = tui.account_rows(_metrics(), _cap(payload))
-        occupancy = [row for row in rows if "priority pool" in row[1]]
-        self.assertEqual(1, len(occupancy))
-        badge, text = occupancy[0]
-        self.assertIn("degraded", text)
-        self.assertIn("may be stale", text)
-        self.assertNotEqual(badges.BADGE_ACCOUNT, badge,
-                            "an advisory count must not wear the authoritative badge")
-
-    def test_an_unread_sample_time_downgrades_the_pool_row(self):
-        """The row prints "sampled at unknown", so it is not the account's word."""
-        payload = _payload("capacity-2026-11-02.json")
-        payload["data"]["now"]["sampled_at"] = None
-        rows = [row for row in tui.account_rows(_metrics(), _cap(payload))
-                if "priority pool" in row[1]]
-        self.assertEqual(1, len(rows))
-        self.assertIn("sampled at unknown", rows[0][1])
-        self.assertNotEqual(badges.BADGE_ACCOUNT, rows[0][0],
-                            "a row with an unread sample time wore the account badge")
-
-    def test_a_healthy_ledger_keeps_the_authoritative_row(self):
-        rows = tui.account_rows(_metrics(), _cap(_payload("capacity-2026-11-02.json")))
-        occupancy = [row for row in rows if "priority pool" in row[1]]
-        self.assertEqual(1, len(occupancy))
-        self.assertEqual(badges.BADGE_ACCOUNT, occupancy[0][0])
-        self.assertNotIn("may be stale", occupancy[0][1])
-
-
-# ---- (g) the overflow pool's two null shapes stay apart -------------------
-class OverflowPoolShapes(unittest.TestCase):
-    def _overflow(self, background):
-        payload = _payload("capacity-2026-11-02.json")
-        payload["data"]["now"]["background"] = background
-        rows = [row for row in tui.account_rows(_metrics(), _cap(payload))
-                if "overflow" in row[1]]
-        self.assertTrue(rows, "the account panel must render the overflow pool")
-        return rows[0]
-
-    def test_an_unread_cap_is_unknown_not_a_closed_pool(self):
-        _badge, text = self._overflow({"limit": None, "in_use": None,
-                                       "available": None, "saturated": None})
-        self.assertIn("cap unknown", text)
-        self.assertNotIn("entitled to no overflow", text)
-
-    def test_a_zero_cap_is_no_entitlement_and_never_saturated(self):
-        badge, text = self._overflow({"limit": 0, "in_use": 0,
-                                      "available": 0, "saturated": False})
-        self.assertIn("entitled to no overflow", text)
-        self.assertIn("never saturated", text)
-        self.assertNotIn("cap unknown", text)
-        self.assertEqual(badges.BADGE_ACCOUNT, badge,
-                         "a closed pool rests on its cap, so it stays authoritative")
-
-    def test_the_two_null_shapes_are_two_different_strings(self):
-        unknown = self._overflow({"limit": None, "in_use": None,
-                                  "available": None, "saturated": None})[1]
-        closed = self._overflow({"limit": 0, "in_use": 0,
-                                 "available": 0, "saturated": False})[1]
-        self.assertNotEqual(unknown, closed)
-
-    def test_a_real_cap_with_an_unread_count_keeps_the_cap(self):
-        badge, text = self._overflow({"limit": 12, "in_use": None,
-                                      "available": None, "saturated": None})
-        self.assertIn("unknown (not reported)", text)
-        self.assertIn("12", text)
-        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), badge,
-                         "a cap beside a count nobody could read is not authoritative")
-
-    def test_an_unread_count_is_not_authoritative_in_either_pool(self):
-        """One rule for both pools: the same fact shape reads the same way."""
-        payload = _payload("capacity-2026-11-02.json")
-        payload["data"]["now"].update({
-            "in_use": None, "available": None, "saturated": None,
-            "background": {"limit": 12, "in_use": None,
-                           "available": None, "saturated": None}})
-        rows = tui.account_rows(_metrics(), _cap(payload))
-        priority = [row for row in rows if "priority pool" in row[1]]
-        overflow = [row for row in rows if "overflow" in row[1]]
-        self.assertEqual(1, len(priority))
-        self.assertEqual(1, len(overflow))
-        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), overflow[0][0])
-        self.assertEqual(priority[0][0], overflow[0][0])
-
-    def test_a_reported_pool_shows_its_count_and_its_flag(self):
-        _badge, text = self._overflow({"limit": 12, "in_use": 0,
-                                       "available": 12, "saturated": False})
-        self.assertIn("in use 0 of 12 concurrent requests", text)
-        self.assertIn("saturated: no", text)
-
-    def test_an_absent_block_uses_the_capacity_reports_own_words(self):
-        """A payload captured before the account reported the pool has no such
-        block: the row is the capacity report's sentence, not a second one."""
-        payload = _payload("capacity-2026-10-23.json")
-        rows = [row for row in tui.account_rows(_metrics(), _cap(payload))
-                if "overflow" in row[1]]
-        self.assertEqual(1, len(rows))
-        self.assertEqual(badges.badge_for(sources.PROV_UNKNOWN), rows[0][0])
-        self.assertEqual("overflow pool: " + cli._cap_pool_now(None), rows[0][1])
-
-
-# ---- the priority pool's own saturated flag is an observation -------------
-class PriorityPoolObservation(unittest.TestCase):
-    def test_a_saturated_sample_keeps_its_flag_when_the_count_is_unread(self):
-        payload = _payload("capacity-2026-11-02.json")
-        payload["data"]["now"].update({"in_use": None, "available": None,
-                                        "saturated": True})
-        rows = [row for row in tui.account_rows(_metrics(), _cap(payload))
-                if "priority pool" in row[1]]
-        self.assertEqual(1, len(rows))
-        badge, text = rows[0]
-        self.assertIn("in use unknown (not reported)", text)
-        self.assertIn("saturated: yes", text)
-        self.assertNotIn("denied", text.lower(), "an observation, never a refusal")
-        self.assertNotIn("refus", text.lower())
-        self.assertNotEqual(badges.BADGE_ACCOUNT, badge,
-                            "an unread count is not authoritative")
-
-    def test_a_healthy_sample_reports_the_flag_as_no(self):
-        rows = [row for row in tui.account_rows(
-                    _metrics(), _cap(_payload("capacity-2026-11-02.json")))
-                if "priority pool" in row[1]]
-        self.assertIn("saturated: no", rows[0][1])
-
-
-# ---- (h) refusal words come only from admission counts -------------------
-class RefusalWordsComeFromAdmissionCounts(unittest.TestCase):
-    def test_a_full_pool_alone_is_never_a_refusal(self):
-        payload = _payload("capacity-2026-11-02.json")
-        payload["data"]["now"].update({
-            "in_use": 12, "available": 0, "saturated": True,
-            "background": {"limit": 12, "in_use": 12, "available": 0,
-                           "saturated": True}})
-        payload["data"]["admission"] = None
-        rows = tui.account_rows(_metrics(), _cap(payload))
-        for _badge, text in rows:
-            low = text.lower()
-            self.assertNotIn("denied", low, text)
-            self.assertNotIn("refus", low, text)
-
-    def test_the_admission_counts_are_where_the_refusal_wording_comes_from(self):
-        rows = [row for row in tui.account_rows(
-                    _metrics(), _cap(_payload("capacity-2026-11-02.json")))
-                if "admission" in row[1]]
-        self.assertTrue(rows)
-        self.assertTrue(any("denied after waiting" in text for _badge, text in rows))
+    def test_an_unranked_row_says_why_rather_than_a_bare_question_mark(self):
+        """A digest that is None may be an explain that raised: the row states
+        that nothing was ranked, never why."""
+        slowest = tui.dashboard_lines("stuck", _busy(), _busy_before(), None)[11]
+        self.assertIn("nothing ranked", slowest)
+        self.assertIn("?", slowest)
 
 
 # ---- the app shell: no terminal needed to check the contract -------------
@@ -576,14 +567,13 @@ class TriageAppSurface(unittest.TestCase):
         self.assertEqual("apex", app.plan)
         self.assertFalse(app.online)
 
-    def test_fix_and_quit_are_bound(self):
-        keys = set()
-        for binding in tui.TriageApp.BINDINGS:
-            key = getattr(binding, "key", None)
-            if key is None and isinstance(binding, (tuple, list)):
-                key = binding[0]
-            keys.add(key)
-        self.assertTrue({"f", "q", "w"} <= keys, keys)
+    def test_the_footer_renders_five_keys_with_descriptions(self):
+        """§8 item 5: the Footer renders `BINDINGS`, and every binding has a word."""
+        bindings = [(binding.key, binding.description)
+                    for binding in tui.TriageApp.BINDINGS]
+        self.assertEqual(["f", "d", "c", "w", "q"], [key for key, _word in bindings])
+        for key, word in bindings:
+            self.assertTrue(word.strip(), key)
 
     def test_run_triage_runs_the_app_and_returns_zero(self):
         with mock.patch.object(tui.TriageApp, "run", return_value=None) as run:
@@ -691,11 +681,17 @@ class TheWindowKeyOnTheScreen(unittest.TestCase):
                 await self._settle(pilot, lambda: len(seen) == 2)
                 self.assertEqual(6, app.window_hours)
                 self.assertEqual(6, app.metrics["window_hours"])
+                self.assertIn("peak 6h", self._dashboard(app))
                 await pilot.press("w")
                 await self._settle(pilot, lambda: len(seen) == 3)
                 self.assertEqual(24, app.window_hours)
                 self.assertEqual(24, app.metrics["window_hours"])
+                self.assertIn("peak 24h", self._dashboard(app))
                 await pilot.press("q")
+
+    @staticmethod
+    def _dashboard(app) -> str:
+        return str(app.query_one("#dashboard").render())
 
     @staticmethod
     async def _settle(pilot, ready) -> None:
@@ -735,52 +731,61 @@ class TriageAppFailure(unittest.TestCase):
         return str(app.query_one("#status").render())
 
 
-class TheStatusMoonOnTheScreen(unittest.TestCase):
-    """The moon and its legend reach the screen, and the legend stays quiet.
+class TheDashboardOnTheScreen(unittest.TestCase):
+    """The scan lands as the dashboard, and the answer list stands down.
 
-    The verdict panel renders bold; the legend is a key to a scale, not a
-    conclusion, so it renders as its own muted line under that panel - the
-    weight the pretty renderer paints it in.
+    §8 item 6: the header, LOAD and the default evidence group are on screen the
+    moment the scan finishes. The six answers choose a group; they do not gate
+    the numbers, and they do not keep a list of their own on a nineteen-row
+    screen.
     """
 
-    def test_the_legend_renders_below_the_panel_not_inside_it(self):
+    def test_the_scan_lands_as_the_eighteen_rows_and_the_footer(self):
         asyncio.run(self._drive())
 
     async def _drive(self):
         app = tui.TriageApp()
+        cap = _cap(_payload("capacity-2026-11-02.json"))
         with mock.patch.object(tui, "scan",
-                               return_value=(_metrics(), None,
-                                             _cap(_payload("capacity-2026-11-02.json")))):
-            async with app.run_test(size=(100, 40)) as pilot:
-                await pilot.pause()
-                await pilot.pause()
-                await pilot.press("enter")
-                await pilot.pause()
-                legend = str(app.query_one("#moon-legend").render())
-                panel = str(app.query_one("#verdict-line").render())
-                self.assertIn("healthy", legend)
-                self.assertIn("\U0001F311", legend)
-                self.assertNotIn("healthy", panel,
-                                 "the key was drawn in the panel's bold weight")
-                self.assertTrue(app.query_one("#moon-legend").display)
+                               return_value=(_busy(), _busy_before(), cap)):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                drawn = self._dashboard(app)
+                self.assertEqual(18, len(drawn.splitlines()), drawn)
+                self.assertTrue(drawn.splitlines()[0].startswith(
+                    tui.moon_glyph(tui.header_moon(_busy()))))
+                self.assertIn("LATENCY", drawn)
+                self.assertEqual(0, app.query_one("#ask").size.height,
+                                 "the answer list kept a column of its own")
+                footer = app.query_one("Footer")
+                self.assertEqual(1, footer.size.height)
                 await pilot.press("q")
 
-    def test_a_verdict_with_no_status_hides_the_legend_line(self):
-        asyncio.run(self._drive_no_status())
+    def test_a_window_with_no_active_minute_draws_no_picture(self):
+        asyncio.run(self._drive_quiet())
 
-    async def _drive_no_status(self):
-        empty = _metrics(requests=0, by_outcome={}, by_tier={}, by_harness={},
-                         pressure_windows=0, longest_pressure_window=None)
+    async def _drive_quiet(self):
         app = tui.TriageApp()
-        with mock.patch.object(tui, "scan", return_value=(empty, None, None)):
-            async with app.run_test(size=(100, 40)) as pilot:
-                await pilot.pause()
-                await pilot.pause()
-                await pilot.press("enter")
-                await pilot.pause()
-                self.assertFalse(app.query_one("#moon-legend").display,
-                                 "nothing measured, so no scale was used")
+        with mock.patch.object(tui, "scan", return_value=(_empty(), None, None)):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                lines = self._dashboard(app).splitlines()
+                self.assertEqual(["", ""], lines[6:8],
+                                 "an empty picture is not a shape")
+                self.assertIn("NOT ESTABLISHED", lines[0])
                 await pilot.press("q")
+
+    @staticmethod
+    def _dashboard(app) -> str:
+        return str(app.query_one("#dashboard").render())
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
 
 
 class EverySlowStepSaysItIsRunning(unittest.TestCase):
@@ -802,12 +807,10 @@ class EverySlowStepSaysItIsRunning(unittest.TestCase):
             release.wait(5)
             return "fix output"
 
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, _cap(_payload("capacity-2026-11-02.json")))), \
+        with mock.patch.object(tui, "scan", return_value=(_busy(), _busy_before(), _cap(_payload("capacity-2026-11-02.json")))), \
                 mock.patch.object(tui, "fix_output", side_effect=slow_fix):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
                 await pilot.press("f")
                 for _attempt in range(40):
                     await pilot.pause(0.05)
@@ -816,7 +819,7 @@ class EverySlowStepSaysItIsRunning(unittest.TestCase):
                 self.assertTrue(computing.is_set(), "the fix never started")
                 status = str(app.query_one("#status").render())
                 self.assertIn("rendering the fix output", status)
-                self.assertNotIn("[q] quits", status,
+                self.assertNotIn("is on screen", status,
                                  "the screen still offered the previous action, not the work")
                 release.set()
                 await self._settle(pilot, lambda: "fix output" in str(app.query_one("#detail-text").render()))
@@ -855,35 +858,33 @@ class EverySlowStepSaysItIsRunning(unittest.TestCase):
 class TriageAppLiteralText(unittest.TestCase):
     """Bracketed text on this screen is prose, never Rich markup.
 
-    The status line repeats the CLI's words, and those name keys as [f] and
-    [q]; the detail panel prints a command's own output, and the fix block
-    may name a tier as [agents]. Parsed as markup, the brackets and what they
-    hold vanish, so the screen tells a reader to press nothing.
+    The detail panel prints a command's own output, the fix block may name a
+    tier as [agents], and a failure quotes the CLI's own last line. Parsed as
+    markup, the brackets and what they hold vanish, so the screen tells a reader
+    to press nothing.
     """
 
     FIX = "run `luna-doctor fix --tier [agents]`, then press [f] again"
 
-    def test_bracketed_prose_survives_the_status_line_and_the_detail_panel(self):
+    def test_bracketed_prose_survives_the_detail_panel_and_the_status_line(self):
         asyncio.run(self._drive())
 
     async def _drive(self):
         app = tui.TriageApp()
-        metrics = _metrics()
         cap = _cap(_payload("capacity-2026-11-02.json"))
-        with mock.patch.object(tui, "scan", return_value=(metrics, None, cap)), \
-                mock.patch.object(tui, "fix_output", return_value=self.FIX):
+        failed = (2, "luna-doctor: bad --since value: 'nope' [agents]")
+        with mock.patch.object(tui, "scan", return_value=(_busy(), _busy_before(), cap)), \
+                mock.patch.object(tui, "fix_output", return_value=self.FIX), \
+                mock.patch.object(tui, "detail_output", return_value=failed):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
-                status = self._text(app, "#status")
-                self.assertIn("[f] shows the fix", status)
-                self.assertIn("[q] quits", status)
                 await pilot.press("f")
                 await self._settle(pilot, lambda: "[agents]" in self._text(app, "#detail-text"))
                 self.assertIn("[agents]", self._text(app, "#detail-text"))
                 self.assertIn("--tier [agents]", self._text(app, "#detail-text"))
-                self.assertIn("[q] quits", self._text(app, "#status"))
+                await pilot.press("d")
+                await self._settle(pilot, lambda: "command failed" in self._text(app, "#status"))
+                self.assertIn("[agents]", self._text(app, "#status"))
                 await pilot.press("q")
 
     @staticmethod
@@ -899,128 +900,7 @@ class TriageAppLiteralText(unittest.TestCase):
         return str(app.query_one(selector).render())
 
 
-# ---- the dashboard's density: four rows a panel, and no more --------------
-class MediumDensityPanels(unittest.TestCase):
-    """The screen orients. `analyze`, `explain` and `capacity` enumerate."""
-
-    def setUp(self):
-        self.cap = _cap(_payload("capacity-2026-11-02.json"))
-
-    def _busy(self):
-        """The busiest window this fixture can make: every lead panel full."""
-        return _metrics(
-            requests=12,
-            by_outcome={"completed": 4, "admission_timeout": 3, "rate_limited": 2,
-                        "org_concurrency_limit": 1, "client_idle_timeout": 2},
-            by_tier={"interactive": 10, "background": 2},
-            saturated=4,
-            capacity={"provenance": "account", "window_days": [
-                {"day": "2026-11-01", "avg_queue_wait_ms": 4200.0}]},
-            saturation_bands={"bands": [{"band": "8-12", "n": 3, "p50": 1.0,
-                                         "p90": 300.0}],
-                              "mid_p90_baseline_s": 60.0, "top_inflation": 5.0,
-                              "top_inflation_flagged": True},
-            slowest_request={"duration": "312.4s", "outcome": "client_idle_timeout",
-                             "headline": "The stream stopped without a finish_reason."},
-        )
-
-    def test_no_panel_holds_more_than_four_rows(self):
-        for _text, key in tui.TRIAGE_CHOICES:
-            with self.subTest(answer=key):
-                self.assertLessEqual(len(tui.account_rows(self._busy(), self.cap)), 4)
-                self.assertLessEqual(len(tui.local_rows(key, self._busy())), 4)
-        self.assertLessEqual(len(tui.verdict_rows(self._busy())), 4)
-
-    def test_the_account_panel_folds_the_ledger_into_the_pool_row(self):
-        rows = tui.account_rows(_metrics(), self.cap)
-        self.assertEqual(4, len(rows), "width, pool, overflow, admission")
-        pool = [text for _badge, text in rows if "priority pool" in text]
-        self.assertEqual(1, len(pool))
-        self.assertIn("sampled at", pool[0], "the sample time kept a row of its own")
-
-    def test_both_latency_tiers_share_one_row(self):
-        rows = tui.local_rows("slow", _metrics())
-        tiers = [text for _badge, text in rows if "latency" in text]
-        self.assertEqual(1, len(tiers))
-        self.assertIn("interactive latency", tiers[0])
-        self.assertIn("background latency", tiers[0])
-
-    def test_the_pressure_classes_share_one_row(self):
-        rows = tui.local_rows("concurrency", self._busy())
-        named = [text for _badge, text in rows if "rate_limit_error" in text]
-        self.assertEqual(1, len(named))
-        self.assertIn("scheduler admission timeout", named[0])
-
-    def test_the_verdict_panel_holds_three_lines_on_a_busy_window(self):
-        """One sentence, the action and one pointer: the report is `[d]`.
-
-        This fixture carries three adjustments, about a thousand characters of
-        the CLI's prose that the panel used to fold into one sprawling row."""
-        rows = tui.verdict_rows(_metrics())
-        self.assertLessEqual(len(rows), 3, rows)
-        for _badge, text in rows:
-            self.assertLessEqual(len(text), 120, f"a row that wraps into a wall: {text!r}")
-        prose = " ".join(text for _badge, text in rows)
-        self.assertNotIn("the right home for", prose,
-                         "the adjustments are the report's job, not the panel's")
-
-    def test_the_verdict_panel_states_one_sentence_of_the_cli_verdict(self):
-        metrics = _metrics()
-        headline, adjustments, code = cli.verdict(metrics)
-        self.assertTrue(adjustments, "this fixture carries prose beyond the headline")
-        glyph = tui._GLYPH_STYLE.symbol(report.status_moon(code, headline))
-        self.assertEqual(f"{glyph} {headline}", tui.verdict_rows(metrics)[0][1],
-                         "the panel states the headline and none of the adjustments")
-
-    def _quiet_with_account(self):
-        """A quiet window whose account block carries admission days.
-
-        The CLI appends CAPACITY_COUNTS_EXCLUDE and an account-versus-local line
-        that opens lowercase, so a panel that reads past the headline draws a
-        550-character row out of prose the reader never asked this screen for.
-        """
-        return _metrics(
-            requests=5,
-            by_outcome={"completed": 5},
-            by_tier={"interactive": 5},
-            by_harness={"pi": 5},
-            peak_concurrency=2,
-            saturated=0,
-            pressure_windows=0,
-            longest_pressure_window=None,
-            latency_s={"interactive": {"n": 5, "p50": 20.0, "p90": 40.0, "max": 60.0},
-                       "background": {"n": 0, "p50": None, "p90": None, "max": None}},
-            admission_conversion={
-                "interactive": {"completed": 5, "admission_timeout": 0,
-                                "admitted_pct": 100.0},
-                "background": {"completed": 0, "admission_timeout": 0,
-                               "admitted_pct": None}},
-            capacity={"provenance": "account", "plan": "teams", "priority_lanes": 12,
-                      "window_days": [{"day": "2026-11-01", "accepted": 10,
-                                       "deferred": 0, "denied": 0,
-                                       "denied_after_wait": 0,
-                                       "avg_queue_wait_ms": None}]},
-        )
-
-    def test_the_verdict_panel_keeps_only_the_headline_of_a_quiet_window(self):
-        """The exclusion paragraph is `analyze`'s, not the dashboard's."""
-        rows = tui.verdict_rows(self._quiet_with_account())
-        for _badge, text in rows:
-            self.assertLessEqual(len(text), 120,
-                                 f"a row the headline did not bound: {text!r}")
-        self.assertIn("none blocked at admission", rows[0][1])
-        prose = " ".join(text for _badge, text in rows)
-        self.assertNotIn("server counts cover only traffic", prose)
-
-    def test_the_verdict_panel_ends_with_one_pointer_to_the_report(self):
-        rows = tui.verdict_rows(self._busy())
-        self.assertEqual("", rows[-1][0], "a pointer to the report is no one's number")
-        self.assertEqual("details: press d for the full analyze report", rows[-1][1])
-        self.assertEqual(1, sum("press d" in text for _badge, text in rows),
-                         "one pointer, not two")
-
-
-# ---- the sparkline: the window's shape, re-binned ------------------------
+# ---- the picture: the window's shape, re-binned -------------------------
 class ConcurrencySparkline(unittest.TestCase):
     """by_minute is sparse, so the row is re-binned onto uniform columns."""
 
@@ -1080,15 +960,15 @@ class ConcurrencySparkline(unittest.TestCase):
         self.assertEqual("█ = at or over ●12 lanes · over 7m of 60m · peak at 14:04Z",
                          tui.spark_caption(_busy_hour(), lanes=12))
 
+    def test_the_caption_badges_the_wall_with_the_source_its_lanes_came_from(self):
+        """◌ is a declared width, so the caption says whose number the wall is."""
+        caption = tui.spark_caption(_busy_hour(), lanes=6, source="plan apex")
+        self.assertIn("%s6 lanes" % badges.BADGE_DECLARED, caption)
+        self.assertNotIn(badges.BADGE_ACCOUNT, caption)
+
     def test_an_empty_window_draws_nothing_at_all(self):
         self.assertEqual("", tui.concurrency_sparkline(_metrics()))
-        self.assertEqual("", tui.spark_text(_metrics()).plain)
-
-    def test_the_text_is_the_row_then_its_caption(self):
-        metrics = _scan_of([(0, 17)])
-        row, caption = tui.spark_text(metrics, width=8).plain.split("\n")
-        self.assertEqual(8, len(row))
-        self.assertEqual(tui.spark_caption(metrics, width=8), caption)
+        self.assertEqual("", tui.spark_caption(_metrics()))
 
 
 # ---- the picture on the lane scale --------------------------------------
@@ -1125,16 +1005,18 @@ class ThePictureScalesToTheLanes(unittest.TestCase):
         self.assertEqual(7, tui.concurrency_sparkline(metrics, lanes=12).count("█"))
         self.assertIn("over 7m of 60m", tui.spark_caption(metrics, lanes=12))
 
-    def test_a_window_with_no_minute_over_says_so_in_its_units(self):
+    def test_a_window_with_no_minute_over_never_went_over(self):
+        """A zero minutes-over is the clean case, and the caption says so in
+        words rather than printing `over 0m of 60m`."""
         caption = tui.spark_caption(_hour_scan([(0, 3), (1, 4)]), lanes=12)
-        self.assertIn("over 0m of 60m", caption)
+        self.assertIn("never over", caption)
+        self.assertNotIn("over 0m", caption)
         self.assertEqual("scale: this window · peak at 14:01Z",
                          tui.spark_caption(_hour_scan([(0, 3), (1, 4)])))
 
     def test_an_empty_window_has_no_picture_and_no_caption(self):
         self.assertEqual("", tui.concurrency_sparkline(_metrics(), lanes=12))
         self.assertEqual("", tui.spark_caption(_metrics(), lanes=12))
-        self.assertEqual("", tui.spark_text(_metrics(), lanes=12).plain)
 
 
 # ---- the lane count the picture scales to -------------------------------
@@ -1157,61 +1039,7 @@ class TheLanesComeFromTheWidthRow(unittest.TestCase):
                          tui.resolved_lanes(_metrics(declared_plan="pro"), cap))
 
 
-# ---- the sparkline on the screen ----------------------------------------
-class TheSparkOnTheScreen(unittest.TestCase):
-    """One quiet line between the evidence panels and the verdict line."""
-
-    def test_the_row_shows_between_the_local_panel_and_the_verdict(self):
-        asyncio.run(self._drive())
-
-    async def _drive(self):
-        app = tui.TriageApp()
-        cap = _cap(_payload("capacity-2026-11-02.json"))
-        with mock.patch.object(tui, "scan",
-                               return_value=(_scan_of([(0, 17), (600, 4)]), None, cap)):
-            async with app.run_test(size=(100, 40)) as pilot:
-                await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
-                ids = [child.id for child in app.query_one("#verdict").children]
-                self.assertEqual(["account", "local", "spark", "verdict-line",
-                                  "moon-legend", "legend"], ids)
-                spark = app.query_one("#spark")
-                self.assertTrue(spark.display)
-                text = str(spark.render())
-                self.assertIn("█ = at or over ●12 lanes", text)
-                self.assertIn("peak at 00:00Z", text)
-                self.assertTrue(set(text) & set(tui._SPARK_BLOCKS), text)
-                await pilot.press("q")
-
-    def test_a_window_with_no_active_minute_hides_the_line(self):
-        asyncio.run(self._drive_quiet())
-
-    async def _drive_quiet(self):
-        app = tui.TriageApp()
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)):
-            async with app.run_test(size=(100, 40)) as pilot:
-                await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
-                self.assertFalse(app.query_one("#spark").display,
-                                 "an empty picture is not a shape")
-                await pilot.press("q")
-
-    @staticmethod
-    async def _settle(pilot, ready) -> None:
-        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
-        for _attempt in range(40):
-            await pilot.pause(0.05)
-            if ready():
-                return
-
-    @staticmethod
-    def _status(app) -> str:
-        return str(app.query_one("#status").render())
-
-
-# ---- [d]: the report the verdict was cut from ---------------------------
+# ---- [d]: the report the dashboard was cut from -------------------------
 class TheDetailOnAKeypress(unittest.TestCase):
     """`[d]` fills the detail panel with the `analyze` report, cache only."""
 
@@ -1249,9 +1077,9 @@ class TheDetailOnAKeypress(unittest.TestCase):
 
     def test_the_exit_codes_analyze_answers_with_all_carry_a_report(self):
         """0 clean, 1 over capacity, 2 nothing measured: all three are answers."""
-        report = "5 requests, none blocked at admission, peak concurrency 2.\n"
+        report_text = "5 requests, none blocked at admission, peak concurrency 2.\n"
         for code in (0, 1, 2):
-            self.assertTrue(tui.carries_report(code, report), code)
+            self.assertTrue(tui.carries_report(code, report_text), code)
         self.assertTrue(tui.carries_report(2, "No requests found in the window."),
                         "an empty window is a report that says so")
 
@@ -1296,12 +1124,10 @@ class TheFixAsksForThisWindow(unittest.TestCase):
             print("peak concurrency 17")
             return 0
 
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
+        with mock.patch.object(tui, "scan", return_value=(_busy(), None, None)), \
                 mock.patch.object(tui.cli, "main", side_effect=report) as main:
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
                 await pilot.press("d")
                 await self._settle(
                     pilot, lambda: "peak concurrency 17" in self._text(app, "#detail-text"))
@@ -1321,12 +1147,10 @@ class TheFixAsksForThisWindow(unittest.TestCase):
     async def _drive_failure(self):
         app = tui.TriageApp()
         failed = (2, "luna-doctor: bad --since value: 'nope'")
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
+        with mock.patch.object(tui, "scan", return_value=(_busy(), None, None)), \
                 mock.patch.object(tui, "detail_output", return_value=failed):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
                 await pilot.press("d")
                 await self._settle(
                     pilot, lambda: "analyze command failed" in self._text(app, "#status"))
@@ -1346,12 +1170,10 @@ class TheFixAsksForThisWindow(unittest.TestCase):
         app = tui.TriageApp()
         pressure = (1, "Concurrency pressure across 17 requests: 3 request(s) "
                        "were blocked at admission, peak concurrency 17.\n")
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
+        with mock.patch.object(tui, "scan", return_value=(_busy(), None, None)), \
                 mock.patch.object(tui, "detail_output", return_value=pressure):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
                 await pilot.press("d")
                 await self._settle(
                     pilot, lambda: "is on screen" in self._text(app, "#status"))
@@ -1371,23 +1193,6 @@ class TheFixAsksForThisWindow(unittest.TestCase):
     @staticmethod
     def _text(app, selector) -> str:
         return str(app.query_one(selector).render())
-
-
-# ---- one sentence of prose, then the report ------------------------------
-class TheFirstSentence(unittest.TestCase):
-    def test_it_keeps_one_sentence_and_drops_the_rest(self):
-        self.assertEqual("Blocked at admission.",
-                         tui.first_sentence("Blocked at admission. Run `fix` next."))
-        self.assertEqual("2 requests peaked at 17.",
-                         tui.first_sentence("2 requests peaked at 17. 3 ran on -background."))
-
-    def test_a_decimal_point_does_not_end_a_sentence(self):
-        self.assertEqual("The p90 of 240.0s held.",
-                         tui.first_sentence("The p90 of 240.0s held. The next one is longer."))
-
-    def test_text_without_a_full_stop_comes_back_whole(self):
-        self.assertEqual("no full stop here", tui.first_sentence("  no full stop here  "))
-        self.assertEqual("", tui.first_sentence(""))
 
 
 # ---- [c]: the chart, drawn by the command that owns it -------------------
@@ -1449,19 +1254,16 @@ class TheChartOnAKeypress(unittest.TestCase):
         app = tui.TriageApp()
         drawn = ("/tmp/luna-doctor-chart/chart.svg",
                  "/tmp/luna-doctor-chart/chart.png", "")
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
+        with mock.patch.object(tui, "scan", return_value=(_busy(), None, None)), \
                 mock.patch.object(tui, "chart_output", return_value=drawn) as chart:
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
                 await pilot.press("c")
                 await self._settle(
                     pilot, lambda: "chart written" in self._status(app))
                 status = self._status(app)
                 self.assertEqual(1, chart.call_count)
                 self.assertIn("chart written: /tmp/luna-doctor-chart/chart.png", status)
-                self.assertIn("[q] quits", status)
                 await pilot.press("q")
 
     def test_a_failed_chart_names_the_error_instead_of_a_path(self):
@@ -1471,12 +1273,10 @@ class TheChartOnAKeypress(unittest.TestCase):
         app = tui.TriageApp()
         failed = ("/tmp/luna-doctor-chart/chart.svg", None,
                   "luna-doctor: cannot write the chart: no space left")
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
+        with mock.patch.object(tui, "scan", return_value=(_busy(), None, None)), \
                 mock.patch.object(tui, "chart_output", return_value=failed):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
-                await pilot.press("enter")
-                await pilot.pause()
                 await pilot.press("c")
                 await self._settle(
                     pilot, lambda: "the chart failed" in self._status(app))
