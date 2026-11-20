@@ -35,10 +35,12 @@ from datetime import datetime, timezone
 from typing import NamedTuple
 
 from rich.cells import cell_len
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Footer, Label, ListItem, ListView, Static
 
 from luna_doctor import attribution, badges, baseline, cli, explain, report, sources
@@ -154,8 +156,8 @@ def _count(value):
 # asks them: how bad is it (a status moon and its word, read from the CLI's own
 # verdict) and is it getting worse (a trend word and its arrow, read from the
 # previous equal-length window). Everything after that is the window, the volume,
-# the plan and the lane count the verdict was judged against, with the scan's own
-# clock right-aligned at the same edge the rules stop at.
+# the plan and the lane count the verdict was judged against, with the age of the
+# data right-aligned at the same edge the rules stop at.
 #
 # Two alphabets, two jobs. Provenance badges (● ○ ?) ride the numbers. Status
 # moons (🌕 🌗 🌑 🌙) ride the conclusion and each region's title, never a row and
@@ -235,23 +237,27 @@ def trend_cell(metrics: dict, previous) -> str:
     return "%s %s" % (word, arrow) if arrow else ""
 
 
-def header_line(metrics: dict, previous, cap, window_hours) -> str:
-    """The dashboard's first row: state, direction, window, volume, width, clock.
+def header_line(metrics: dict, previous, cap, window_hours,
+                wall_now=None) -> str:
+    """The dashboard's first row: state, direction, window, volume, width, age.
 
-    `🌑 OVER CAPACITY · worse ▲ · 1h · 42 req · apex · ●12 lanes    14:32Z`. Six
-    cells and a right-aligned clock, one cell per fact a person in an incident
+    `🌑 OVER CAPACITY · worse ▲ · 1h · 42 req · apex · ●12 lanes     age 2m`. Six
+    cells and a right-aligned age, one cell per fact a person in an incident
     needs before the rows: how bad (the moon's word), which way (the trend word),
     what window this is, how much traffic is in it, whose plan the numbers are,
-    and how wide the lane count is.
+    how wide the lane count is, and how old what they are reading is.
 
     The width comes from `resolved_lanes`, the same call the LOAD region and the
     picture's lane scale make, so `●12 lanes` in the header and the wall in the
-    caption cannot drift. The clock is the scan's own reading, so a header is a
-    pure function of its arguments: a metrics dict with no clock loses the
-    timestamp rather than taking a second reading of the wall clock. A row is
-    never truncated to fit the budget (§3.2) - a shortened status word would be a
-    wrong answer - so the line runs long instead; the tests hold the real windows
-    under 78 cells.
+    caption cannot drift. The age is `age_cell` over the scan's own reading and
+    `wall_now`, so the row a person reads is a pure function of its arguments and
+    the one-second tick that keeps the age honest re-derives nothing here but
+    that cell. A metrics dict with no clock loses the cell rather than taking a
+    second reading of the wall clock, and a caller that passes no `wall_now` gets
+    the age of a scan that has just closed - the honest answer for a call that
+    names no other moment. A row is never truncated to fit the budget (§3.2) - a
+    shortened status word would be a wrong answer - so the line runs long
+    instead; the tests hold the real windows under 78 cells.
 
     `previous` is the previous equal-length window's analyse() dict, which the
     scan reads beside these metrics. Without it the header carries no trend cell
@@ -267,7 +273,8 @@ def header_line(metrics: dict, previous, cap, window_hours) -> str:
     cells.append(_plan_cell(metrics, cap))
     cells.append(_lanes_cell(metrics, cap))
     line = " \u00b7 ".join(cells)
-    stamp = _clock_cell(metrics)
+    scanned_at = metrics.get("scanned_at")
+    stamp = age_cell(scanned_at, scanned_at if wall_now is None else wall_now)
     if not stamp:
         return line
     gap = max(1, HEADER_CELLS - cell_len(line) - cell_len(stamp))
@@ -318,17 +325,47 @@ def _lanes_cell(metrics: dict, cap) -> str:
     return "%s lanes" % badge if value is None else "%s%d lanes" % (badge, value)
 
 
-def _clock_cell(metrics: dict) -> str:
-    """`HH:MMZ` for the scan's own clock, "" when the scan carried none.
+# How old the dashboard's data is, live. Row one carries the age of the scan it
+# drew, so a reader never subtracts a clock to learn whether what they are
+# looking at is current. `AGE_STALE_AFTER_S` is the capacity freshness window
+# `cli.CAPACITY_FRESH_S` - the same window that decides whether the `now` row
+# keeps its ● - so the age gains its stale marker at the moment the occupancy
+# stops being authoritative, and the two markers on one screen cannot disagree.
+AGE_STALE_AFTER_S = cli.CAPACITY_FRESH_S
 
-    A dashboard that does not say when it was taken is a dashboard a reader has
-    to guess about, and a microsecond stamp is a number nobody can act on; the
-    header prints the minute, in UTC, of the moment the scan closed.
+
+def age_words(seconds: float) -> str:
+    """A duration in the screen's own units: `47s` under a minute, then `2m`.
+
+    Units live in the label, not the number (§7 rule 7): the caller writes
+    `age 2m`, and this returns the `2m`.
     """
-    stamp = metrics.get("scanned_at")
-    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or stamp <= 0:
+    whole = int(max(0.0, seconds))
+    return "%ds" % whole if whole < 60 else "%dm" % (whole // 60)
+
+
+def age_cell(scan_now, wall_now, stale_after_s: float = AGE_STALE_AFTER_S) -> str:
+    """`age 2m`, `age 9m stale` past the freshness window, or "" with no clock.
+
+    The age is the wall clock minus the scan's own clock: two numbers the screen
+    already holds, so no cell reads a clock of its own and the tick that keeps
+    this cell current re-scans nothing. A scan that carried no clock has no age
+    to print, and the row loses the cell rather than inventing a zero.
+
+    Past `stale_after_s` the cell keeps its number and gains the marker: a stale
+    reading is still the last reading, and rule 8's shape is `?` plus a reason,
+    which is how the `now` row already says `stale 47m`. A wall clock behind the
+    scan's clamps to zero, because a clock skew is not a negative age.
+    """
+    scan = _epoch(scan_now)
+    wall = _epoch(wall_now)
+    if scan is None or wall is None:
         return ""
-    return datetime.fromtimestamp(float(stamp), timezone.utc).strftime("%H:%MZ")
+    age = max(0.0, wall - scan)
+    cell = "age " + age_words(age)
+    if stale_after_s is not None and age > stale_after_s:
+        cell += " stale"
+    return cell
 
 
 # ---- the region moons: each title wears the moon its own rows earn ----------
@@ -690,10 +727,7 @@ def spark_caption(metrics: dict, *, width: int = SPARK_WIDTH,
     picture = _window_picture(metrics, width)
     if picture is None:
         return ""
-    peak_at = ""
-    if picture.peak_at is not None:
-        peak_at = datetime.fromtimestamp(picture.peak_at, timezone.utc).strftime(
-            "%H:%MZ")
+    peak_at = local_hhmm(picture.peak_at)
     if lanes is None:
         return f"scale: this window · peak at {peak_at}"
     over = sum(1 for value in picture.columns if value >= lanes)
@@ -837,41 +871,105 @@ def _stamp_epoch(stamp):
         return None
 
 
+def local_hhmm(stamp) -> str:
+    """`14:32-08:00` for one epoch second, on this machine's own clock.
+
+    The logs and the account API both speak UTC, so the offset is printed beside
+    the minute rather than assumed: a person comparing this screen to a UTC log
+    has to know which clock they are reading. One form for every timestamp on the
+    screen - the sample's minute and the peak's - so two of them can be compared
+    at a glance. A stamp that is not an epoch second prints nothing.
+    """
+    epoch = _epoch(stamp)
+    if epoch is None:
+        return ""
+    local = time.localtime(epoch)
+    offset = local.tm_gmtoff
+    hours, minutes = divmod(abs(offset) // 60, 60)
+    return "%02d:%02d%s%02d:%02d" % (local.tm_hour, local.tm_min,
+                                      "-" if offset < 0 else "+",
+                                      hours, minutes)
+
+
 def _minute_of_day(stamp) -> str:
-    """`HH:MMZ` for a sample stamp, or "" when it cannot be read.
+    """`HH:MM` in local time with its offset, or "" when it cannot be read.
 
     The microseconds the account sends are a fraction nobody acts on, and the
     day cannot change inside one dashboard window.
     """
-    epoch = _stamp_epoch(stamp)
-    if epoch is None:
-        return ""
-    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%H:%MZ")
+    return local_hhmm(_stamp_epoch(stamp))
 
 
-def _stale_minutes(metrics: dict, stamp):
-    """How old the account's sample is, in whole minutes, or None.
+def _sample_age_s(metrics: dict, stamp, wall_now=None):
+    """How old the account's sample is, in seconds, or None when it cannot be told.
 
     The clock is the scan's own, so this row is a function of the metrics and
-    reads no clock of its own.
+    reads no clock of its own. `wall_now` is the moment the row is being drawn,
+    which a screen left open for a while passes so the sample's age keeps counting
+    up with the age in the header.
     """
     epoch = _stamp_epoch(stamp)
-    clock = _epoch((metrics or {}).get("scanned_at"))
+    clock = _epoch(wall_now if wall_now is not None
+                   else (metrics or {}).get("scanned_at"))
     if epoch is None or clock is None:
         return None
-    return max(0, int((clock - epoch) // 60))
+    return max(0.0, clock - epoch)
 
 
-def _now_row(metrics: dict, cap) -> tuple[str, str]:
+def _background_cell(cap) -> str:
+    """The background pool's live occupancy, in one clause (§3.3, the `now` row).
+
+    Two pools answer "right now", and they are different pools: `in_use` on the
+    flat sample counts priority requests only, and a request demoted to the slow
+    tier lands in `background` instead. So the ratio in the number column is the
+    priority pool and this clause is the other one, on the same row because both
+    come from one sample and share its one badge.
+
+    Three shapes, from the model's own null contract (`sources.CapacityPool`):
+
+    - a measured cap prints `in_use/limit`, `?` for a count that was not read;
+    - `limit: 0` is a **closed** pool - the account is entitled to nothing here,
+      so the clause says `closed` and the count (a measured 0) rides beside it;
+    - `limit: null` is a cap that could not be read, which is unknown and not a
+      closed pool, so the clause says `cap unknown` rather than 0.
+
+    No block at all is unknown too, never an idle pool. The `saturated` flag is
+    never printed: the ratio and `closed` already state it, and a flag that reads
+    `yes` is refusal language the dashboard does not speak.
+    """
+    pool = sources.capacity_overflow_now(cap)
+    if not isinstance(pool, dict):
+        return "background ? not reported"
+    limit = _count(pool.get("limit"))
+    in_use = _count(pool.get("in_use"))
+    count = "?" if in_use is None else "%d" % in_use
+    if limit == 0:
+        return "background %s closed" % count
+    if limit is None:
+        return "background %s cap unknown" % count
+    return "background %s/%d" % (count, limit)
+
+
+def _now_row(metrics: dict, cap, wall_now=None) -> tuple[str, str]:
     """The account's live occupancy: the one number that answers "right now".
 
-    Two numbers from one source wear one `●`, and the sample time sits in the
-    qualifier column so two glances can compare it. Freshness is read from
-    `metrics["capacity"]["now_fresh"]` and never from the Capacity payload,
-    which carries no freshness field: a 47-minute-old sample that still wore
-    `●` is the defect this row exists to fix. A sample that is not fresh keeps
-    its numbers and loses the authority, reading `?` and `stale 47m`; a cache
-    with no live sample prints no ratio and says why.
+    The number column is the priority pool's `in_use/limit`; the qualifier
+    carries the background pool's own occupancy and then the sample time, so a
+    person sees both pools a request can be sitting in without reading a second
+    row. Two numbers from one source wear one `●` (§4.1): the whole row is one
+    sample, so one badge leads it and neither pool prints a badge of its own.
+
+    Freshness is read from `metrics["capacity"]["now_fresh"]` and never from the
+    Capacity payload, which carries no freshness field: a 47-minute-old sample
+    that still wore `●` is the defect this row exists to fix. A sample that is
+    not fresh keeps its numbers and loses the authority, reading `?` and
+    `stale 47m`; a cache with no live sample prints no ratio and says why.
+
+    `wall_now` dates the sample against the moment the row is drawn, so a screen
+    left open long enough for the sample to age past the freshness window says so
+    instead of wearing a `●` it earned when it opened. That is the same window the
+    header's age cell gains its marker on (`AGE_STALE_AFTER_S`), which is why the
+    two cannot disagree about one sample.
     """
     served = (metrics or {}).get("capacity") or {}
     now = cli._cap_field(cap, "now")
@@ -881,15 +979,19 @@ def _now_row(metrics: dict, cap) -> tuple[str, str]:
         reason = "no capacity cached" if now is None else "no live sample"
         return _grid_row("now", _BADGE_UNKNOWN, qualifier=reason)
     number = "%d/%d" % (in_use, limit)
+    pool = _background_cell(cap)
     sampled_at = cli._cap_field(now, "sampled_at")
     sampled = _minute_of_day(sampled_at)
-    if served.get("now_fresh") is True and sampled:
+    age_s = _sample_age_s(metrics, sampled_at, wall_now)
+    fresh = (served.get("now_fresh") is True and sampled
+             and (age_s is None or age_s <= cli.CAPACITY_FRESH_S))
+    if fresh:
         return _grid_row("now", badges.BADGE_ACCOUNT, number,
-                         qualifier="sampled %s" % sampled)
-    minutes = _stale_minutes(metrics, sampled_at)
+                         qualifier="%s \u00b7 sampled %s" % (pool, sampled))
     return _grid_row("now", _BADGE_UNKNOWN, number,
-                     qualifier=("stale %dm" % minutes) if minutes is not None
-                     else "stale sample")
+                     qualifier="%s \u00b7 %s" % (
+                         pool, ("stale %dm" % int(age_s // 60))
+                         if age_s is not None else "stale sample"))
 
 
 def _peak_row(metrics: dict, previous, cap, window_hours) -> tuple[str, str]:
@@ -940,7 +1042,8 @@ def _blocked_row(metrics: dict, previous) -> tuple[str, str]:
                      "%d × 429" % rejected)
 
 
-def load_rows(metrics: dict, cap, window_hours, previous=None) -> list[tuple[str, str]]:
+def load_rows(metrics: dict, cap, window_hours, previous=None,
+              wall_now=None) -> list[tuple[str, str]]:
     """The LOAD region's three data rows: now, peak, blocked - always three.
 
     The order is the order a person asks the questions in: what is happening at
@@ -952,7 +1055,7 @@ def load_rows(metrics: dict, cap, window_hours, previous=None) -> list[tuple[str
     compare against, and the screen says that once, here, rather than printing
     a zero delta that reads as "and nothing changed".
     """
-    return [_now_row(metrics, cap),
+    return [_now_row(metrics, cap, wall_now),
             _peak_row(metrics, previous, cap, window_hours),
             _blocked_row(metrics, previous)]
 
@@ -1314,7 +1417,8 @@ def region_title(region_kind: str, region_rows: list[tuple[str, str]],
 NO_PICTURE_CAPTION = "no picture: nothing measured in the last hour"
 
 
-def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
+def dashboard_lines(choice_key: str, metrics: dict, previous, cap,
+                   wall_now=None) -> list[str]:
     """The dashboard's eighteen drawn rows, in the order the screen draws them.
 
     `choice_key` is the answer the person picked; it selects the evidence group
@@ -1324,6 +1428,12 @@ def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
     rows carry their badges and indent, the NEXT region carries its imperative
     and command, and the two key lines carry the palette.
 
+    `wall_now` is the moment the screen is being drawn, and it dates the two cells
+    that are about time rather than about the window: the header's age and the
+    `now` row's freshness. Without it both fall back to the scan's own clock, so a
+    plain call builds the screen a scan has just filled and a running screen
+    passes its own clock once a second and re-derives nothing else.
+
     A window with no active minute draws no picture: an empty picture is not a
     shape. Both rows stay where §3.1 puts them - the picture blank, its row
     carrying `NO_PICTURE_CAPTION` - because the position of every region under
@@ -1332,7 +1442,7 @@ def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
     metrics = metrics or {}
     hours = _window_hours(metrics)
     group_key = pick_lead(choice_key)
-    load = load_rows(metrics, cap, hours, previous)
+    load = load_rows(metrics, cap, hours, previous, wall_now)
     group = group_rows(group_key, metrics, previous)
     lanes, source = resolved_lanes(metrics, cap)
     blocks = concurrency_sparkline(metrics, lanes=lanes)
@@ -1342,7 +1452,7 @@ def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
         picture, caption_line = " " + blocks, " " + caption
     else:
         picture, caption_line = "", " " + NO_PICTURE_CAPTION
-    lines = [header_line(metrics, previous, cap, hours), RULE,
+    lines = [header_line(metrics, previous, cap, hours, wall_now), RULE,
              region_title(REGION_LOAD, load, hours)]
     lines += [line for _badge, line in load]
     lines += [picture, caption_line, RULE,
@@ -1351,6 +1461,260 @@ def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
     lines += [RULE]
     lines += [line for _badge, line in next_rows(metrics, cap, group_key)]
     return lines + key_lines(metrics, cap)
+
+
+# ---- the screen's colour: one scale, spent on severity --------------------
+#
+# The brief spends exactly one accent colour, on the picture. The owner widened
+# that deliberately, mactop-style: the moons carry their own terminal colour, so
+# severity reads at a glance and the status word, each region title and the
+# at-or-over run arrive coloured. The rule that survives is the one that matters:
+# colour is redundancy, never the meaning. Every coloured mark is a glyph that
+# already says the same thing, so a mono terminal and a NO_COLOR terminal lose
+# nothing but speed - Textual's own Monochrome filter handles NO_COLOR, and a
+# terminal Rich cannot colour gets the glyphs alone.
+#
+# Nothing here touches the plain rows: `dashboard_lines` and `help_lines` stay
+# uncoloured strings, the width contract is measured on those strings, and this
+# layer only adds spans over them. A styled cell counts as zero extra cells.
+SEVERITY_COLORS = {
+    report.MOON_FULL: "#3fb950",      # the window is clean
+    report.MOON_QUARTER: "#d29922",   # pressure
+    report.MOON_NEW: "#f85149",      # over capacity, and the at-or-over run
+}
+
+# The help overlay's section labels: the one accent the overlay spends, so the
+# four sections read as four regions and not as nine loose lines.
+HELP_LABEL_COLOR = "#58a6ff"
+HELP_SECTIONS = ("KEYS", "MARKS", "DRILL-DOWN", "ACCOUNT")
+
+
+def _glyph_name_at(line: str, position: int = 0) -> str:
+    """The moon name whose glyph starts at `position`, or ""."""
+    for name in (report.MOON_FULL, report.MOON_QUARTER, report.MOON_NEW,
+                 _PLAIN_MOON):
+        glyph = moon_glyph(name)
+        if line.startswith(glyph, position):
+            return name
+    return ""
+
+
+def _severity_style(name: str) -> str:
+    """The bold colour one moon's glyph and word wear, "" for the plain moon.
+
+    The plain moon claims no status, so it takes no colour: a status colour here
+    would be a fourth severity the closed set of three does not have.
+    """
+    color = SEVERITY_COLORS.get(name)
+    return "bold %s" % color if color else ""
+
+
+def _moon_spans(line: str) -> list[tuple[int, int, str]]:
+    """Every moon glyph in one row, in its own severity colour.
+
+    A moon means the same thing wherever it is drawn - the header, a region
+    title, or the key line that explains it - so one glyph is one colour on every
+    row of the screen.
+    """
+    spans = []
+    for name in (report.MOON_FULL, report.MOON_QUARTER, report.MOON_NEW):
+        style = _severity_style(name)
+        glyph = moon_glyph(name)
+        start = line.find(glyph)
+        while start != -1:
+            spans.append((start, start + len(glyph), style))
+            start = line.find(glyph, start + len(glyph))
+    return spans
+
+
+def _line_spans(line: str) -> list[tuple[int, int, str]]:
+    """The coloured runs of one plain row, as (start, end, rich style) cells.
+
+    Four marks carry colour and nothing else does: a moon glyph, the header's
+    status word and each region title (both in the moon's own colour), the `NEXT`
+    imperative in bold, and every `\u2588` - which means at or over the lane count
+    wherever it appears, in the picture and in its own caption alike.
+    """
+    spans = _moon_spans(line)
+    name = _glyph_name_at(line, 0)
+    if name:
+        style = _severity_style(name)
+        word = status_word(name)
+        start = len(moon_glyph(name)) + 1
+        if style and line.startswith(word, start):
+            spans.append((start, start + len(word), style))
+    for region_word in _REGION_WORDS.values():
+        if not line.startswith(region_word + " "):
+            continue
+        name = _glyph_name_at(line, len(region_word) + 1)
+        style = _severity_style(name) if name else ""
+        if style:
+            spans.append((0, len(region_word) + 1 + len(moon_glyph(name)), style))
+    if line.startswith("NEXT "):
+        spans.append((0, len(line.rstrip()), "bold"))
+    over = SEVERITY_COLORS[report.MOON_NEW]
+    spans += [(index, index + 1, "bold %s" % over)
+              for index, char in enumerate(line) if char == _SPARK_BLOCKS[-1]]
+    return spans
+
+
+def styled_lines(lines: list[str]) -> Text:
+    """The plain rows as one rich Text, with the severity spans over them.
+
+    The text is the plain rows character for character - the caller's own strings
+    joined by newlines - so every width assertion and every `str(render())`
+    comparison in the suite still reads the uncoloured screen, and the colours
+    exist only as spans.
+    """
+    text = Text()
+    for index, line in enumerate(lines):
+        if index:
+            text.append("\n")
+        start = len(text)
+        text.append(line)
+        for begin, end, style in _line_spans(line):
+            text.stylize(style, start + begin, start + end)
+    return text
+
+
+# ---- the help overlay: every key, every mark, and whose account -----------
+#
+# The dashboard carries one imperative and two gloss lines, and that is the point
+# (rule 2): a screen that explains itself is a screen with no room for numbers.
+# The vocabulary still has to live where a person can ask for it, so `[?]` opens
+# one overlay: every binding in one line each, the two gloss lines spelled out,
+# what the drill-downs run, and the account whose capacity the numbers are. It is
+# a modal screen, so the eighteen rows under it are untouched and closing it
+# restores exactly what was there - no re-scan, no moved row.
+HELP_KEYS = (
+    ("f", "show the fix for this window"),
+    ("d", "show the analyze report"),
+    ("c", "draw the chart"),
+    ("g", "show the next evidence group"),
+    ("w", "read the next window"),
+    ("?", "open and close this help"),
+    ("q", "quit"),
+)
+
+
+def _account_facts(metrics: dict, cap) -> list[tuple[str, str]]:
+    """The account's own facts, in the order `luna-doctor capacity` leads with.
+
+    Every value comes from what the screen already holds - the cached payload the
+    badges read and `resolved_lanes` for the width - so the overlay cannot name an
+    account the header does not. Rule 8 governs the nulls: `?` plus a one-to-three
+    word reason, never a zero standing in for a number nobody reported. A
+    `background_lanes` of 0 is the one measured zero here, and it is a real one:
+    the account is entitled to no overflow, so the pool is closed.
+    """
+    config = cli._cap_field(cap, "config")
+    plan = cli._cap_field(config, "plan")
+    if not (isinstance(plan, str) and plan.strip()):
+        plan = (metrics.get("capacity") or {}).get("plan")
+    if not (isinstance(plan, str) and plan.strip()):
+        plan = metrics.get("declared_plan")
+    lanes, source = resolved_lanes(metrics, cap)
+    background_lanes = cli._cap_field(config, "background_lanes")
+    if isinstance(background_lanes, bool) or not isinstance(background_lanes, int):
+        background = "? not reported"
+    else:
+        background = "0 closed" if background_lanes == 0 else "%d" % background_lanes
+    routing = cli._cap_field(config, "overflow_routing")
+    if cap is None:
+        cache = "? not cached"
+    else:
+        cache = age_words(cap.age_s) + (" stale" if cap.stale else "")
+    return [
+        ("plan", plan if isinstance(plan, str) and plan.strip() else "? not reported"),
+        ("priority lanes", "? not reported" if lanes is None
+         else "%s%d" % (badges.badge_for(source), lanes)),
+        ("background lanes", background),
+        ("overflow routing", "? not reported" if routing is None else "%s" % routing),
+        ("cache age", cache),
+    ]
+
+
+def help_lines(metrics: dict | None = None, cap=None) -> list[str]:
+    """The overlay's rows: the keys, the marks, the drill-downs, the account.
+
+    Plain rows on the same 78-cell budget as the dashboard, so the overlay is a
+    region of this screen rather than a wall of prose: one line per binding, one
+    line per mark, and the account's five facts as label/value pairs.
+    """
+    metrics = metrics or {}
+    lines = [" luna-doctor help · ? or esc closes it", "", " KEYS"]
+    lines += ["  %-3s %s" % (key, what) for key, what in HELP_KEYS]
+    lines += ["", " MARKS",
+              "  %s  the account reported it" % badges.BADGE_ACCOUNT,
+              "  %s  measured on this machine, a lower bound" % badges.BADGE_MEASURED,
+              "  %s  unknown, or declared and not measured" % _BADGE_UNKNOWN,
+              "  " + _moon_key(True),
+              "", " DRILL-DOWN",
+              "  d runs analyze · c runs chart · f runs fix · w rereads the logs",
+              "", " ACCOUNT"]
+    lines += ["  %-16s %s" % (label, value)
+              for label, value in _account_facts(metrics, cap)]
+    return lines
+
+
+def help_visual(lines: list[str]) -> Text:
+    """The overlay's plain rows with its section labels picked out.
+
+    The same rule as the dashboard: colour is redundancy on top of a word that is
+    already there, so a mono terminal reads the labels exactly as well and only
+    loses the grouping at a glance.
+    """
+    text = Text()
+    for index, line in enumerate(lines):
+        if index:
+            text.append("\n")
+        start = len(text)
+        text.append(line)
+        spans = _line_spans(line)
+        if line.strip() in HELP_SECTIONS:
+            indent = len(line) - len(line.lstrip())
+            spans.append((indent, indent + len(line.strip()),
+                          "bold %s" % HELP_LABEL_COLOR))
+        for begin, end, style in spans:
+            text.stylize(style, start + begin, start + end)
+    return text
+
+
+class HelpScreen(ModalScreen):
+    """The help overlay: one screen, opened and closed by `[?]` or `esc`.
+
+    A Textual `ModalScreen` rather than an inline panel, because the dashboard's
+    nineteen rows are a contract: an overlay that pushed rows around would move
+    every number under it, and one that carved a column out of it would break the
+    grid. This one covers the screen and hands it back exactly as it was - the
+    widgets underneath are never touched, and closing it re-scans nothing.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close_help", "close"),
+        Binding("question_mark", "close_help", "close"),
+    ]
+
+    CSS = """
+    HelpScreen { align: center middle; }
+    #help { width: 78; height: auto; max-height: 100%; background: $surface;
+            border: round $accent; padding: 0 1; }
+    #help-text { width: auto; }
+    """
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__()
+        self._lines = lines
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="help"):
+            # markup=False: the rows carry bracketed keys and moon glyphs, and
+            # none of it is Rich markup.
+            yield Static(help_visual(self._lines), id="help-text", markup=False)
+
+    def action_close_help(self) -> None:
+        """Hand the screen back to the dashboard it covered."""
+        self.dismiss()
 
 
 # ---- the scan: the same collect() and analyse() cmd_analyze calls ----------
@@ -1605,6 +1969,7 @@ class TriageApp(App):
         Binding("c", "show_chart", "chart"),
         Binding("g", "cycle_group", "group"),
         Binding("w", "cycle_window", "window"),
+        Binding("question_mark", "show_help", "help"),
         Binding("q", "quit", "quit"),
     ]
 
@@ -1618,6 +1983,9 @@ class TriageApp(App):
         self.capacity = None
         self.choice: str = DEFAULT_CHOICE
         self.scan_failed: str | None = None
+        # The eighteen rows as last drawn, so the one-second age tick can tell
+        # whether anything on the screen actually changed before repainting.
+        self.drawn: list[str] = []
 
     def compose(self) -> ComposeResult:
         # The ask and the dashboard occupy the same region, so the Footer under
@@ -1646,6 +2014,10 @@ class TriageApp(App):
     def on_mount(self) -> None:
         self._set_status(f"scanning local logs… (last {self.window_hours}h)")
         self.query_one("#choices", ListView).focus()
+        # One tick a second, and it re-reads nothing: the scan's clock is fixed,
+        # so the only cell that can move is the age in the header (and the `now`
+        # row's own freshness, which ages with it). No disk read, no network.
+        self.set_interval(1.0, self._age_tick)
         self._scan_worker()
 
     def _set_status(self, text: str) -> None:
@@ -1707,13 +2079,43 @@ class TriageApp(App):
         """
         lines = dashboard_lines(self.choice, metrics, self.previous,
                                 self.capacity)
-        self.query_one("#dashboard", Static).update("\n".join(lines))
+        self.drawn = lines
+        self.query_one("#dashboard", Static).update(styled_lines(lines))
         # The ask stands down to no rows instead of `display: none`: hiding the
         # focused list blurs it, and Textual then rebuilds the Footer a frame
         # later - a frame in which the screen is one row short of its nineteen.
         self.query_one("#ask").styles.height = 0
         self.query_one("#dashboard").display = True
         self._set_status("")
+
+    def _age_tick(self) -> None:
+        """Keep the screen's two clocks honest, once a second.
+
+        The rows are rebuilt from the scan the screen is already showing, dated
+        against the wall clock as it is now, and repainted only when that changed
+        anything: a scan is never re-read, and a second in which the age still
+        reads the same costs one comparison. That is the whole difference between
+        a dashboard and a screenshot.
+        """
+        if self.metrics is None or not self.drawn:
+            return
+        lines = dashboard_lines(self.choice, self.metrics, self.previous,
+                                self.capacity, wall_now=time.time())
+        if lines == self.drawn:
+            return
+        self.drawn = lines
+        self.query_one("#dashboard", Static).update(styled_lines(lines))
+
+    # -- the help overlay --------------------------------------------------
+    def action_show_help(self) -> None:
+        """Open the overlay: every key, every mark, and the account it reads.
+
+        One key both ways. On the dashboard `[?]` pushes `HelpScreen`, and on the
+        overlay the same key is that screen's own binding, so it closes. The
+        dashboard underneath is untouched: closing re-scans nothing and the group
+        on screen is the group that comes back.
+        """
+        self.push_screen(HelpScreen(help_lines(self.metrics, self.capacity)))
 
     # -- the answer, and the group ring -----------------------------------
     def on_list_view_selected(self, event: ListView.Selected) -> None:

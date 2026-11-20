@@ -30,12 +30,22 @@ _DEFAULT_CAP = object()
 _HEALTHY_SAMPLED = "2026-11-02T14:31:07.482003114Z"
 
 
-def _cap(in_use, limit, sampled_at, *, plan="apex"):
-    """The Capacity payload `sources.fetch_capacity` hands the screen."""
+def _cap(in_use, limit, sampled_at, *, plan="apex", background=(0, 12)):
+    """The Capacity payload `sources.fetch_capacity` hands the screen.
+
+    `background` is the live overflow pool the payload reports beside the flat
+    priority fields - the fixture's own shape, idle but open. None omits it, which
+    is a payload captured before the account reported the pool at all.
+    """
+    now = {"limit": limit, "in_use": in_use,
+           "available": None if in_use is None else limit - in_use,
+           "saturated": None, "ledger": "up", "sampled_at": sampled_at}
+    if background is not None:
+        used, cap_limit = background
+        now["background"] = {"limit": cap_limit, "in_use": used,
+                             "available": cap_limit - used, "saturated": False}
     data = {
-        "now": {"limit": limit, "in_use": in_use,
-                "available": None if in_use is None else limit - in_use,
-                "saturated": None, "ledger": "up", "sampled_at": sampled_at},
+        "now": now,
         "config": {"background_lanes": 12, "overflow_routing": "enabled",
                    "plan": plan, "priority_lanes": limit},
         "history": None,
@@ -82,6 +92,15 @@ def _lines(rows):
     return [line for _badge, line in rows]
 
 
+def _local(stamp):
+    """`HH:MM±HH:MM` for one stamp, on the clock of the machine running the suite.
+
+    The screen prints local time with its offset beside it, so the expected value
+    is derived the same way instead of being pinned to one developer's zone.
+    """
+    return tui.local_hhmm(tui._stamp_epoch(stamp))
+
+
 # ---- §2.1 and §2.4: over capacity, and the refusals group ------------------
 class OverCapacity(unittest.TestCase):
     """The owner's case: 42 requests, peak 17 against 12 lanes, 3 blocked."""
@@ -94,7 +113,7 @@ class OverCapacity(unittest.TestCase):
 
     def test_the_block_reads_verbatim(self):
         self.assertEqual(_lines(self.rows), [
-            " now          ●     7/12   · sampled 14:20Z",
+            " now          ●     7/12   · background 0/12 · sampled %s" % _local(_SAMPLED),
             " peak 1h      ○       17 ▲ 5 over ●12 by 5",
             " blocked      ○        3 ▲ 3 0 × 429",
         ])
@@ -125,7 +144,8 @@ class Healthy(unittest.TestCase):
 
     def test_the_block_reads_verbatim(self):
         self.assertEqual(_lines(self.rows), [
-            " now          ●     3/12   · sampled 14:31Z",
+            " now          ●     3/12   · background 0/12 · sampled %s"
+            % _local(_HEALTHY_SAMPLED),
             " peak 1h      ○        4 ▲ 1 never over",
             # Zero blocks in both windows is no change to report, so the delta
             # is `·`; `▬` is reserved for a count that both windows carried and
@@ -173,7 +193,8 @@ class NoTraffic(unittest.TestCase):
 
     def test_the_block_reads_verbatim(self):
         self.assertEqual(_lines(self.rows), [
-            " now          ●     4/12   · sampled 14:31Z",
+            " now          ●     4/12   · background 0/12 · sampled %s"
+            % _local(_HEALTHY_SAMPLED),
             " peak 1h      ?            · nothing measured here",
             " blocked      ?            ·",
         ])
@@ -414,7 +435,7 @@ class TheNowRowFreshness(unittest.TestCase):
     def test_a_fresh_sample_wears_the_account_badge_and_its_sample_time(self):
         badge, line = self._now(_window(42, 17, cap=self.cap))
         self.assertEqual(badge, "●")
-        self.assertIn("sampled 14:20Z", line)
+        self.assertIn("sampled %s" % _local(_SAMPLED), line)
         self.assertNotIn(".956", line)   # microseconds are not for a screen
 
     def test_a_stale_sample_keeps_the_numbers_and_loses_the_badge(self):
@@ -422,7 +443,7 @@ class TheNowRowFreshness(unittest.TestCase):
         badge, line = self._now(_window(42, 17, cap=self.cap, fresh=False,
                                         scanned_at="2026-11-02T15:07:43Z"))
         self.assertEqual(badge, "?")
-        self.assertEqual(line, " now          ?     7/12   · stale 47m")
+        self.assertEqual(line, " now          ?     7/12   · background 0/12 · stale 47m")
 
     def test_a_sample_with_no_readable_age_still_loses_the_badge(self):
         # No scan clock to measure the sample against: the row refuses the
@@ -431,7 +452,8 @@ class TheNowRowFreshness(unittest.TestCase):
                                  "by_outcome": {}, "peak_concurrency": 17,
                                  "capacity": {"now_fresh": False}})
         self.assertEqual(badge, "?")
-        self.assertEqual(line, " now          ?     7/12   · stale sample")
+        self.assertEqual(line,
+                         " now          ?     7/12   · background 0/12 · stale sample")
 
     def test_no_cached_payload_prints_no_ratio_and_says_why(self):
         badge, line = self._now(_window(42, 17), cap=None)

@@ -245,6 +245,31 @@ def _cells(text):
                for ch in text)
 
 
+def _local(stamp):
+    """`HH:MM±HH:MM` for one stamp, in the timezone this suite happens to run in.
+
+    The screen prints local time with its offset (a dashboard is read on the
+    machine it measures), so an expected value is derived the same way rather than
+    pinned to one developer's zone. The format itself is pinned in
+    `TheLocalClock` below, where the zone is set for the test and put back.
+    """
+    return tui.local_hhmm(tui._minute_epoch(stamp))
+
+
+def _cap_with_background(block):
+    """The fixture's Capacity with its live background pool replaced.
+
+    `block` of None removes the pool altogether, which is a payload captured
+    before the account reported one - unknown, never an idle pool.
+    """
+    payload = _payload("capacity-2026-11-02.json")
+    if block is None:
+        payload["data"]["now"].pop("background", None)
+    else:
+        payload["data"]["now"]["background"] = block
+    return _cap(payload)
+
+
 # ---- (a) the six answers select the evidence group -------------------------
 class TriageChoices(unittest.TestCase):
     """The six on-screen answers, in the order the design draws them.
@@ -498,6 +523,246 @@ class EveryNullIsUnknown(unittest.TestCase):
                         lines[16])
 
 
+# ---- the age of the dashboard's data, live --------------------------------
+class TheAgeOfTheData(unittest.TestCase):
+    """Row one dates itself, and keeps counting while the screen is open.
+
+    A dashboard is a screenshot the moment it stops saying how old it is: the
+    reader who looks up twenty minutes after a scan cannot tell the current
+    number from a stale one without subtracting a clock. So the header's right
+    cell is the age, and it is a function of two numbers the screen already
+    holds - the scan's clock and the wall clock - so the tick that keeps it
+    honest re-reads nothing.
+    """
+
+    def setUp(self):
+        self.cap = _cap(_payload("capacity-2026-11-02.json"))
+
+    def test_seconds_under_a_minute_then_whole_minutes(self):
+        self.assertEqual("age 47s", tui.age_cell(1000.0, 1047.0))
+        self.assertEqual("age 2m", tui.age_cell(1000.0, 1120.0))
+        self.assertEqual("age 62m stale", tui.age_cell(1000.0, 4720.0),
+                         "past an hour the unit stays minutes")
+
+    def test_the_marker_arrives_one_second_past_the_freshness_window(self):
+        """The window is the capacity freshness window, so the age and the `now`
+        row's `?` badge turn together rather than disagreeing about freshness."""
+        self.assertEqual(cli.CAPACITY_FRESH_S, tui.AGE_STALE_AFTER_S)
+        window = cli.CAPACITY_FRESH_S
+        self.assertEqual("age 15m", tui.age_cell(1000.0, 1000.0 + window))
+        self.assertEqual("age 15m stale",
+                         tui.age_cell(1000.0, 1001.0 + window))
+
+    def test_a_scan_with_no_clock_has_no_age_to_print(self):
+        self.assertEqual("", tui.age_cell(None, 2000.0))
+        self.assertEqual("", tui.age_cell(True, 2000.0), "a bool is not a clock")
+
+    def test_a_wall_clock_behind_the_scan_clamps_to_zero(self):
+        self.assertEqual("age 0s", tui.age_cell(2000.0, 1990.0))
+
+    def test_the_header_carries_the_age_in_its_spare_cells(self):
+        lines = tui.dashboard_lines("slow", _busy(), _busy_before(), self.cap,
+                                    _CLOCK + 120)
+        self.assertTrue(lines[0].endswith("age 2m"), lines[0])
+        self.assertEqual(18, len(lines), "the age lives in a row, it does not add one")
+
+    def test_a_quiet_call_dates_the_scan_it_was_given(self):
+        """No wall clock names no moment: the data is as old as its own scan."""
+        lines = _lines("slow", cap=self.cap)
+        self.assertTrue(lines[0].endswith("age 0s"), lines[0])
+
+    def test_the_screen_never_outgrows_its_budget_while_it_ages(self):
+        for age in (0, 47, 120, 3600):
+            lines = tui.dashboard_lines("slow", _busy(), _busy_before(),
+                                        self.cap, _CLOCK + age)
+            self.assertLessEqual(_cells(lines[0]), tui.ROW_CELLS, lines[0])
+
+    def test_the_now_row_loses_its_badge_once_the_sample_ages_out(self):
+        """One window, two markers: the header says stale and the row stops
+        claiming the account reported a number it can no longer stand behind."""
+        payload = _payload("capacity-2026-11-02.json")
+        payload["data"]["now"]["sampled_at"] = "2026-11-02T14:31:43.9Z"
+        cap = _cap(payload)
+        settled = tui.dashboard_lines("slow", _busy(), _busy_before(), cap,
+                                      _CLOCK)
+        stale = tui.dashboard_lines("slow", _busy(), _busy_before(), cap,
+                                    _CLOCK + tui.AGE_STALE_AFTER_S + 60)
+        self.assertIn(badges.BADGE_ACCOUNT, settled[3])
+        self.assertNotIn(badges.BADGE_ACCOUNT, stale[3])
+        self.assertIn("stale", stale[3])
+        self.assertIn("stale", stale[0])
+
+
+class TheAgeTicksOnTheScreen(unittest.TestCase):
+    """The one cell that moves: one second, one repaint, no re-scan."""
+
+    def test_a_tick_ages_the_header_and_leaves_every_other_row_alone(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        cap = _cap(_payload("capacity-2026-11-02.json"))
+        with mock.patch.object(tui, "scan",
+                               return_value=(_busy(), _busy_before(), cap)) as scan:
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                opened = list(app.drawn)
+                self.assertTrue(opened[0].endswith("age 0s"), opened[0])
+                with mock.patch.object(tui.time, "time",
+                                       return_value=_CLOCK + 125):
+                    app._age_tick()
+                    await pilot.pause()
+                aged = list(app.drawn)
+                self.assertEqual(1, scan.call_count, "a tick re-scanned the logs")
+                self.assertTrue(aged[0].endswith("age 2m"), aged[0])
+                self.assertEqual(opened[1:], aged[1:],
+                                 "the age moved a row that has no age in it")
+                self.assertIn("age 2m", str(app.query_one("#dashboard").render()))
+                await pilot.press("q")
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
+
+
+# ---- both pools on the now row --------------------------------------------
+class BothPoolsOnTheNowRow(unittest.TestCase):
+    """Priority and background are two pools, and the row shows both.
+
+    The flat `now` fields count priority requests only: a request demoted to the
+    background tier appears in the payload's own `background` block instead. One
+    row answers "right now" for both, on one sample and one badge, and the null
+    contract decides the three shapes - a measured cap, a closed pool, an unread
+    cap - so a closed pool never reads as a saturated one and an unread cap never
+    reads as zero.
+    """
+
+    def _now(self, cap):
+        return tui.dashboard_lines("slow", _busy(), _busy_before(), cap)[3]
+
+    def test_the_number_column_is_priority_and_the_clause_is_background(self):
+        row = self._now(_cap(_payload("capacity-2026-11-02.json")))
+        self.assertIn("7/12", row, "the priority pool keeps the number column")
+        self.assertIn("background 0/12", row, "the fixture's pool is open and idle")
+        self.assertRegex(row, r"sampled \d\d:\d\d[+-]\d\d:\d\d")
+
+    def test_a_closed_pool_says_closed_and_never_saturated(self):
+        row = self._now(_cap_with_background(
+            {"in_use": 0, "limit": 0, "available": 0, "saturated": False}))
+        self.assertIn("background 0 closed", row)
+        self.assertNotIn("saturated", row)
+        self.assertNotIn("0/0", row, "a closed pool is not a ratio")
+
+    def test_an_unread_cap_is_unknown_and_not_a_closed_pool(self):
+        row = self._now(_cap_with_background(
+            {"in_use": 4, "limit": None, "available": None, "saturated": None}))
+        self.assertIn("background 4 cap unknown", row)
+        self.assertNotIn("closed", row)
+
+    def test_a_pool_the_account_never_reported_is_unknown(self):
+        row = self._now(_cap_with_background(None))
+        self.assertIn("background ? not reported", row)
+        self.assertNotIn("closed", row)
+
+    def test_a_count_nobody_read_is_a_question_mark_not_a_zero(self):
+        row = self._now(_cap_with_background(
+            {"in_use": None, "limit": 12, "available": None, "saturated": None}))
+        self.assertIn("background ?/12", row)
+
+    def test_one_sample_wears_one_badge(self):
+        """§4.1: both pools come from the same sample, so one `●` leads the row."""
+        row = self._now(_cap(_payload("capacity-2026-11-02.json")))
+        self.assertEqual(1, row.count(badges.BADGE_ACCOUNT), row)
+
+    def test_the_two_null_shapes_stay_apart_on_the_row(self):
+        closed = self._now(_cap_with_background({"in_use": 0, "limit": 0}))
+        unread = self._now(_cap_with_background({"in_use": 0, "limit": None}))
+        self.assertNotEqual(closed, unread)
+
+
+# ---- every row on the fixed grid, in every state, with an aged scan -------
+class TheGridHoldsInEveryState(unittest.TestCase):
+    """Eighteen rows, 78 cells, five states - and the age never breaks either.
+
+    The age is a new cell in an existing row, so the contract that has to survive
+    it is the old one: the geometry does not move, and no row outgrows the
+    budget, however long the screen has been open.
+    """
+
+    def _states(self):
+        healthy_cap = _cap(_payload("capacity-2026-11-02.json"))
+        return [
+            ("over capacity", "slow", _busy(), _busy_before(), healthy_cap),
+            ("healthy", "slow", _healthy(), _busy_before(), healthy_cap),
+            ("refusals", "concurrency", _busy(), _busy_before(), healthy_cap),
+            ("no traffic", "slow", _empty(), None, healthy_cap),
+            ("no capacity", "slow", _busy(), _busy_before(), None),
+            ("degraded", "slow", _busy(), _busy_before(),
+             _cap(_degraded_payload())),
+        ]
+
+    def test_every_state_is_eighteen_rows_inside_the_budget(self):
+        for name, answer, metrics, previous, cap in self._states():
+            for wall_now in (None, (metrics.get("scanned_at") or 0) + 3600):
+                lines = tui.dashboard_lines(answer, metrics, previous, cap,
+                                            wall_now)
+                self.assertEqual(18, len(lines), name)
+                for line in lines:
+                    self.assertLessEqual(_cells(line), tui.ROW_CELLS,
+                                         f"{name}: {line!r}")
+                    self.assertTrue(tui.dashboard_ok_row(line), f"{name}: {line!r}")
+
+    def test_the_age_is_a_cell_and_not_a_row(self):
+        lines = tui.dashboard_lines("slow", _busy(), _busy_before(), None)
+        self.assertEqual(18, len(lines))
+        self.assertEqual(1, sum(1 for line in lines if "age " in line))
+
+
+# ---- the clock the screen speaks: this machine's timezone -----------------
+class TheLocalClock(unittest.TestCase):
+    """Timestamps print local time with one offset, never a bare UTC minute.
+
+    The logs and the account API both speak UTC, so the offset is the fact that
+    lets a reader compare this screen to them; a `Z` suffix silently claims the
+    machine is on UTC and is wrong for most of them.
+    """
+
+    def test_the_format_is_minutes_plus_the_offset(self):
+        epoch = tui._minute_epoch("2026-11-02T14:04Z")
+        self.assertRegex(tui.local_hhmm(epoch), r"^\d\d:\d\d[+-]\d\d:\d\d$")
+
+    def test_a_known_zone_prints_its_own_offset(self):
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = "America/Los_Angeles"
+        time.tzset()
+        self.addCleanup(self._restore_zone, previous)
+        self.assertEqual("06:04-08:00",
+                         tui.local_hhmm(tui._minute_epoch("2026-11-02T14:04Z")))
+
+    @staticmethod
+    def _restore_zone(previous):
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+    def test_no_row_claims_utc(self):
+        lines = tui.dashboard_lines("slow", _busy(), _busy_before(),
+                                    _cap(_payload("capacity-2026-11-02.json")))
+        for line in lines:
+            self.assertNotRegex(line, r"\d\d:\d\dZ", f"a UTC minute survived: {line!r}")
+
+    def test_a_stamp_nobody_can_read_prints_nothing(self):
+        self.assertEqual("", tui.local_hhmm(None))
+        self.assertEqual("", tui.local_hhmm("2026-11-02T14:04Z"))
+        self.assertEqual("", tui._minute_of_day(None))
+
+
 # ---- (e) an empty window says what is missing -----------------------------
 class TheEmptyWindow(unittest.TestCase):
     """No traffic in the window: the rows say `?` with a reason, never a number."""
@@ -573,16 +838,228 @@ class TheSlowestDigest(unittest.TestCase):
 
 # ---- the app shell: no terminal needed to check the contract -------------
 class TriageAppSurface(unittest.TestCase):
+    """The app shell, and the bindings the Footer renders."""
+
     def test_the_app_takes_a_plan_and_an_online_flag(self):
         app = tui.TriageApp(plan="apex", online=False)
         self.assertEqual("apex", app.plan)
         self.assertFalse(app.online)
 
+
+# ---- the help overlay -----------------------------------------------------
+class TheHelpOverlay(unittest.TestCase):
+    """`[?]` opens one overlay: every key, every mark, and the account.
+
+    The dashboard carries one imperative and two gloss lines on purpose (§7 rule
+    2), so the rest of the vocabulary lives here. It is a modal screen, which is
+    what lets the eighteen rows underneath stay exactly where they were.
+    """
+
+    # Textual's own key name for the glyph on the cap.
+    DISPLAY = {"question_mark": "?"}
+
+    def setUp(self):
+        self.cap = _cap(_payload("capacity-2026-11-02.json"))
+        self.lines = tui.help_lines(_busy(), self.cap)
+        self.text = "\n".join(self.lines)
+
+    def test_every_binding_is_named_with_its_own_line(self):
+        keys = [line.strip().split()[0] for line in self.lines
+                if line.startswith("  ") and not line.startswith("   ")]
+        for binding in tui.TriageApp.BINDINGS:
+            key = self.DISPLAY.get(binding.key, binding.key)
+            self.assertIn(key, keys[:len(tui.HELP_KEYS)],
+                          f"{key} is not in the help: {self.text!r}")
+        self.assertEqual([key for key, _what in tui.HELP_KEYS],
+                         [self.DISPLAY.get(b.key, b.key) for b in tui.TriageApp.BINDINGS])
+
+    def test_every_row_fits_the_dashboards_budget(self):
+        for line in self.lines:
+            self.assertLessEqual(_cells(line), tui.ROW_CELLS, line)
+
+    def test_the_marks_are_spelled_out_further_than_the_gloss_line(self):
+        self.assertIn("the account reported it", self.text)
+        self.assertIn("measured on this machine", self.text)
+        self.assertIn("not established", self.text,
+                      "the plain moon is explained even when it is not on screen")
+        for name in (report.MOON_FULL, report.MOON_QUARTER, report.MOON_NEW):
+            self.assertIn(tui.moon_glyph(name), self.text)
+
+    def test_one_row_says_what_the_drill_downs_run(self):
+        drill = [line for line in self.lines if line.strip().startswith("d runs")]
+        self.assertEqual(1, len(drill), self.text)
+        for command in ("analyze", "chart", "fix"):
+            self.assertIn(command, drill[0])
+
+    def test_the_account_section_is_the_accounts_own_facts(self):
+        account = self.lines[self.lines.index(" ACCOUNT") + 1:]
+        # One grid, like a data row: two cells of indent, a 16-cell label, a value.
+        facts = {line[2:18].strip(): line[19:].strip() for line in account}
+        self.assertEqual("apex", facts["plan"])
+        self.assertEqual("%s12" % badges.BADGE_ACCOUNT, facts["priority lanes"])
+        self.assertEqual("12", facts["background lanes"])
+        self.assertEqual("enabled", facts["overflow routing"])
+        self.assertTrue(facts["cache age"], "the cache's age is the account's too")
+
+    def test_an_account_nobody_cached_says_so_on_every_row(self):
+        account = tui.help_lines({}, None)
+        section = account[account.index(" ACCOUNT") + 1:]
+        for line in section:
+            self.assertIn("?", line, f"a fact nobody reported is not a number: {line!r}")
+
+    def test_the_section_labels_are_the_dashboards_own_regions(self):
+        labels = [line.strip() for line in self.lines if line.strip() in tui.HELP_SECTIONS]
+        self.assertEqual(list(tui.HELP_SECTIONS), labels)
+
+    def test_the_question_mark_both_opens_and_closes_it(self):
+        asyncio.run(self._drive(toggle=True))
+
+    def test_escape_closes_it_and_gives_the_same_screen_back(self):
+        asyncio.run(self._drive(toggle=False))
+
+    async def _drive(self, *, toggle):
+        app = tui.TriageApp()
+        cap = _cap(_payload("capacity-2026-11-02.json"))
+        with mock.patch.object(tui, "scan",
+                               return_value=(_busy(), _busy_before(), cap)) as scan, \
+                mock.patch.object(tui.time, "time", return_value=_CLOCK):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                before = self._dashboard(app)
+                await pilot.press("question_mark")
+                await self._settle(pilot, lambda: self._help_text(app))
+                self.assertIsInstance(app.screen, tui.HelpScreen)
+                self.assertIn("KEYS", self._help_text(app))
+                self.assertIn("ACCOUNT", self._help_text(app))
+                await pilot.press("question_mark" if toggle else "escape")
+                await self._settle(pilot,
+                                   lambda: not isinstance(app.screen, tui.HelpScreen))
+                self.assertEqual(before, self._dashboard(app),
+                                 "the overlay did not hand the same screen back")
+                self.assertEqual(1, scan.call_count, "closing the help re-scanned")
+                self.assertIn("help", self._footer(app))
+                await pilot.press("q")
+
+    @staticmethod
+    def _help_text(app) -> str:
+        """The overlay's own words, "" until the screen has composed."""
+        drawn = app.screen.query("#help-text")
+        return str(drawn.first().render()) if drawn else ""
+
+    @staticmethod
+    def _dashboard(app) -> list:
+        return str(app.query_one("#dashboard").render()).splitlines()
+
+    @staticmethod
+    def _footer(app) -> str:
+        return "\n".join(row for row in _painted(app) if "quit" in row)
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
+
+
+# ---- colour: severity, and nothing else -----------------------------------
+class TheSeverityColours(unittest.TestCase):
+    """The moons carry their terminal colour, and the plain text does not move.
+
+    Colour is redundancy here, never meaning: every coloured mark is a glyph that
+    already says the same thing, the width contract is measured on the uncoloured
+    rows, and Textual's own Mono filter answers NO_COLOR.
+    """
+
+    def setUp(self):
+        self.cap = _cap(_payload("capacity-2026-11-02.json"))
+        self.lines = tui.dashboard_lines("slow", _busy(), _busy_before(), self.cap)
+
+    def test_the_three_moons_are_the_three_colours(self):
+        self.assertEqual({report.MOON_FULL, report.MOON_QUARTER, report.MOON_NEW},
+                         set(tui.SEVERITY_COLORS))
+
+    def test_the_styled_screen_is_the_plain_screen_character_for_character(self):
+        styled = tui.styled_lines(self.lines)
+        self.assertEqual("\n".join(self.lines), str(styled))
+        self.assertEqual(_cells("\n".join(self.lines)), _cells(str(styled)))
+        self.assertEqual(18, len(str(styled).splitlines()))
+
+    def test_the_status_word_wears_its_moons_colour(self):
+        name = tui.header_moon(_busy())
+        word = tui.status_word(name)
+        start = self.lines[0].index(word)
+        self.assertIn((start, start + len(word), tui._severity_style(name)),
+                      tui._line_spans(self.lines[0]))
+
+    def test_each_region_title_wears_its_own_regions_colour(self):
+        for index in (2, 9):
+            line = self.lines[index]
+            name = tui._glyph_name_at(line, len(line.split()[0]) + 1)
+            self.assertTrue(name, line)
+            self.assertIn((0, len(line.split()[0]) + 1 + len(tui.moon_glyph(name)),
+                           tui._severity_style(name)), tui._line_spans(line))
+
+    def test_the_at_or_over_run_is_the_one_coloured_mark_in_the_picture(self):
+        spans = tui._line_spans(self.lines[6])
+        coloured = {index for start, _end, _style in spans for index in [start]
+                    if self.lines[6][start] == "█"}
+        self.assertTrue(coloured, "the picture drew no at-or-over cell")
+        self.assertEqual({index for index, char in enumerate(self.lines[6])
+                          if char == "█"}, coloured)
+
+    def test_no_colour_ever_lands_on_a_data_row_number(self):
+        """The rows stay neutral: severity is a region fact, not a row fact."""
+        for index in (3, 4, 5, 10, 11, 12):
+            self.assertEqual([], tui._line_spans(self.lines[index]), self.lines[index])
+
+    def test_a_mono_terminal_loses_the_colour_and_nothing_else(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        previous = os.environ.get("NO_COLOR")
+        os.environ["NO_COLOR"] = "1"
+        self.addCleanup(self._restore_no_color, previous)
+        app = tui.TriageApp()
+        with mock.patch.object(tui, "scan",
+                               return_value=(_busy(), _busy_before(), self.cap)), \
+                mock.patch.object(tui.time, "time", return_value=_CLOCK):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                self.assertTrue(app.no_color, "Textual did not take the NO_COLOR filter")
+                painted = [row for row in _painted(app) if row.strip()]
+                self.assertEqual(19, len(painted), "the mono screen lost a row")
+                self.assertEqual(self.lines, self._dashboard(app))
+                await pilot.press("q")
+
+    @staticmethod
+    def _restore_no_color(previous):
+        if previous is None:
+            os.environ.pop("NO_COLOR", None)
+        else:
+            os.environ["NO_COLOR"] = previous
+
+    @staticmethod
+    def _dashboard(app) -> list:
+        return str(app.query_one("#dashboard").render()).splitlines()
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
+
+
+class TriageAppKeysOnTheFooter(unittest.TestCase):
+    """The footer renders `BINDINGS`: the keys are the screen's whole vocabulary."""
+
     def test_the_footer_renders_every_key_with_a_description(self):
         """§8 item 5: the Footer renders `BINDINGS`, and every binding has a word."""
         bindings = [(binding.key, binding.description)
                     for binding in tui.TriageApp.BINDINGS]
-        self.assertEqual(["f", "d", "c", "g", "w", "q"],
+        self.assertEqual(["f", "d", "c", "g", "w", "question_mark", "q"],
                          [key for key, _word in bindings])
         for key, word in bindings:
             self.assertTrue(word.strip(), key)
@@ -1027,9 +1504,10 @@ class ConcurrencySparkline(unittest.TestCase):
         self.assertNotEqual(" ", spark[-1])
 
     def test_the_caption_says_which_scale_the_row_is_drawn_on(self):
-        self.assertEqual("scale: this window · peak at 14:04Z",
+        self.assertEqual("scale: this window · peak at %s" % _local("2026-11-02T14:04Z"),
                          tui.spark_caption(_busy_hour()))
-        self.assertEqual("█ = at or over ●12 lanes · over 7m of 60m · peak at 14:04Z",
+        self.assertEqual("█ = at or over ●12 lanes · over 7m of 60m · peak at %s"
+                         % _local("2026-11-02T14:04Z"),
                          tui.spark_caption(_busy_hour(), lanes=12))
 
     def test_the_caption_badges_the_wall_with_the_source_its_lanes_came_from(self):
@@ -1083,7 +1561,7 @@ class ThePictureScalesToTheLanes(unittest.TestCase):
         caption = tui.spark_caption(_hour_scan([(0, 3), (1, 4)]), lanes=12)
         self.assertIn("never over", caption)
         self.assertNotIn("over 0m", caption)
-        self.assertEqual("scale: this window · peak at 14:01Z",
+        self.assertEqual("scale: this window · peak at %s" % _local("2026-11-02T14:01Z"),
                          tui.spark_caption(_hour_scan([(0, 3), (1, 4)])))
 
     def test_an_empty_window_has_no_picture_and_no_caption(self):

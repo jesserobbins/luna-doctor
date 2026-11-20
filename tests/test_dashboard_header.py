@@ -115,19 +115,25 @@ def _healthy(**over):
 
 
 # ---- the five states, as the mockups draw them ------------------------------
+# The header's right-hand cell is now the LIVE age of the scan, not a static
+# `14:32Z`: a clock the reader has to subtract from cannot answer "is this
+# current?" at a glance, and the absolute sample minute survives on the `now`
+# row (`sampled HH:MM±HH:MM`). A plain call names no wall clock, so the age a
+# header carries without one is the age of a scan that has just closed.
+#
 # §2.1 (and §2.4, which reaches the same conclusion by a different group of
 # rows): the owner's case.
 _OVER_CAPACITY_HEADER = (
-    "🌑 OVER CAPACITY · worse ▲ · 1h · 42 req · apex · ●12 lanes            14:32Z")
+    "🌑 OVER CAPACITY · worse ▲ · 1h · 42 req · apex · ●12 lanes            age 0s")
 # §2.2: nothing blocked, nothing over, and both windows the same size.
 _HEALTHY_HEADER = (
-    "🌕 OK · unchanged ▬ · 1h · 9 req · apex · ●12 lanes                    14:32Z")
+    "🌕 OK · unchanged ▬ · 1h · 9 req · apex · ●12 lanes                    age 0s")
 # §2.3: the honest degradation - a plan is known and the lane count is not.
 _NO_CAPACITY_HEADER = (
-    "🌗 PRESSURE · worse ▲ · 1h · 42 req · apex · ? lanes                   14:32Z")
+    "🌗 PRESSURE · worse ▲ · 1h · 42 req · apex · ? lanes                   age 0s")
 # §2.5: nothing measured at all, so no trend is claimed either.
 _NO_TRAFFIC_HEADER = (
-    "🌙 NOT ESTABLISHED · 1h · 0 req · apex · ●12 lanes                     14:32Z")
+    "🌙 NOT ESTABLISHED · 1h · 0 req · apex · ●12 lanes                     age 0s")
 
 # The mockup rows, as printed (leading spaces included): the copy rules are
 # measured in terminal cells, so the strings are the ones a reader sees.
@@ -212,15 +218,20 @@ class TheHeaderLine(unittest.TestCase):
                      _NO_TRAFFIC_HEADER):
             self.assertEqual(77, cell_len(line))
 
-    def test_the_clock_is_the_scans_own_reading(self):
+    def test_the_age_is_the_scans_own_reading_and_the_wall_clock_given(self):
+        """The header holds two numbers the screen already has: the scan's clock
+        and the moment the row is drawn. Neither is a second reading of time."""
         earlier = _window(scanned_at=_CLOCK - 3600)
-        self.assertTrue(tui.header_line(earlier, _previous(), _APEX_CAP, 1)
-                        .endswith("13:32Z"))
+        self.assertTrue(tui.header_line(earlier, _previous(), _APEX_CAP, 1,
+                                        _CLOCK - 3600 + 120).endswith("age 2m"))
+        self.assertTrue(tui.header_line(earlier, _previous(), _APEX_CAP, 1,
+                                        _CLOCK + 600).endswith("age 70m stale"))
 
     def test_a_scan_with_no_clock_prints_no_timestamp(self):
         # A header is a pure function of its arguments: an unclocked scan loses
         # the cell rather than taking a second, later reading of the wall clock.
-        line = tui.header_line(_window(scanned_at=None), _previous(), _APEX_CAP, 1)
+        line = tui.header_line(_window(scanned_at=None), _previous(), _APEX_CAP, 1,
+                               _CLOCK)
         self.assertEqual("🌑 OVER CAPACITY · worse ▲ · 1h · 42 req · apex · ●12 lanes",
                          line)
 
