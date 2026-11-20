@@ -17,6 +17,17 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- The triage screen is a nineteen-row dashboard. It reads one hour, and every
+  number carries a delta against the previous hour. One picture draws this
+  machine's in-flight concurrency, one cell per minute, and a `█` cell is a
+  minute that reached the account's priority concurrency count. The rows hold
+  their place in every state, the middle group answers the question the person
+  picked, `g` steps through the three groups, and `w` cycles the window over 1h,
+  6h and 24h. The 7-day and 30-day numbers left the screen for `capacity` and
+  `analyze`.
+
 ## [0.7.0-alpha.3] - 2026-11-13
 
 ### Changed

@@ -227,6 +227,11 @@ def _empty():
                  saturated=0, latency_s={}, by_minute=[])
 
 
+def _painted(app) -> list[str]:
+    """The rows the screen paints, as text: the frame a person is looking at."""
+    return [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+
+
 def _lines(choice_key="slow", metrics=None, previous=None, cap=None):
     return tui.dashboard_lines(choice_key,
                                _busy() if metrics is None else metrics,
@@ -364,10 +369,16 @@ class TheDashboardsOrder(unittest.TestCase):
         self.assertEqual(tui.HEADER_CELLS, _cells(lines[2]))
         self.assertEqual(tui.HEADER_CELLS, _cells(lines[9]))
 
-    def test_the_picture_rows_stay_when_the_window_drew_no_picture(self):
-        """§2.5: the empty-picture rule hides the drawing, not the positions."""
+    def test_the_empty_picture_row_explains_the_missing_picture(self):
+        """§2.5: the drawing goes, the rows and a one-clause caption stay.
+
+        A blank row under a blank picture reads as a rendering fault, so the row
+        says which fact is missing and every region under it keeps its place.
+        """
         lines = _lines("slow", _empty(), None, self.cap)
-        self.assertEqual(["", ""], lines[6:8])
+        self.assertEqual("", lines[6], "an empty picture is not a shape")
+        self.assertEqual(" " + tui.NO_PICTURE_CAPTION, lines[7])
+        self.assertTrue(tui.dashboard_ok_row(lines[7]), lines[7])
         self.assertEqual(tui.RULE, lines[8])
 
     def test_an_unknown_answer_is_a_caller_bug(self):
@@ -567,11 +578,12 @@ class TriageAppSurface(unittest.TestCase):
         self.assertEqual("apex", app.plan)
         self.assertFalse(app.online)
 
-    def test_the_footer_renders_five_keys_with_descriptions(self):
+    def test_the_footer_renders_every_key_with_a_description(self):
         """§8 item 5: the Footer renders `BINDINGS`, and every binding has a word."""
         bindings = [(binding.key, binding.description)
                     for binding in tui.TriageApp.BINDINGS]
-        self.assertEqual(["f", "d", "c", "w", "q"], [key for key, _word in bindings])
+        self.assertEqual(["f", "d", "c", "g", "w", "q"],
+                         [key for key, _word in bindings])
         for key, word in bindings:
             self.assertTrue(word.strip(), key)
 
@@ -702,6 +714,65 @@ class TheWindowKeyOnTheScreen(unittest.TestCase):
                 return
 
 
+class TheGroupKeyOnTheScreen(unittest.TestCase):
+    """[g] steps through the evidence groups: latency -> refusals -> stalls.
+
+    The answer list is only up while the scan runs, so this is how a person asks
+    for the other three rows afterwards. The groups are a ring, and the ring
+    never moves a row: the title, the three rows and NEXT change, and the
+    nineteen-row geometry holds.
+    """
+
+    def test_next_group_rings_the_three_groups(self):
+        seen, group = [], tui.EVIDENCE_GROUPS[0]
+        for _step in range(len(tui.EVIDENCE_GROUPS)):
+            seen.append(group)
+            group = tui.next_group(group)
+        self.assertEqual(list(tui.EVIDENCE_GROUPS), seen, "the ring is the ranked order")
+        self.assertEqual(tui.EVIDENCE_GROUPS[0], group, "the ring closes")
+        self.assertEqual(tui.EVIDENCE_GROUPS[0], tui.next_group("prose"),
+                         "a group the dashboard does not offer lands on the first")
+
+    def test_g_cycles_the_group_and_keeps_the_nineteen_rows(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        cap = _cap(_payload("capacity-2026-11-02.json"))
+        with mock.patch.object(tui, "scan",
+                               return_value=(_busy(), _busy_before(), cap)):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                opened = self._dashboard(app)
+                self.assertTrue(opened[9].startswith("LATENCY "), opened[9])
+                titles = []
+                for _press in range(3):
+                    await pilot.press("g")
+                    await pilot.pause()
+                    drawn = self._dashboard(app)
+                    self.assertEqual(18, len(drawn), "a group never grows the screen")
+                    self.assertEqual(opened[:9], drawn[:9],
+                                     "a region above the group moved")
+                    titles.append(drawn[9].split()[0])
+                self.assertEqual(["REFUSALS", "STALLS", "LATENCY"], titles)
+                painted = [row for row in _painted(app) if row.strip()]
+                self.assertEqual(19, len(painted),
+                                 "the eighteen rows and the Footer, still")
+                await pilot.press("q")
+
+    @staticmethod
+    def _dashboard(app) -> list:
+        return str(app.query_one("#dashboard").render()).splitlines()
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
+
+
 class TriageAppFailure(unittest.TestCase):
     """A failed scan must not be reported as a scan still in progress."""
 
@@ -770,8 +841,9 @@ class TheDashboardOnTheScreen(unittest.TestCase):
             async with app.run_test(size=(80, 24)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
                 lines = self._dashboard(app).splitlines()
-                self.assertEqual(["", ""], lines[6:8],
-                                 "an empty picture is not a shape")
+                self.assertEqual("", lines[6], "an empty picture is not a shape")
+                self.assertIn("no picture", lines[7],
+                              "the empty picture's row says what is missing")
                 self.assertIn("NOT ESTABLISHED", lines[0])
                 await pilot.press("q")
 

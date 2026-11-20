@@ -91,6 +91,13 @@ _LEAD = {
 # not one of them: it is on the screen in every state.
 EVIDENCE_GROUPS = ("latency", "refusals", "stalls")
 
+# The answer each group is named by when a person steps through the groups
+# themselves (`[g]`): the answer that reports that group's own symptom. Spelled
+# as strings for the same reason `_LEAD` is - this table is read at import time
+# and the region names are declared further down.
+_ANSWER_FOR_GROUP = {"latency": "slow", "refusals": "concurrency",
+                     "stalls": "stuck"}
+
 _BADGE_UNKNOWN = badges.badge_for(sources.PROV_UNKNOWN)
 _BADGE_MEASURED = badges.badge_for(sources.PROV_MEASURED)
 
@@ -119,6 +126,19 @@ def window_cycle(hours) -> int:
     if current not in WINDOW_CYCLE:
         return WINDOW_CYCLE[0]
     return WINDOW_CYCLE[(WINDOW_CYCLE.index(current) + 1) % len(WINDOW_CYCLE)]
+
+
+def next_group(group_key: str) -> str:
+    """The evidence group `[g]` moves to: latency -> refusals -> stalls -> back.
+
+    A ring like `window_cycle`'s, and closed the same way: a group the dashboard
+    does not offer lands on the first one rather than on a group the screen
+    never draws.
+    """
+    if group_key not in EVIDENCE_GROUPS:
+        return EVIDENCE_GROUPS[0]
+    return EVIDENCE_GROUPS[(EVIDENCE_GROUPS.index(group_key) + 1)
+                           % len(EVIDENCE_GROUPS)]
 
 
 def _count(value):
@@ -357,12 +377,19 @@ _WINDOW_LABEL = re.compile(r"\d+h$")
 # can darken a region, and neither can lighten one.
 _CONTEXT_LABELS = ("now", "gateway")
 
-# What the rows have to say, as closed sets of labels. `blocked` is the darkest,
-# because those requests never got in at all; a 429, an at-limit refusal or a
-# demotion to the slow tier is pressure (§4.2).
+# What the rows have to say, as closed sets of labels. `blocked` is the darkest
+# in the LOAD region, because those requests never got in at all; a stall is
+# pressure in the region that reports one (§4.2).
 _BLOCK_LABELS = ("blocked",)
-_PRESSURE_LABELS = ("429", "at limit", "background", "stalled", "starved")
+_PRESSURE_LABELS = ("stalled", "starved")
 _LATENCY_LABELS = ("p50", "p90")
+
+# The three ways work is turned away, as the REFUSALS region draws them (§2.4):
+# the gateway's 429, the account's full pool, and the demotion to the slow tier.
+# In that region these rows are the region's own subject, so a count above zero
+# is the darkest moon - the rule the admission counts follow: refusal severity
+# comes from the counts, never from the qualifier printed beside them.
+_REFUSAL_LABELS = ("429", "at limit", "background")
 
 # A load row's own words: a peak that crossed the wall, or a peak with no wall to
 # be measured against. `never over` is the clean case and never matches.
@@ -401,6 +428,12 @@ def region_moon(region_rows: list[tuple[str, str]], region_kind: str) -> str:
     the four regions they belong to, because each answers a different question
     and so reads severity differently. Nothing here looks at the header: the
     regions are the causes, and the conclusion is `header_moon`'s.
+
+    Two kinds of count earn the darkest moon, because both are work that never
+    ran: a LOAD region's admission block, and a REFUSALS region's refusal. The
+    second closes a hole the invariant would otherwise leave open: a window can
+    be dark because the gateway refused the work, with no admission block in the
+    LOAD rows, and the region that holds those refusals has to be able to say so.
     """
     if region_kind not in REGION_KINDS:
         raise KeyError(region_kind)
@@ -412,6 +445,9 @@ def region_moon(region_rows: list[tuple[str, str]], region_kind: str) -> str:
         return moon_glyph(_PLAIN_MOON)
     if any(fact.count for fact in evidence if fact.label in _BLOCK_LABELS):
         return moon_glyph(report.MOON_NEW)
+    if region_kind == REGION_REFUSALS and any(
+            fact.count for fact in evidence if fact.label in _REFUSAL_LABELS):
+        return moon_glyph(report.MOON_NEW)
     if _region_pressure(evidence, region_kind):
         return moon_glyph(report.MOON_QUARTER)
     return moon_glyph(report.MOON_FULL)
@@ -420,13 +456,15 @@ def region_moon(region_rows: list[tuple[str, str]], region_kind: str) -> str:
 def _region_pressure(evidence, region_kind: str) -> bool:
     """Whether a region's own rows say pressure, for this kind of region.
 
-    A refusal count above zero is pressure in any region. A load region adds the
-    qualifier its peak wears: `over` means the wall was crossed and `lane count
-    unknown` means there is no wall to measure against, so neither can read clean,
-    while `never over` is a clean window whose peak happened to move (§2.2). A
-    latency region adds its own direction, because a percentile has no wall to
-    cross and the move is the whole story (§2.1: p90 240s rising reads pressure;
-    §2.2: p90 58s falling reads clean).
+    A stall above zero is pressure in the region that reports it. A refusal is
+    darker than pressure and belongs to the REFUSALS region, which `region_moon`
+    reads before asking here. A load region adds the qualifier its peak wears:
+    `over` means the wall was crossed and `lane count unknown` means there is no
+    wall to measure against, so neither can read clean, while `never over` is a
+    clean window whose peak happened to move (§2.2). A latency region adds its
+    own direction, because a percentile has no wall to cross and the move is the
+    whole story (§2.1: p90 240s rising reads pressure; §2.2: p90 58s falling
+    reads clean).
     """
     for fact in evidence:
         if fact.label in _PRESSURE_LABELS and fact.count:
@@ -1262,6 +1300,12 @@ def region_title(region_kind: str, region_rows: list[tuple[str, str]],
     return name + " " * gap + basis
 
 
+# The caption an empty window draws where the picture's key would go. A blank
+# row under a blank picture reads as a rendering fault, so one clause names the
+# fact that is missing; the position itself is the contract (§2.5).
+NO_PICTURE_CAPTION = "no picture: nothing measured in the last hour"
+
+
 def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
     """The dashboard's eighteen drawn rows, in the order the screen draws them.
 
@@ -1272,9 +1316,10 @@ def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
     rows carry their badges and indent, the NEXT region carries its imperative
     and command, and the two key lines carry the palette.
 
-    A window with no active minute draws no picture and no caption: an empty
-    picture is not a shape. Both rows stay, blank, because the position of every
-    region under them is part of the contract.
+    A window with no active minute draws no picture: an empty picture is not a
+    shape. Both rows stay where §3.1 puts them - the picture blank, its row
+    carrying `NO_PICTURE_CAPTION` - because the position of every region under
+    them is part of the contract.
     """
     metrics = metrics or {}
     hours = _window_hours(metrics)
@@ -1285,8 +1330,10 @@ def dashboard_lines(choice_key: str, metrics: dict, previous, cap) -> list[str]:
     blocks = concurrency_sparkline(metrics, lanes=lanes)
     caption = spark_caption(metrics, lanes=lanes, source=source)
     # The picture and its caption sit one cell in from the rule's left edge.
-    picture = (" " + blocks) if blocks else ""
-    caption_line = (" " + caption) if caption else ""
+    if blocks:
+        picture, caption_line = " " + blocks, " " + caption
+    else:
+        picture, caption_line = "", " " + NO_PICTURE_CAPTION
     lines = [header_line(metrics, previous, cap, hours), RULE,
              region_title(REGION_LOAD, load, hours)]
     lines += [line for _badge, line in load]
@@ -1548,6 +1595,7 @@ class TriageApp(App):
         Binding("f", "show_fix", "fix"),
         Binding("d", "show_detail", "detail"),
         Binding("c", "show_chart", "chart"),
+        Binding("g", "cycle_group", "group"),
         Binding("w", "cycle_window", "window"),
         Binding("q", "quit", "quit"),
     ]
@@ -1659,13 +1707,31 @@ class TriageApp(App):
         self.query_one("#dashboard").display = True
         self._set_status("")
 
-    # -- the answer -------------------------------------------------------
+    # -- the answer, and the group ring -----------------------------------
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """The answer swaps the evidence group and NEXT, and nothing above them."""
         key = event.item.id
-        if key is None:
-            return
-        self.choice = key
+        if key is not None:
+            self._select(key)
+
+    def action_cycle_group(self) -> None:
+        """Show the next evidence group: latency -> refusals -> stalls -> latency.
+
+        `[g]` is for the person who wants the other three rows without answering
+        the question again. It selects the answer that names the group - the list
+        still holds the same six answers - and redraws, so the title, the three
+        rows and NEXT move and nothing else on the screen does.
+        """
+        self._select(_ANSWER_FOR_GROUP[next_group(pick_lead(self.choice))])
+
+    def _select(self, choice_key: str) -> None:
+        """Point the dashboard at one answer's group, redrawing it if it can.
+
+        An answer given before the scan lands is kept: the dashboard fills with
+        that group the moment the result arrives, so the answer never has to be
+        given twice.
+        """
+        self.choice = choice_key
         if self.scan_failed is not None:
             self._set_status(f"the scan failed ({self.scan_failed}); "
                              f"there is no dashboard to show")

@@ -337,16 +337,33 @@ class RegionMoons(unittest.TestCase):
         self.assertEqual(tui.moon_glyph(report.MOON_FULL),
                          tui.region_moon(_LOAD_HEALTHY, tui.REGION_LOAD))
 
-    def test_a_refusal_is_pressure_and_not_an_admission_block(self):
-        # §4.2: the new moon is earned by a request that never got in. A 429, an
-        # at-limit refusal and a demotion are pressure, which is the quarter moon.
-        self.assertEqual(tui.moon_glyph(report.MOON_QUARTER),
+    def test_a_refusal_count_above_zero_is_over_capacity(self):
+        """The REFUSALS region's own rows are refusals, so their count decides.
+
+        §4.2's rule is that the darkest moon means work that never ran, and the
+        region holding the refusals has to be able to say it: the header can be
+        dark because the gateway refused the work, with no admission block in the
+        LOAD rows to explain it. A refusal that did not happen cannot darken it.
+        """
+        self.assertEqual(tui.moon_glyph(report.MOON_NEW),
                          tui.region_moon(_REFUSALS_ROWS, tui.REGION_REFUSALS))
+        self.assertEqual(tui.moon_glyph(report.MOON_NEW),
+                         tui.region_moon([("○", "429           999   · the account's rate limit"),
+                                          ("○", "at limit        0   · ·"),
+                                          ("○", "background      0   · ·")],
+                                         tui.REGION_REFUSALS))
         self.assertEqual(tui.moon_glyph(report.MOON_FULL),
                          tui.region_moon([("○", "429            0   · nothing refused"),
                                           ("○", "at limit        0   · ·"),
                                           ("○", "background      0   · ·")],
                                          tui.REGION_REFUSALS))
+
+    def test_a_refusal_row_alone_does_not_darken_another_region(self):
+        """The rule is the region's subject, not a label the moon hunts for."""
+        refused = [("○", "429            11   · the account's rate limit")]
+        self.assertEqual(tui.moon_glyph(report.MOON_FULL),
+                         tui.region_moon(refused + _LATENCY_HEALTHY,
+                                         tui.REGION_LATENCY))
 
     def test_a_latency_moving_up_reads_pressure(self):
         self.assertEqual(tui.moon_glyph(report.MOON_QUARTER),

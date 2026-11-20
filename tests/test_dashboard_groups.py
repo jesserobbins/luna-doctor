@@ -237,20 +237,54 @@ class TheEvidenceGrid(unittest.TestCase):
 
     def test_each_group_earns_the_moon_its_own_rows_show(self):
         """The region title wears `region_moon`, so the labels and clauses above
-        have to be shapes it can read: pressure in a busy window, a clean moon in
-        a healthy one, and the plain moon when nothing was measured."""
+        have to be shapes it can read: the darkest moon for a refusal, pressure
+        for a latency that moved, a clean moon in a healthy window, and the plain
+        moon when nothing was measured."""
+        new = tui.moon_glyph(tui.report.MOON_NEW)
         quarter = tui.moon_glyph(tui.report.MOON_QUARTER)
         full = tui.moon_glyph(tui.report.MOON_FULL)
         plain = tui.moon_glyph("moon")
         stressed = _window(42, 17, blocked=3, rejected=11, at_limit=4, background=7,
                            stalled=2, starved=1, p50=95.0, p90=240.0)
+        expected = {tui.REGION_REFUSALS: new, tui.REGION_LATENCY: quarter,
+                    tui.REGION_STALLS: quarter}
         for key in tui.EVIDENCE_GROUPS:
             busy = tui.group_rows(key, stressed, self.before)
             healthy = tui.group_rows(key, _healthy(), _healthy_before())
-            self.assertEqual(quarter, tui.region_moon(busy, key), key)
+            self.assertEqual(expected[key], tui.region_moon(busy, key), key)
             self.assertEqual(full, tui.region_moon(healthy, key), key)
             self.assertEqual(plain,
                              tui.region_moon(tui.group_rows(key, _empty(), None), key), key)
+
+    def test_the_refusals_title_can_read_over_capacity(self):
+        """999 429s is a gateway turning work away, and the region says so.
+
+        §4.2 forbids the old reading: the header can be dark because of the
+        refusals alone, and a region that answered only to `blocked` could never
+        explain it. The three rows carry the count, so the count decides.
+        """
+        refused = _window(999, 17, rejected=999, p50=95.0, p90=240.0)
+        lines = tui.dashboard_lines("concurrency", refused, self.before, _cap(7, 12))
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_NEW), lines[9].split()[1])
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_NEW),
+                         tui.region_moon(tui.group_rows(tui.REGION_REFUSALS, refused,
+                                                        self.before),
+                                         tui.REGION_REFUSALS))
+
+    def test_the_moons_still_tie_to_the_header(self):
+        """The two-level invariant survives the refusal rule, in both directions."""
+        stressed = _window(42, 17, blocked=3, rejected=11, at_limit=4, background=7,
+                           stalled=2, starved=1, p50=95.0, p90=240.0)
+        for metrics in (stressed, _window(999, 17, rejected=999),
+                        _healthy()):
+            header = tui.moon_glyph(tui.header_moon(metrics))
+            regions = [tui.region_moon(tui.load_rows(metrics, _cap(7, 12), 1, self.before),
+                                       tui.REGION_LOAD)]
+            for key in tui.EVIDENCE_GROUPS:
+                regions.append(tui.region_moon(
+                    tui.group_rows(key, metrics, self.before), key))
+            self.assertTrue(tui.regions_satisfy_invariant(header, regions),
+                            "%s: %s" % (header, regions))
 
     def test_a_qualifier_names_no_api_field(self):
         banned = ("rate_limit_error", "scheduler admission timeout",

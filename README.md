@@ -51,41 +51,56 @@ luna-doctor --version
 
 ## First run
 
-`luna-doctor` with no arguments, in a terminal, opens the triage screen. It
-asks one question, "What are you seeing?", and offers six answers: requests
-failing or hanging, things are slow, "Stream ended without finish_reason", 429
-or concurrency errors, an agent that seems stuck mid-task, and nothing yet, just
-checking.
+`luna-doctor` with no arguments, in a terminal, opens the triage screen. The
+screen is a dashboard. It reads the last hour of local logs and the cached
+account capacity, then draws nineteen rows. The rows hold their place in every
+state: only the numbers, the moons and the middle group change.
 
-The scan starts when the screen opens. The last 24 hours of local logs and the
-cached account capacity are read while the question is on screen, so the answer
-does not wait for the scan. The answer decides which evidence leads the verdict:
+| region | rows | the question it answers |
+|---|---|---|
+| status | 2 | over capacity now, and is it getting worse |
+| load | 6 | by how much, and since when |
+| one evidence group | 5 | what kind of trouble |
+| next | 3 | what to do |
 
-| answer | the evidence that leads |
+The window is one hour. `w` cycles 1h, 6h and 24h, and every number and the
+picture follow the window. The dashboard holds no 7-day and no 30-day number.
+Those live in `capacity` and in `analyze`.
+
+One picture carries the shape of the window: this machine's in-flight
+concurrency, one cell per minute. A `█` cell is a minute that reached the
+account's priority concurrency count. The caption under the picture gives the
+minutes over, out of the minutes in the window, and the clock time of the peak.
+A window with nothing measured draws no picture, and the caption says so.
+
+Every number carries a delta against the previous window of the same length.
+`▲ 5` is five more, `▾ 9` is nine fewer, `▬` is unchanged, and `·` means the
+window has no comparable predecessor.
+
+`NEXT` holds the one sentence on the screen. It names the move, and the row
+under it holds the command that makes the move. `f` shows the `fix` output in
+place.
+
+The screen asks one question, "What are you seeing?", and offers six answers.
+The numbers are on screen while the question is open, and an answer swaps the
+middle group. `g` steps through the same three groups, so the rows under the
+picture can change without an answer:
+
+| answer | the group it picks |
 |---|---|
-| requests failing or hanging | admission and denial counts |
-| 429 or concurrency errors | admission and denial counts |
-| things are slow | latency and queue waits |
-| "Stream ended without finish_reason" | the idle-budget diagnosis |
-| an agent that seems stuck mid-task | the idle-budget diagnosis |
-| nothing yet, just checking | the traffic summary |
+| 429 or concurrency errors | `REFUSALS`: the 429s, the refusals at the account's limit, and the requests sent to the background tier |
+| things are slow | `LATENCY`: p50, p90, and the gateway's fixed wait |
+| nothing yet, just checking | `LATENCY`: the group a quiet window opens on |
+| requests failing or hanging, "Stream ended without finish_reason", an agent stuck mid-task | `STALLS`: the stalled streams and the slowest request |
 
-The verdict screen is a dashboard. It holds the account panel, the local panel,
-one sparkline of concurrency across the 24 hour window, the verdict line, and
-the legends. No panel holds more than four rows. The detail lives behind `d`
-for the `analyze` report and `c` for the chart.
+The last row is the `Footer`, and it lists the keys: `f` for the `fix` output,
+`d` for the `analyze` report, `c` for the chart, `g` for the next evidence
+group, `w` for the window, and `q` to quit.
 
-The verdict line leads with a moon, and the moon names the status of the window:
-🌕 healthy, 🌗 pressure, 🌑 blocked at admission. A pretty report closes with
-that same legend line, and the screen prints it under the verdict line. A
-terminal that refuses emoji draws `(O)`, `(o)` and `()` in its place.
-
-The screen advertises four keys in its status line. `f` shows the `fix` output
-in place, `d` shows the full `analyze` report, `c` draws the chart, and `q`
-quits. The screen reads the capacity cache. As on every command that explains
-the account's numbers, a fresh cache is served without network, and a stale one
-is refreshed with one GET past the 5-minute TTL. `--offline` forbids that
-fetch, and the screen then reads whatever the cache holds, marked stale.
+The screen reads the capacity cache. As on every command that explains the
+account's numbers, a fresh cache is served without network, and a stale one is
+refreshed with one GET past the 5-minute TTL. `--offline` forbids that fetch,
+and the screen then reads whatever the cache holds, marked stale.
 
 The screen ships with the install. Textual, its only dependency, is a default
 dependency, so a plain install gives a terminal the screen. A pipe keeps the
@@ -102,9 +117,8 @@ echo | luna-doctor                # a pipe: the linear default run
 
 ### What the badges mean
 
-Every number on the verdict screen carries a badge. The screen prints two
-legend lines. This one names all three badges, and the line under the verdict
-line keys the moon status:
+Every number on the dashboard carries a badge, and one key line names all
+three:
 
 ```
 ● authoritative (the account reports it) · ○ measured here, a lower bound · ◌ declared, not measured
@@ -113,8 +127,25 @@ line keys the moon status:
 `●` is a number the account reported. `○` is a number that this machine
 measured from its own logs, so it is a lower bound, because other machines are
 invisible. `◌` is a number that a person or a shipped default stated, and no
-measurement stands behind it. A `?` badge with its reason means unknown, and an
-unknown value is never a zero.
+measurement stands behind it. A `?` badge with a short reason means unknown,
+and an unknown value is never a zero.
+
+A second key line names the four moons. The moon on the first row is the
+conclusion, and a moon on a region title says which region the conclusion came
+from:
+
+| moon | word | what earns it |
+|---|---|---|
+| `🌕` | `OK` | nothing blocked and nothing over the account's count |
+| `🌗` | `PRESSURE` | a 429, a refusal at the account's limit, a peak over the count, or evidence too stale to rule pressure out |
+| `🌑` | `OVER CAPACITY` | work that never ran: at least one admission block, or at least one refusal on the group's own rows |
+| `🌙` | `NOT ESTABLISHED` | nothing measured in the window |
+
+A region title reads its own three rows. The `REFUSALS` title turns dark as
+soon as one refusal is counted, because those requests never ran, while the
+first row keeps the CLI's word for the whole window.
+
+A terminal that refuses emoji draws `(O)`, `(o)` and `()` in its place.
 
 ### Where `--plan` goes
 
