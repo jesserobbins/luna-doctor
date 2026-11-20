@@ -34,6 +34,7 @@ import time
 from datetime import datetime, timezone
 from typing import NamedTuple
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
@@ -137,6 +138,369 @@ def first_sentence(text: str) -> str:
     decides where the report takes over.
     """
     return _SENTENCE_END.split((text or "").strip(), maxsplit=1)[0].strip()
+
+
+# ---- the header: the conclusion, its direction, and the width -------------
+#
+# Row one answers the first two questions in the order a person under pressure
+# asks them: how bad is it (a status moon and its word, read from the CLI's own
+# verdict) and is it getting worse (a trend word and its arrow, read from the
+# previous equal-length window). Everything after that is the window, the volume,
+# the plan and the lane count the verdict was judged against, with the scan's own
+# clock right-aligned at the same edge the rules stop at.
+#
+# Two alphabets, two jobs. Provenance badges (● ○ ?) ride the numbers. Status
+# moons (🌕 🌗 🌑 🌙) ride the conclusion and each region's title, never a row and
+# never an arrow: an arrow says direction, a moon says severity.
+
+ROW_CELLS = 78         # the dashboard's hard budget, in terminal cells (§3.2)
+HEADER_CELLS = 77      # the header's own width: the rules stop one cell short
+
+# The plain moon is what a surface draws when it claims no status at all. It is
+# report's own name for that state, which is why it is not in MOON_PHASES.
+_PLAIN_MOON = "moon"
+
+# Four glyph names, four header words, one-to-one (§4.2). The severity scale of
+# §7 rule 4 is the first three, one word per phase; the fourth is the word for a
+# surface that claims no status at all. No synonym is a status word (`fine`,
+# `busy`, `degraded` are banned) and no status word is lowercase.
+_STATUS_WORDS = {
+    report.MOON_FULL: "OK",
+    report.MOON_QUARTER: "PRESSURE",
+    report.MOON_NEW: "OVER CAPACITY",
+    _PLAIN_MOON: "NOT ESTABLISHED",
+}
+SEVERITY_WORDS = ("OK", "PRESSURE", "OVER CAPACITY", "NOT ESTABLISHED")
+
+# baseline.change_verdict's four words, and the arrow each one puts beside it.
+# `inconclusive` points nowhere - the comparison failed, it did not go anywhere -
+# so it draws no arrow and the header drops the cell (§2.5: the empty window's
+# header carries no trend). `·` is the delta column's placeholder for a row with
+# no comparable window, and it is not a trend word.
+TREND_WORDS = ("better", "worse", "unchanged", "inconclusive")
+TREND_ARROWS = {"better": "▾", "worse": "▲", "unchanged": "▬", "inconclusive": ""}
+
+
+def moon_glyph(name: str) -> str:
+    """The glyph for one status moon name, in the screen's own alphabet."""
+    return _GLYPH_STYLE.symbol(name)
+
+
+def status_word(moon_name: str) -> str:
+    """The header word for one `report.status_moon` name (§4.2).
+
+    One-to-one: four glyph names become four words, so the screen introduces no
+    vocabulary the CLI does not already print. A name outside the table claims no
+    status, which reads `NOT ESTABLISHED`.
+    """
+    return _STATUS_WORDS.get(moon_name, _STATUS_WORDS[_PLAIN_MOON])
+
+
+def header_moon(metrics: dict) -> str:
+    """The status moon name this window's verdict earns, or the plain moon.
+
+    `report.status_moon(*cli.verdict(metrics))` is the one conversion from a
+    window's verdict to a status, so the header and the CLI cannot disagree about
+    this window. The regions say where the conclusion came from; they never
+    derive it.
+    """
+    headline, _adjustments, exit_code = cli.verdict(metrics)
+    return report.status_moon(exit_code, headline)
+
+
+def trend_word(metrics: dict, previous) -> str:
+    """`baseline.change_verdict`'s word for this window against the previous one.
+
+    `previous` is the equal-length window the scan reads beside these metrics.
+    Without one there is no comparable window, and the answer is `inconclusive` -
+    never `unchanged`, which would claim two windows were measured when one was.
+    """
+    if not isinstance(previous, dict):
+        return "inconclusive"
+    return baseline.change_verdict(metrics, previous)[0]
+
+
+def trend_cell(metrics: dict, previous) -> str:
+    """`worse ▲`, or "" when the comparison named no direction."""
+    word = trend_word(metrics, previous)
+    arrow = TREND_ARROWS.get(word, "")
+    return "%s %s" % (word, arrow) if arrow else ""
+
+
+def header_line(metrics: dict, previous, cap, window_hours) -> str:
+    """The dashboard's first row: state, direction, window, volume, width, clock.
+
+    `🌑 OVER CAPACITY · worse ▲ · 1h · 42 req · apex · ●12 lanes    14:32Z`. Six
+    cells and a right-aligned clock, one cell per fact a person in an incident
+    needs before the rows: how bad (the moon's word), which way (the trend word),
+    what window this is, how much traffic is in it, whose plan the numbers are,
+    and how wide the lane count is.
+
+    The width comes from `resolved_lanes`, the same call the LOAD region and the
+    picture's lane scale make, so `●12 lanes` in the header and the wall in the
+    caption cannot drift. The clock is the scan's own reading, so a header is a
+    pure function of its arguments: a metrics dict with no clock loses the
+    timestamp rather than taking a second reading of the wall clock. A row is
+    never truncated to fit the budget (§3.2) - a shortened status word would be a
+    wrong answer - so the line runs long instead; the tests hold the real windows
+    under 78 cells.
+
+    `previous` is the previous equal-length window's analyse() dict, which the
+    scan reads beside these metrics. Without it the header carries no trend cell
+    rather than a direction nobody measured.
+    """
+    name = header_moon(metrics)
+    cells = ["%s %s" % (moon_glyph(name), status_word(name))]
+    trend = trend_cell(metrics, previous)
+    if trend:
+        cells.append(trend)
+    cells.append(_window_cell(window_hours))
+    cells.append(_volume_cell(metrics))
+    cells.append(_plan_cell(metrics, cap))
+    cells.append(_lanes_cell(metrics, cap))
+    line = " \u00b7 ".join(cells)
+    stamp = _clock_cell(metrics)
+    if not stamp:
+        return line
+    gap = max(1, HEADER_CELLS - cell_len(line) - cell_len(stamp))
+    return line + " " * gap + stamp
+
+
+def _window_cell(window_hours) -> str:
+    """The window as the label prints it: `1h`, `6h`, `1.5h`, `?` when unnamed."""
+    if isinstance(window_hours, bool) or not isinstance(window_hours, (int, float)):
+        return "?"
+    return "%dh" % window_hours if float(window_hours).is_integer() else "%gh" % window_hours
+
+
+def _volume_cell(metrics: dict) -> str:
+    """The window's request count: `42 req`, or `? req` when nobody counted."""
+    n = _count(metrics.get("requests"))
+    return "%d req" % n if n is not None else "? req"
+
+
+def _plan_cell(metrics: dict, cap) -> str:
+    """The plan the width belongs to, or `? plan` when nobody named one.
+
+    The account's plan is the first authority. A `--plan` declaration names one
+    when the cache holds no payload, and attribution calls that `plan <name>`,
+    which is the only shape in which a declaration is a plan name rather than a
+    number. Rule 8: unknown is `?` plus a word, never a bare `unknown` and never
+    a zero.
+    """
+    plan_name = cli._cap_field(cli._cap_field(cap, "config"), "plan")
+    if isinstance(plan_name, str) and plan_name.strip():
+        return plan_name.strip()
+    _value, source = resolved_lanes(metrics, cap)
+    if isinstance(source, str) and source.startswith("plan "):
+        return source[len("plan "):]
+    return "? plan"
+
+
+def _lanes_cell(metrics: dict, cap) -> str:
+    """The lane count with the badge that says whose number it is: `●12 lanes`.
+
+    ● when the account reports it, ◌ when a person declared it, and `? lanes` when
+    nobody did: one badge per number (§4.1), and a number that does not exist is
+    not printed. It asks `resolved_lanes`, the same call the picture's lane scale
+    makes, so the header's `●12 lanes` and the wall in the caption cannot drift.
+    """
+    value, source = resolved_lanes(metrics, cap)
+    badge = badges.badge_for(source)
+    return "%s lanes" % badge if value is None else "%s%d lanes" % (badge, value)
+
+
+def _clock_cell(metrics: dict) -> str:
+    """`HH:MMZ` for the scan's own clock, "" when the scan carried none.
+
+    A dashboard that does not say when it was taken is a dashboard a reader has
+    to guess about, and a microsecond stamp is a number nobody can act on; the
+    header prints the minute, in UTC, of the moment the scan closed.
+    """
+    stamp = metrics.get("scanned_at")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or stamp <= 0:
+        return ""
+    return datetime.fromtimestamp(float(stamp), timezone.utc).strftime("%H:%MZ")
+
+
+# ---- the region moons: each title wears the moon its own rows earn ----------
+# Four regions answer four questions, so each one's rows earn their own moon: a
+# region that repeats the header moon says "the conclusion came from here", and
+# the reader learns in one glance which dimension is dark. The reading is the
+# four states of §4.2 applied to the region's own numbers, never a per-row
+# severity:
+#
+#   any admission block in the rows      -> the new moon
+#   a refusal, or a wall that cannot be
+#   ruled out, or a latency moving up    -> the quarter moon
+#   nothing measured at all              -> the plain moon
+#   measured, and clean                  -> the full moon
+
+REGION_LOAD = "load"
+REGION_LATENCY = "latency"
+REGION_REFUSALS = "refusals"
+REGION_STALLS = "stalls"
+REGION_KINDS = (REGION_LOAD, REGION_LATENCY, REGION_REFUSALS, REGION_STALLS)
+
+
+class _RowFact(NamedTuple):
+    """One region row, read: its label, its badge, its number, its own words."""
+
+    label: str
+    badge: str
+    count: int | None
+    text: str
+
+
+# The row labels the regions draw (§3.3, §8 item 4), longest first so `at limit`
+# never reads as a row called `at`. A row that starts with none of these is
+# context this module cannot read a number out of, and it never moves a moon.
+_ROW_LABELS = ("peak", "now", "blocked", "p50", "p90", "gateway", "429",
+               "at limit", "background", "stalled", "starved", "slowest")
+_ROW_LABEL = re.compile(
+    r"^(%s)\b" % "|".join(re.escape(label) for label in
+                          sorted(_ROW_LABELS, key=len, reverse=True)),
+    re.IGNORECASE)
+_FIRST_INT = re.compile(r"\d+")
+_WINDOW_LABEL = re.compile(r"\d+h$")
+
+# Rows that carry no severity: `now` is the account's instantaneous occupancy and
+# has no previous window to move against, and `gateway` is a fixed wait. Neither
+# can darken a region, and neither can lighten one.
+_CONTEXT_LABELS = ("now", "gateway")
+
+# What the rows have to say, as closed sets of labels. `blocked` is the darkest,
+# because those requests never got in at all; a 429, an at-limit refusal or a
+# demotion to the slow tier is pressure (§4.2).
+_BLOCK_LABELS = ("blocked",)
+_PRESSURE_LABELS = ("429", "at limit", "background", "stalled", "starved")
+_LATENCY_LABELS = ("p50", "p90")
+
+# A load row's own words: a peak that crossed the wall, or a peak with no wall to
+# be measured against. `never over` is the clean case and never matches.
+_PEAK_OVER = re.compile(r"(?<!never )\bover\b")
+_LANES_UNKNOWN = "lane count unknown"
+_UP_ARROW = "▲"
+
+
+def _row_fact(badge, text) -> _RowFact:
+    """One (badge, text) row, read as a label, a count and its own words.
+
+    The count is the first integer after the label, because the number column
+    precedes the delta column (§3.2) and a row prints its own number first. A
+    `1h` window label is the label's unit, not a row's number.
+    """
+    body = (text or "").strip()
+    match = _ROW_LABEL.match(body)
+    label = match.group(1).lower() if match else ""
+    tokens = body[match.end():].split() if match else []
+    if label == "peak" and tokens and _WINDOW_LABEL.match(tokens[0]):
+        tokens = tokens[1:]
+    count = None
+    for token in tokens:
+        found = _FIRST_INT.search(token)
+        if found:
+            count = int(found.group(0))
+            break
+    return _RowFact(label, badge, count, body)
+
+
+def region_moon(region_rows: list[tuple[str, str]], region_kind: str) -> str:
+    """The status glyph one region's own rows earn (§4.2), as a glyph.
+
+    `region_rows` are the region's (badge, text) data rows - the ones the reader
+    sees, not a second set built for the moon - and `region_kind` says which of
+    the four regions they belong to, because each answers a different question
+    and so reads severity differently. Nothing here looks at the header: the
+    regions are the causes, and the conclusion is `header_moon`'s.
+    """
+    if region_kind not in REGION_KINDS:
+        raise KeyError(region_kind)
+    facts = [_row_fact(badge, text) for badge, text in region_rows]
+    evidence = [fact for fact in facts
+                if fact.label and fact.label not in _CONTEXT_LABELS]
+    if not any(fact.count is not None for fact in evidence):
+        # nothing this region measured: the plain moon claims no status (§2.5)
+        return moon_glyph(_PLAIN_MOON)
+    if any(fact.count for fact in evidence if fact.label in _BLOCK_LABELS):
+        return moon_glyph(report.MOON_NEW)
+    if _region_pressure(evidence, region_kind):
+        return moon_glyph(report.MOON_QUARTER)
+    return moon_glyph(report.MOON_FULL)
+
+
+def _region_pressure(evidence, region_kind: str) -> bool:
+    """Whether a region's own rows say pressure, for this kind of region.
+
+    A refusal count above zero is pressure in any region. A load region adds the
+    qualifier its peak wears: `over` means the wall was crossed and `lane count
+    unknown` means there is no wall to measure against, so neither can read clean,
+    while `never over` is a clean window whose peak happened to move (§2.2). A
+    latency region adds its own direction, because a percentile has no wall to
+    cross and the move is the whole story (§2.1: p90 240s rising reads pressure;
+    §2.2: p90 58s falling reads clean).
+    """
+    for fact in evidence:
+        if fact.label in _PRESSURE_LABELS and fact.count:
+            return True
+    if region_kind == REGION_LOAD:
+        return any(_PEAK_OVER.search(fact.text) or _LANES_UNKNOWN in fact.text
+                   for fact in evidence if fact.label == "peak")
+    if region_kind == REGION_LATENCY:
+        return any(_UP_ARROW in fact.text for fact in evidence
+                   if fact.label in _LATENCY_LABELS)
+    return False
+
+
+def regions_satisfy_invariant(header_glyph: str,
+                              region_glyphs: list[str]) -> bool:
+    """§4.2's tie between the conclusion and its causes, as a testable predicate.
+
+    Two implications, and they are the whole rule: a header at the darkest moon
+    is explained by at least one region at the darkest moon, and a header at the
+    full moon is contradicted by no region that claims trouble. A lighter region
+    never explains a darker header, and a darker region never contradicts a clean
+    window. The quarter moon and the plain moon carry no constraint, because a
+    window can be under pressure for a reason no region on this screen measures.
+    """
+    glyphs = list(region_glyphs)
+    if header_glyph == moon_glyph(report.MOON_NEW):
+        return moon_glyph(report.MOON_NEW) in glyphs
+    if header_glyph == moon_glyph(report.MOON_FULL):
+        return all(glyph == moon_glyph(report.MOON_FULL) for glyph in glyphs)
+    return True
+
+
+# ---- the copy rules, as far as they are mechanical -------------------------
+# Ten rules govern the dashboard's register (§7), and three of them are
+# mechanical: no sentence in a data row, 78 cells per row, and no parenthetical
+# naming a field. The rest (one imperative, active voice, units in the label, a
+# one-clause qualifier) are read by a person. A helper the suite can call is what
+# keeps the mechanical three from drifting.
+_SENTENCE_STOP = re.compile(r"[.!]")
+_FIELD_PAREN = re.compile(r"\([^)]*[`_][^)]*\)")
+
+
+def dashboard_ok_row(text: str) -> bool:
+    """Whether one row obeys the copy rules and the width budget (§3.2, §7).
+
+    - No sentence-final stop: a full stop or an exclamation mark means a sentence
+      arrived, and a row is not a sentence. `?` is allowed where it is the unknown
+      glyph (`? lanes`, `? plan`) and rejected at the end of a row, where it
+      would be a question.
+    - No row wider than 78 terminal cells, measured in cells rather than code
+      points: a phase moon is two cells and every other glyph in the palette is
+      one.
+    - No parenthetical naming a field: a bracket holding a backtick or a
+      snake_case name is a report's field name carried onto a dashboard.
+    """
+    if not isinstance(text, str):
+        return False
+    if cell_len(text) > ROW_CELLS:
+        return False
+    if _SENTENCE_STOP.search(text) or text.rstrip().endswith("?"):
+        return False
+    return not _FIELD_PAREN.search(text)
 
 
 # ---- the account panel: what the account reports (●) -----------------------
