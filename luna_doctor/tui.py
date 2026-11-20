@@ -1017,6 +1017,238 @@ def spark_text(metrics: dict, *, width: int = SPARK_WIDTH,
     return text
 
 
+# ---- the LOAD region: three rows on one fixed grid ------------------------
+#
+# One geometry for every data row, measured off the mockups in the brief: one
+# cell of indent, a 12-cell lowercase label, the badge in its own cell, an
+# 8-cell right-aligned number, a 3-cell right-aligned delta, then one fact in
+# the qualifier column. The fixed columns are what make the region scannable: a
+# reader compares a row against the row above it, so no row is laid out to its
+# own length.
+#
+# The three rows below are the whole LOAD region, and what is missing from them
+# is the kill list rather than an oversight: the 30d/7d admission record, the
+# overflow pool's per-day rollups, the queue wait on the account's most recent
+# complete UTC day and the saturation-band comparison are drill-down facts, and
+# the dashboard does not carry them again. They keep their old rows in
+# `account_rows` and `local_rows` until the screen swaps to these.
+LOAD_LABEL_CELLS = 12
+LOAD_NUMBER_CELLS = 8
+LOAD_DELTA_CELLS = 3
+
+# The delta column's four cells. `▬` is a comparable window that did not move;
+# `·` is no comparable window at all. No arrow carries a moon: the arrows say
+# direction and the region moon says severity, and mashing them together turns
+# a symbol system into stickers.
+DELTA_UP = "▲"
+DELTA_DOWN = "▾"
+DELTA_LEVEL = "▬"
+DELTA_NONE = "·"
+
+
+def _grid_row(label: str, badge: str, number: str = "",
+              delta: str = DELTA_NONE, qualifier: str = "") -> tuple[str, str]:
+    """One data row as (badge, the line it prints), on the fixed grid.
+
+    The badge is in the line the row prints, so the region draws each line as
+    it arrives and no caller measures columns twice. Returning it beside the
+    line is what lets a screen style by provenance and a test read the source
+    without parsing the row.
+    """
+    line = " %s %s %s %s" % (label.ljust(LOAD_LABEL_CELLS), badge,
+                              number.rjust(LOAD_NUMBER_CELLS),
+                              delta.rjust(LOAD_DELTA_CELLS))
+    if qualifier:
+        line += " " + qualifier
+    return badge, line
+
+
+def _window_requests(metrics) -> int:
+    """A window's request count. An absent count is no traffic."""
+    return _count((metrics or {}).get("requests")) or 0
+
+
+# The outcome classes a delta can compare, from baseline's one pressure table,
+# so a signal added there is a signal the delta column can carry.
+_OUTCOME_KEYS = tuple(name for _label, name in baseline.PRESSURES)
+
+
+def _delta_value(metrics: dict, key: str):
+    """One window's count for a delta key: an outcome class or a top-level metric.
+
+    An outcome class the scan never recorded is a measured zero: analyse() drops
+    a key nobody hit, and a window that was read and carried nothing of that
+    kind is not the same fact as a window nobody read. A top-level metric stays
+    strict - a missing peak is unknown, not a quiet window.
+    """
+    block = metrics or {}
+    if key in _OUTCOME_KEYS:
+        count = _count((block.get("by_outcome") or {}).get(key))
+        return count if count is not None else (0 if _window_requests(block) else None)
+    return _count(block.get(key))
+
+
+def delta_cells(metrics: dict, previous, key: str) -> str:
+    """The 3-cell delta for one count, against the equal-length window before it.
+
+    A delta needs a window to compare against, and enough traffic in both for a
+    move to mean anything, so it is gated by the same floor the verdict uses:
+    under `baseline.FLOOR` requests in either window the cell is `·`, the
+    placeholder for "no comparable window". `▬` is a comparable window that did
+    not move, which is a claim about two windows that each carried the count; a
+    count that was zero in both windows has no change to report and reads `·`
+    like any other absent comparison. No moon ever lands in this cell -
+    direction is a row fact and severity is a region fact - so the region title
+    is the only severity here.
+    """
+    if not previous:
+        return DELTA_NONE
+    if min(_window_requests(metrics), _window_requests(previous)) < baseline.FLOOR:
+        return DELTA_NONE
+    now, before = _delta_value(metrics, key), _delta_value(previous, key)
+    if now is None or before is None:
+        return DELTA_NONE
+    if not now and not before:
+        return DELTA_NONE
+    if now == before:
+        return DELTA_LEVEL
+    arrow = DELTA_UP if now > before else DELTA_DOWN
+    moved = abs(now - before)
+    # One cell of air up to nine, so a ten-request move still fits three cells.
+    return "%s %d" % (arrow, moved) if moved < 10 else "%s%d" % (arrow, moved)
+
+
+def _stamp_epoch(stamp):
+    """Seconds since the epoch for one ISO-8601 UTC stamp, or None."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _minute_of_day(stamp) -> str:
+    """`HH:MMZ` for a sample stamp, or "" when it cannot be read.
+
+    The microseconds the account sends are a fraction nobody acts on, and the
+    day cannot change inside one dashboard window.
+    """
+    epoch = _stamp_epoch(stamp)
+    if epoch is None:
+        return ""
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%H:%MZ")
+
+
+def _stale_minutes(metrics: dict, stamp):
+    """How old the account's sample is, in whole minutes, or None.
+
+    The clock is the scan's own, so this row is a function of the metrics and
+    reads no clock of its own.
+    """
+    epoch = _stamp_epoch(stamp)
+    clock = _epoch((metrics or {}).get("scanned_at"))
+    if epoch is None or clock is None:
+        return None
+    return max(0, int((clock - epoch) // 60))
+
+
+def _now_row(metrics: dict, cap) -> tuple[str, str]:
+    """The account's live occupancy: the one number that answers "right now".
+
+    Two numbers from one source wear one `●`, and the sample time sits in the
+    qualifier column so two glances can compare it. Freshness is read from
+    `metrics["capacity"]["now_fresh"]` and never from the Capacity payload,
+    which carries no freshness field: a 47-minute-old sample that still wore
+    `●` is the defect this row exists to fix. A sample that is not fresh keeps
+    its numbers and loses the authority, reading `?` and `stale 47m`; a cache
+    with no live sample prints no ratio and says why.
+    """
+    served = (metrics or {}).get("capacity") or {}
+    now = cli._cap_field(cap, "now")
+    in_use = _count(cli._cap_field(now, "in_use"))
+    limit = _count(cli._cap_field(now, "limit"))
+    if in_use is None or limit is None:
+        reason = "no capacity cached" if now is None else "no live sample"
+        return _grid_row("now", _BADGE_UNKNOWN, qualifier=reason)
+    number = "%d/%d" % (in_use, limit)
+    sampled_at = cli._cap_field(now, "sampled_at")
+    sampled = _minute_of_day(sampled_at)
+    if served.get("now_fresh") is True and sampled:
+        return _grid_row("now", badges.BADGE_ACCOUNT, number,
+                         qualifier="sampled %s" % sampled)
+    minutes = _stale_minutes(metrics, sampled_at)
+    return _grid_row("now", _BADGE_UNKNOWN, number,
+                     qualifier=("stale %dm" % minutes) if minutes is not None
+                     else "stale sample")
+
+
+def _peak_row(metrics: dict, previous, cap, window_hours) -> tuple[str, str]:
+    """This machine's peak concurrency, against the lane count it is judged by.
+
+    The peak is measured here and nowhere else, so the row wears `○` and the
+    "a lower bound" caveat moves into the key line instead of riding the row.
+    The qualifier is the one fact the number cannot carry alone: how far over
+    the wall it went, that it never reached it, or that there is no wall.
+    """
+    label = "peak %gh" % window_hours
+    peak = _count((metrics or {}).get("peak_concurrency"))
+    if peak is None or not _window_requests(metrics):
+        return _grid_row(label, _BADGE_UNKNOWN, qualifier="nothing measured here")
+    lanes, _source = resolved_lanes(metrics, cap)
+    if lanes is None:
+        qualifier = "lane count unknown"
+    elif peak > lanes:
+        qualifier = "over ●%d by %d" % (lanes, peak - lanes)
+    else:
+        qualifier = "never over"
+    return _grid_row(label, _BADGE_MEASURED, "%d" % peak,
+                     delta_cells(metrics, previous, "peak_concurrency"), qualifier)
+
+
+def _blocked_row(metrics: dict, previous) -> tuple[str, str]:
+    """The local admission blocks, with one cross-check in the qualifier.
+
+    `admission_timeout` is the count of requests that never got in, which is
+    the number a person is losing work to; the API's field name stays in the
+    drill-down. The `× 429` cell is the one cross-check the number needs - it
+    says whether the gateway was refusing traffic at the same time, which is
+    the difference between a pool that is full and a gateway that is broken -
+    so it prints even at zero.
+
+    A window this scan read carried no block of that kind when analyse() has no
+    key for it, so an absent outcome is a measured zero and the row reads `○ 0`.
+    `?` is kept for a window that was never measured at all: no scan, no
+    traffic, no number to print.
+    """
+    if not _window_requests(metrics):
+        return _grid_row("blocked", _BADGE_UNKNOWN)
+    by_outcome = (metrics or {}).get("by_outcome") or {}
+    blocked = _count(by_outcome.get("admission_timeout")) or 0
+    rejected = _count(by_outcome.get("rate_limited")) or 0
+    return _grid_row("blocked", _BADGE_MEASURED, "%d" % blocked,
+                     delta_cells(metrics, previous, "admission_timeout"),
+                     "%d × 429" % rejected)
+
+
+def load_rows(metrics: dict, cap, window_hours, previous=None) -> list[tuple[str, str]]:
+    """The LOAD region's three data rows: now, peak, blocked - always three.
+
+    The order is the order a person asks the questions in: what is happening at
+    this instant, how bad it got in this window, and what that cost. Each row
+    is (badge, the line it prints), with the badge cell already in the line.
+
+    `previous` is the equal-length window before this one - the scan's own
+    extra read. Without it every delta cell is `·`: a first scan has nothing to
+    compare against, and the screen says that once, here, rather than printing
+    a zero delta that reads as "and nothing changed".
+    """
+    return [_now_row(metrics, cap),
+            _peak_row(metrics, previous, cap, window_hours),
+            _blocked_row(metrics, previous)]
+
+
 # ---- the verdict panel: the CLI's own verdict, never a second one ----------
 def verdict_rows(metrics: dict) -> list[tuple[str, str]]:
     """The verdict line, the action, and where the rest of it lives.
