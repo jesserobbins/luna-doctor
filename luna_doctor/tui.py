@@ -1,9 +1,10 @@
-"""The triage screen: one question, one 24h scan, one provenance-badged verdict.
+"""The triage screen: one question, one hour, one provenance-badged verdict.
 
 Bare `luna-doctor` on a terminal opens this instead of argparse help: it asks
-what the person is seeing, scans the last 24 hours of local logs and the cached
+what the person is seeing, scans the last hour of local logs and the cached
 account capacity while the question is on screen, and lands on one verdict with
-the next action.
+the next action. `[w]` cycles the window 1h -> 6h -> 24h, and every number and
+the picture are re-read for the window it lands on.
 
 Everything that decides what a reader sees - TRIAGE_CHOICES, pick_lead, the
 three row builders and build_verdict_rows - is a pure function of a metrics
@@ -31,6 +32,7 @@ import re
 import tempfile
 import time
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from rich.text import Text
 from textual import work
@@ -39,11 +41,16 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import Label, ListItem, ListView, Static
 
-from luna_doctor import attribution, badges, cli, explain, report, sources
+from luna_doctor import attribution, badges, baseline, cli, explain, report, sources
 from luna_doctor.style import Style
 
-SCAN_HOURS = 24
+# One hour is the dashboard's window: it is the widest window whose picture is
+# one cell per minute, so the shape is a measurement rather than a re-bin.
+WINDOW_HOURS = 1
 SCAN_HARNESSES = ("pi", "claude-code")
+
+# The windows `[w]` cycles, shortest first. Anything else lands back on 1h.
+WINDOW_CYCLE = (1, 6, 24)
 
 # The dashboard is drawn for about 80 columns, so the sparkline is 60 wide.
 SPARK_WIDTH = 60
@@ -89,6 +96,22 @@ _GLYPH_STYLE = Style(color=False, emoji=True, motion=False)
 def pick_lead(choice_key: str) -> str:
     """The lead panel id for one on-screen answer."""
     return _LEAD[choice_key]
+
+
+def window_cycle(hours) -> int:
+    """The window `[w]` moves to: 1h -> 6h -> 24h -> 1h.
+
+    The cycle is a fixed ring, so a screen that is already on a window outside
+    it (a stale state, a bad number) lands on the 1h default instead of on a
+    window the dashboard never offers.
+    """
+    try:
+        current = int(hours)
+    except (TypeError, ValueError):
+        return WINDOW_CYCLE[0]
+    if current not in WINDOW_CYCLE:
+        return WINDOW_CYCLE[0]
+    return WINDOW_CYCLE[(WINDOW_CYCLE.index(current) + 1) % len(WINDOW_CYCLE)]
 
 
 def _count(value):
@@ -146,6 +169,20 @@ def account_rows(metrics: dict, cap) -> list[tuple[str, str]]:
     return rows
 
 
+def resolved_lanes(metrics: dict, cap) -> tuple:
+    """The priority concurrency this screen judges against, and whose it is.
+
+    attribution.resolve_priority_concurrency decides account first, then a
+    --plan declaration. The header's lane count and the picture's lane scale
+    are one number because both ask this function, so `●12` and the caption's
+    `●12 lanes` cannot drift apart.
+    """
+    config = cli._cap_field(cap, "config")   # cap is None when nothing is cached
+    served = config.to_dict() if hasattr(config, "to_dict") else None
+    return attribution.resolve_priority_concurrency(
+        served, (metrics or {}).get("declared_plan"))
+
+
 def _width_row(metrics: dict, cap) -> tuple[str, str]:
     """The priority concurrency the verdict is judged against, and whose it is.
 
@@ -153,10 +190,7 @@ def _width_row(metrics: dict, cap) -> tuple[str, str]:
     --plan declaration, and this row wears the badge that decision reports:
     ● when the account said the number, ◌ when a person declared it.
     """
-    config = cli._cap_field(cap, "config")   # cap is None when nothing is cached
-    served = config.to_dict() if hasattr(config, "to_dict") else None
-    value, source = attribution.resolve_priority_concurrency(
-        served, (metrics or {}).get("declared_plan"))
+    value, source = resolved_lanes(metrics, cap)
     if value is None:
         return (_BADGE_UNKNOWN,
                 "priority concurrency not reported by the account, and no --plan "
@@ -445,7 +479,7 @@ def _stuck_rows(metrics: dict) -> list[tuple[str, str]]:
 
 def _overview_rows(metrics: dict) -> list[tuple[str, str]]:
     """The plain traffic summary, for "nothing yet, just checking"."""
-    hours = int(metrics.get("window_hours") or SCAN_HOURS)
+    hours = int(metrics.get("window_hours") or WINDOW_HOURS)
     n = _count(metrics.get("requests")) or 0
     by_harness = metrics.get("by_harness") or {}
     harnesses = ", ".join(f"{name} {count}" for name, count in sorted(by_harness.items()))
@@ -478,23 +512,8 @@ def _minute_epoch(stamp):
         return None
 
 
-def concurrency_sparkline(metrics: dict, *, width: int = SPARK_WIDTH) -> str:
-    """The window's concurrency as one row of blocks, or "" when it is empty.
-
-    by_minute is sparse - concurrency_by_minute drops every quiet minute - so
-    one block per entry would draw a busy hour and a busy day at the same
-    width. The series is re-binned onto uniform columns across window_hours
-    instead: one column per slice of the window, and a column nobody was
-    running in is a space. A window that was quiet at its start reads as
-    blanks, not as low bars.
-
-    Each column carries the busiest minute inside it, scaled against the
-    window's own peak, so the ramp compares across the row. The window closes
-    at the scan's clock when the metrics carry one (scan sets scanned_at) and
-    at the last active minute otherwise.
-    """
-    if width < 1:
-        return ""
+def _minute_series(metrics: dict) -> list[tuple[float, int]]:
+    """The window's active minutes as sorted (epoch, max_concurrent) pairs."""
     series = []
     for entry in metrics.get("by_minute") or []:
         if not isinstance(entry, dict):
@@ -503,10 +522,38 @@ def concurrency_sparkline(metrics: dict, *, width: int = SPARK_WIDTH) -> str:
         value = _count(entry.get("max_concurrent"))
         if stamp is not None and value:
             series.append((stamp, value))
-    if not series:
-        return ""
     series.sort()
-    hours = metrics.get("window_hours") or SCAN_HOURS
+    return series
+
+
+class _Picture(NamedTuple):
+    """One drawn window: the columns, and the facts its caption states."""
+
+    columns: list[int]
+    minutes_per_column: float
+    total_minutes: int
+    peak_at: float | None
+
+
+def _window_picture(metrics: dict, width: int) -> _Picture | None:
+    """The window re-binned onto `width` uniform columns, or None when quiet.
+
+    by_minute is sparse - concurrency_by_minute drops every quiet minute - so
+    one block per entry would draw a busy hour and a busy day at the same
+    width. The series is re-binned instead: one column per slice of the
+    window, and a column nobody was running in stays 0, which draws as a space
+    rather than a low bar. A window that was quiet at its start reads as
+    blanks, not as low bars.
+
+    Each column carries the busiest minute inside it. The window closes at the
+    scan's clock when the metrics carry one (scan sets scanned_at) and at the
+    last active minute otherwise. The busiest minute of the drawn window comes
+    back as `peak_at`, so the caption's clock and the picture cannot disagree.
+    """
+    series = _minute_series(metrics)
+    if width < 1 or not series:
+        return None
+    hours = metrics.get("window_hours") or WINDOW_HOURS
     span = max(60.0, hours * 3600)
     end = _epoch(metrics.get("scanned_at")) or series[-1][0] + 60.0
     start = end - span
@@ -520,30 +567,89 @@ def concurrency_sparkline(metrics: dict, *, width: int = SPARK_WIDTH) -> str:
         column = min(width - 1, int((stamp - start) / per_column))
         columns[column] = max(columns[column], value)
     peak = max(columns)
-    return "".join(" " if not value else
-                   _SPARK_BLOCKS[min(len(_SPARK_BLOCKS) - 1,
-                                     value * len(_SPARK_BLOCKS) // peak)]
-                   for value in columns)
+    peak_at = next((stamp for stamp, value in series
+                    if value == peak and start <= stamp <= end), None)
+    return _Picture(columns, per_column / 60.0, int(round(span / 60.0)), peak_at)
 
 
-def spark_caption(metrics: dict) -> str:
-    """The sparkline's one-line key: what the row shows and the peak it scales to."""
-    peak = _count(metrics.get("peak_concurrency"))
-    shown = "unknown" if peak is None else peak
-    return f"concurrency across the window · peak {shown}"
+def _lane_block(value: int, lanes: int) -> str:
+    """One minute's block on the lane scale: 7 at or over, the approach below.
+
+    `█` is the one glyph on this screen that means a state rather than a
+    magnitude: at or over the account's lane count, on every screen and in
+    every window. Below it the ramp is the distance to the wall.
+    """
+    top = len(_SPARK_BLOCKS) - 1
+    if value >= lanes:
+        return _SPARK_BLOCKS[top]
+    return _SPARK_BLOCKS[value * top // lanes]
 
 
-def spark_text(metrics: dict, *, width: int = SPARK_WIDTH) -> Text:
+def _peak_block(value: int, peak: int) -> str:
+    """One minute's block scaled against this window's own worst minute."""
+    top = len(_SPARK_BLOCKS) - 1
+    return _SPARK_BLOCKS[min(top, value * len(_SPARK_BLOCKS) // peak)]
+
+
+def concurrency_sparkline(metrics: dict, *, width: int = SPARK_WIDTH,
+                          lanes: int | None = None) -> str:
+    """The window's concurrency as one row of blocks, or "" when it is empty.
+
+    With a lane count the ramp is the distance to the wall, so `█` means at or
+    over the account's lanes and the picture reads the same whether the lanes
+    are 12 or 120. Without one, the ramp self-scales to this window's peak -
+    the picture then says `scale: this window`, because a reader is always
+    entitled to know which scale they are looking at.
+    """
+    picture = _window_picture(metrics, width)
+    if picture is None:
+        return ""
+    if lanes is None:
+        peak = max(picture.columns)
+        return "".join(" " if not value else _peak_block(value, peak)
+                       for value in picture.columns)
+    return "".join(" " if not value else _lane_block(value, lanes)
+                   for value in picture.columns)
+
+
+def spark_caption(metrics: dict, *, width: int = SPARK_WIDTH,
+                  lanes: int | None = None) -> str:
+    """The picture's one-line key: which scale it is, and when the peak was.
+
+    A lane-scaled picture states what `█` means and converts the count of `█`
+    cells into its unit - minutes over the lane count - so the row is
+    quantitatively readable and not merely suggestive. A peak-scaled picture
+    says so instead, and names the peak's clock either way. A window with no
+    active minute has no picture, and an empty picture has no caption.
+    """
+    picture = _window_picture(metrics, width)
+    if picture is None:
+        return ""
+    peak_at = ""
+    if picture.peak_at is not None:
+        peak_at = datetime.fromtimestamp(picture.peak_at, timezone.utc).strftime(
+            "%H:%MZ")
+    if lanes is None:
+        return f"scale: this window · peak at {peak_at}"
+    over = sum(1 for value in picture.columns if value >= lanes)
+    minutes_over = int(round(over * picture.minutes_per_column))
+    return (f"{_SPARK_BLOCKS[-1]} = at or over {badges.BADGE_ACCOUNT}{lanes} lanes"
+            f" · over {minutes_over}m of {picture.total_minutes}m"
+            f" · peak at {peak_at}")
+
+
+def spark_text(metrics: dict, *, width: int = SPARK_WIDTH,
+               lanes: int | None = None) -> Text:
     """The sparkline and its caption as one quiet block of two lines.
 
     Empty when the window holds no active minute: an empty picture is not a
     shape, and the screen hides the line rather than drawing a flat one.
     """
-    blocks = concurrency_sparkline(metrics, width=width)
+    blocks = concurrency_sparkline(metrics, width=width, lanes=lanes)
     if not blocks:
         return Text("")
     text = Text(blocks)
-    text.append("\n" + spark_caption(metrics), style="dim")
+    text.append("\n" + spark_caption(metrics, width=width, lanes=lanes), style="dim")
     return text
 
 
@@ -620,8 +726,23 @@ def panel_text(heading: str, rows, *, bold: bool = False) -> Text:
 
 
 # ---- the scan: the same collect() and analyse() cmd_analyze calls ----------
-def scan(plan: str | None = None) -> tuple:
-    """One 24h scan of local logs plus the cached capacity payload.
+def previous_window_metrics(now: float, hours: float = WINDOW_HOURS) -> dict:
+    """The equal-length window before this one, read and analysed like this one.
+
+    The pairing is baseline.previous_window's own - the window that ends
+    exactly where this one starts, with no gap and no overlap - because the
+    delta column and baseline.change_verdict(read here, previous) have to
+    compare the same two windows the CLI's `fix` compares. It is one more read
+    of the same local logs and opens no socket: `previous` is a measurement,
+    never a fetch.
+    """
+    _start, end = baseline.previous_window(now, hours)
+    reqs = cli.collect(hours, list(SCAN_HARNESSES), None, None, now=end)
+    return cli.analyse(reqs, hours)
+
+
+def scan(plan: str | None = None, hours: float = WINDOW_HOURS) -> tuple:
+    """One scan of local logs plus the window before it and the cached capacity.
 
     collect() and analyse() are the CLI's own entry points, so the screen
     re-slices the same metrics `analyze` renders and never re-scans differently.
@@ -631,18 +752,23 @@ def scan(plan: str | None = None) -> tuple:
     verdict would measure "wide" against the tool's fallback constant and then
     tell a reader to fetch a width the account panel already shows.
 
+    `previous` is the equal-length window immediately before this one, built by
+    previous_window_metrics. It is what the delta column compares against, and
+    only baseline.change_verdict turns the pair into a word.
+
     The capacity cache is read twice on purpose: `_capacity_metrics` builds the
     CLI's own block (the shape cli.verdict reads), and fetch_capacity returns
     the Capacity payload the badges read. Both are cache-only; neither opens
     the network, and neither re-derives the other's facts.
     """
     now = time.time()
-    reqs = cli.collect(SCAN_HOURS, list(SCAN_HARNESSES), None, None, now=now)
-    metrics = cli.analyse(reqs, SCAN_HOURS)
+    reqs = cli.collect(hours, list(SCAN_HARNESSES), None, None, now=now)
+    metrics = cli.analyse(reqs, hours)
     metrics["declared_plan"] = plan
     # The sparkline re-bins by_minute across the window, so the window needs a
     # close it can trust: this scan's own clock, not the last active minute.
     metrics["scanned_at"] = now
+    previous = previous_window_metrics(now, hours)
     try:
         metrics["peak_concurrency_priority"] = cli.max_concurrency(
             [r for r in cli.timed(reqs) if getattr(r, "tier", "") == "interactive"])[0]
@@ -650,7 +776,7 @@ def scan(plan: str | None = None) -> tuple:
         metrics["peak_concurrency_priority"] = metrics.get("peak_concurrency")
     try:
         metrics["capacity"] = cli._capacity_metrics(
-            now - SCAN_HOURS * 3600, now, metrics, allow_network=False)
+            now - hours * 3600, now, metrics, allow_network=False)
     except Exception as e:
         metrics["capacity"] = {
             "provenance": sources.PROV_UNKNOWN,
@@ -669,7 +795,7 @@ def scan(plan: str | None = None) -> tuple:
     digest = slowest_request_digest(reqs, metrics)
     if digest is not None:
         metrics["slowest_request"] = digest
-    return metrics, sources.fetch_capacity(allow_network=False)
+    return metrics, previous, sources.fetch_capacity(allow_network=False)
 
 
 def slowest_request_digest(reqs, metrics: dict):
@@ -706,7 +832,7 @@ def scan_status(metrics: dict, cap, online: bool = False) -> str:
     would fill with a zero.
     """
     n = _count(metrics.get("requests")) or 0
-    bits = [f"✓ {n} request(s) in the last {int(metrics.get('window_hours') or SCAN_HOURS)}h"]
+    bits = [f"✓ {n} request(s) in the last {int(metrics.get('window_hours') or WINDOW_HOURS)}h"]
     if cap is None:
         bits.append("account capacity: not cached (unknown)")
     else:
@@ -767,21 +893,22 @@ def carries_report(code: int, text: str) -> bool:
     return any(not line.startswith(_ERROR_PREFIXES) for line in lines)
 
 
-def fix_output(plan: str | None = None) -> str:
+def fix_output(plan: str | None = None, hours: float = WINDOW_HOURS) -> str:
     """The `fix` command's own output, cache-only, as text for the screen.
 
     It runs `fix` instead of re-wiring recommendations: the fix block owns its
     printing, and a re-render here would be a second copy that could drift.
     `--offline` keeps the promise that the TUI opens no new network behavior.
+    The window is the scan's own, so the advice is about the rows on screen.
     """
-    argv = ["fix", "--since", f"{SCAN_HOURS}h", "--offline"]
+    argv = ["fix", "--since", f"{hours:g}h", "--offline"]
     if plan:
         argv += ["--plan", plan]
     return _captured_main(argv)[1]
 
 
 def detail_output(plan: str | None = None,
-                  hours: float = SCAN_HOURS) -> tuple[int, str]:
+                  hours: float = WINDOW_HOURS) -> tuple[int, str]:
     """The `analyze` report's own text, cache-only and read-only.
 
     `[d]` shows the report the verdict was cut from, so it runs the command
@@ -801,7 +928,7 @@ def detail_output(plan: str | None = None,
 
 
 def chart_output(plan: str | None = None,
-                 hours: float = SCAN_HOURS) -> tuple[str, str | None, str]:
+                 hours: float = WINDOW_HOURS) -> tuple[str, str | None, str]:
     """Draw this window's chart, then open the picture in the system viewer.
 
     The chart is the `chart` command's own work, so the screen asks for it
@@ -866,13 +993,16 @@ class TriageApp(App):
         Binding("d", "show_detail", "detail"),
         Binding("f", "show_fix", "fix"),
         Binding("q", "quit", "quit"),
+        Binding("w", "cycle_window", "window"),
     ]
 
     def __init__(self, plan: str | None = None, online: bool = False) -> None:
         super().__init__()
         self.plan = plan
         self.online = online
+        self.window_hours: int = WINDOW_HOURS
         self.metrics: dict | None = None
+        self.previous: dict | None = None
         self.capacity = None
         self.pending_choice: str | None = None
         self.scan_failed: str | None = None
@@ -902,29 +1032,44 @@ class TriageApp(App):
             yield Static("", id="detail-text", markup=False)
 
     def on_mount(self) -> None:
-        self._set_status("scanning local logs… (last 24h)")
+        self._set_status(f"scanning local logs… (last {self.window_hours}h)")
         self.query_one("#choices", ListView).focus()
         self._scan_worker()
 
     def _set_status(self, text: str) -> None:
         self.query_one("#status", Static).update(text)
 
+    # -- the window -------------------------------------------------------
+    def action_cycle_window(self) -> None:
+        """Move to the next window and read it: 1h -> 6h -> 24h -> 1h.
+
+        A window is not a relabel. The rows, the deltas and the picture all
+        come out of the logs, so a new window is a new scan; until it lands the
+        status says it is reading. The old result stays until then, so a
+        keypress never leaves a panel half-filled.
+        """
+        self.window_hours = window_cycle(self.window_hours)
+        self._set_status(f"scanning local logs… (last {self.window_hours}h)")
+        self._scan_worker()
+
     # -- the scan ---------------------------------------------------------
     @work(thread=True)
     def _scan_worker(self) -> None:
+        hours = self.window_hours
         try:
-            metrics, cap = scan(self.plan)
+            metrics, previous, cap = scan(self.plan, hours)
         except Exception as e:
             self.call_from_thread(self._scan_failed, f"{type(e).__name__}: {e}")
             return
-        self.call_from_thread(self._scan_done, metrics, cap)
+        self.call_from_thread(self._scan_done, metrics, previous, cap)
 
     def _scan_failed(self, reason: str) -> None:
         self.scan_failed = reason
         self._set_status(f"the scan failed ({reason}); no verdict is available")
 
-    def _scan_done(self, metrics: dict, cap) -> None:
+    def _scan_done(self, metrics: dict, previous: dict | None, cap) -> None:
         self.metrics = metrics
+        self.previous = previous
         self.capacity = cap
         self._set_status(scan_status(metrics, cap, self.online))
         if self.pending_choice is not None:
@@ -956,7 +1101,8 @@ class TriageApp(App):
         moon_legend.update(legend)
         # no phase drawn means no key: an empty line would be decoration
         moon_legend.display = bool(legend)
-        spark = spark_text(self.metrics)
+        lanes, _source = resolved_lanes(self.metrics, self.capacity)
+        spark = spark_text(self.metrics, lanes=lanes)
         spark_line = self.query_one("#spark", Static)
         spark_line.update(spark)
         # no active minute means no picture: a blank line is not a shape
@@ -994,7 +1140,7 @@ class TriageApp(App):
             self._set_status("the scan is still running; the report needs it")
             return
         self._set_status("rendering the analyze report (cache only)…")
-        self._detail_worker(int(self.metrics.get("window_hours") or SCAN_HOURS))
+        self._detail_worker(int(self.metrics.get("window_hours") or WINDOW_HOURS))
 
     @work(thread=True)
     def _detail_worker(self, hours: int) -> None:
@@ -1016,8 +1162,9 @@ class TriageApp(App):
     def _fix_worker(self) -> None:
         # fix_output hands back its text alone, so the code is the clean one;
         # what the capture holds still decides whether it was a report.
+        hours = int((self.metrics or {}).get("window_hours") or WINDOW_HOURS)
         self.call_from_thread(self._show_detail, "fix", "fix output", 0,
-                              fix_output(self.plan))
+                              fix_output(self.plan, hours))
 
     # -- the chart, in place, cache only ----------------------------------
     def action_show_chart(self) -> None:
@@ -1029,7 +1176,7 @@ class TriageApp(App):
             self._set_status("the scan is still running; the chart needs it")
             return
         self._set_status("drawing the chart (cache only)…")
-        self._chart_worker(int(self.metrics.get("window_hours") or SCAN_HOURS))
+        self._chart_worker(int(self.metrics.get("window_hours") or WINDOW_HOURS))
 
     @work(thread=True)
     def _chart_worker(self, hours: int) -> None:

@@ -29,7 +29,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from luna_doctor import badges, cli, report, sources, tui
+from luna_doctor import badges, baseline, cli, report, sources, tui
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
@@ -111,6 +111,7 @@ def _metrics(**over):
 
 
 _SPARK_START = "2026-11-02T00:00Z"
+_HOUR_START = "2026-11-02T14:00Z"
 
 
 def _by_minute(pairs, start=_SPARK_START):
@@ -126,6 +127,25 @@ def _scan_of(pairs, **over):
     base = datetime.strptime(_SPARK_START, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
     return _metrics(by_minute=_by_minute(pairs),
                     scanned_at=base.timestamp() + 24 * 3600, **over)
+
+
+def _hour_scan(pairs, **over):
+    """Metrics whose one-hour window closes at _HOUR_START plus an hour.
+
+    One column per minute, so a minute offset is a column index and a `█` cell
+    is one minute at or over the lane count.
+    """
+    base = datetime.strptime(_HOUR_START, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
+    return _metrics(window_hours=1, by_minute=_by_minute(pairs, start=_HOUR_START),
+                    scanned_at=base.timestamp() + 3600, **over)
+
+
+def _busy_hour():
+    """An hour with seven minutes at or over 12 lanes, peaking at 14:04Z."""
+    pairs = [(offset, 3) for offset in range(0, 4)]
+    pairs += [(offset, 12) for offset in range(4, 11)]
+    pairs += [(offset, 3) for offset in range(11, 60)]
+    return _hour_scan(pairs)
 
 
 # ---- (a) the six answers steer the lead panel -------------------------------
@@ -544,7 +564,7 @@ class TriageAppSurface(unittest.TestCase):
             if key is None and isinstance(binding, (tuple, list)):
                 key = binding[0]
             keys.add(key)
-        self.assertTrue({"f", "q"} <= keys, keys)
+        self.assertTrue({"f", "q", "w"} <= keys, keys)
 
     def test_run_triage_runs_the_app_and_returns_zero(self):
         with mock.patch.object(tui.TriageApp, "run", return_value=None) as run:
@@ -559,16 +579,112 @@ class TriageAppSurface(unittest.TestCase):
 
     def test_the_scan_reads_the_capacity_cache_only(self):
         with mock.patch.object(tui.cli, "collect", return_value=[]), \
-                mock.patch.object(tui.cli, "analyse", return_value={}), \
+                mock.patch.object(tui.cli, "analyse", side_effect=lambda reqs, hours: {}), \
                 mock.patch.object(tui.cli, "_capacity_metrics",
                                   return_value={}) as metrics_block, \
                 mock.patch.object(tui.sources, "fetch_capacity", return_value=None) as fetch:
-            metrics, cap = tui.scan(plan="apex")
+            metrics, previous, cap = tui.scan(plan="apex")
         fetch.assert_called_once_with(allow_network=False)
         self.assertIs(False, metrics_block.call_args.kwargs.get("allow_network"),
                       "the CLI's capacity block is read cache-only too")
         self.assertEqual("apex", metrics["declared_plan"])
+        self.assertEqual({}, previous)
         self.assertIsNone(cap)
+
+
+# ---- the window: one hour, and the hour before it ------------------------
+class TheWindowAndItsPredecessor(unittest.TestCase):
+    """The window is one hour, [w] cycles it, and scan() reads the window before
+    this one so a delta column has a window to compare against."""
+
+    def test_the_dashboard_scans_one_hour(self):
+        self.assertEqual(1, tui.WINDOW_HOURS)
+
+    def test_the_window_cycles_one_six_and_twentyfour(self):
+        self.assertEqual(6, tui.window_cycle(1))
+        self.assertEqual(24, tui.window_cycle(6))
+        self.assertEqual(1, tui.window_cycle(24))
+
+    def test_a_window_outside_the_cycle_falls_back_to_one_hour(self):
+        self.assertEqual(1, tui.window_cycle(0.5))
+        self.assertEqual(1, tui.window_cycle(None))
+
+    def test_scan_returns_the_window_the_one_before_it_and_the_capacity(self):
+        reads, analysed = [], []
+
+        def collect(hours, harnesses, pi_roots, claude_roots, now=None):
+            reads.append((hours, now))
+            return []
+
+        def analyse(reqs, hours):
+            analysed.append(hours)
+            return {"window_hours": hours}
+
+        now = 100000.0
+        with mock.patch.object(tui.cli, "collect", side_effect=collect), \
+                mock.patch.object(tui.cli, "analyse", side_effect=analyse), \
+                mock.patch.object(tui.cli, "_capacity_metrics", return_value={}), \
+                mock.patch.object(tui.sources, "fetch_capacity", return_value=None), \
+                mock.patch.object(tui.time, "time", return_value=now):
+            metrics, previous, cap = tui.scan(plan="apex", hours=6)
+
+        _start, end = baseline.previous_window(now, 6)
+        self.assertEqual(now - 6 * 3600, end,
+                         "the previous window ends where this one starts")
+        self.assertEqual([(6, now), (6, end)], reads,
+                         "one extra read, of the window immediately before")
+        self.assertEqual([6, 6], analysed)
+        self.assertEqual(6, metrics["window_hours"])
+        self.assertEqual(6, previous["window_hours"])
+        self.assertIsNone(cap)
+
+    def test_the_previous_window_is_baselines_own_pairing(self):
+        """No second comparison: the span comes from baseline, which tests it."""
+        now, hours = 500000.0, 1
+        with mock.patch.object(tui.cli, "collect", return_value=[]), \
+                mock.patch.object(tui.cli, "analyse", return_value={}) as analyse, \
+                mock.patch.object(tui.baseline, "previous_window",
+                                  wraps=baseline.previous_window) as pairing:
+            tui.previous_window_metrics(now, hours)
+        pairing.assert_called_once_with(now, hours)
+        self.assertEqual(hours, analyse.call_args.args[1])
+
+
+class TheWindowKeyOnTheScreen(unittest.TestCase):
+    """[w] cycles the window and re-reads the logs: a label never outruns its data."""
+
+    def test_w_cycles_the_window_and_rescans_it(self):
+        asyncio.run(self._drive())
+
+    async def _drive(self):
+        app = tui.TriageApp()
+        seen = []
+
+        def fake_scan(plan=None, hours=tui.WINDOW_HOURS):
+            seen.append(hours)
+            return _metrics(window_hours=hours), None, None
+
+        with mock.patch.object(tui, "scan", side_effect=fake_scan):
+            async with app.run_test(size=(100, 40)) as pilot:
+                await self._settle(pilot, lambda: app.metrics is not None)
+                self.assertEqual([1], seen, "the screen opens on one hour")
+                await pilot.press("w")
+                await self._settle(pilot, lambda: len(seen) == 2)
+                self.assertEqual(6, app.window_hours)
+                self.assertEqual(6, app.metrics["window_hours"])
+                await pilot.press("w")
+                await self._settle(pilot, lambda: len(seen) == 3)
+                self.assertEqual(24, app.window_hours)
+                self.assertEqual(24, app.metrics["window_hours"])
+                await pilot.press("q")
+
+    @staticmethod
+    async def _settle(pilot, ready) -> None:
+        """Wait for the thread worker's result, bounded, so a hang fails loudly."""
+        for _attempt in range(40):
+            await pilot.pause(0.05)
+            if ready():
+                return
 
 
 class TriageAppFailure(unittest.TestCase):
@@ -614,7 +730,7 @@ class TheStatusMoonOnTheScreen(unittest.TestCase):
     async def _drive(self):
         app = tui.TriageApp()
         with mock.patch.object(tui, "scan",
-                               return_value=(_metrics(),
+                               return_value=(_metrics(), None,
                                              _cap(_payload("capacity-2026-11-02.json")))):
             async with app.run_test(size=(100, 40)) as pilot:
                 await pilot.pause()
@@ -637,7 +753,7 @@ class TheStatusMoonOnTheScreen(unittest.TestCase):
         empty = _metrics(requests=0, by_outcome={}, by_tier={}, by_harness={},
                          pressure_windows=0, longest_pressure_window=None)
         app = tui.TriageApp()
-        with mock.patch.object(tui, "scan", return_value=(empty, None)):
+        with mock.patch.object(tui, "scan", return_value=(empty, None, None)):
             async with app.run_test(size=(100, 40)) as pilot:
                 await pilot.pause()
                 await pilot.pause()
@@ -661,13 +777,13 @@ class EverySlowStepSaysItIsRunning(unittest.TestCase):
         app = tui.TriageApp()
         computing, release = threading.Event(), threading.Event()
 
-        def slow_fix(plan=None):
+        def slow_fix(plan=None, hours=tui.WINDOW_HOURS):
             # the worker is inside the fix, and the screen must already say so
             computing.set()
             release.wait(5)
             return "fix output"
 
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), _cap(_payload("capacity-2026-11-02.json")))), \
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, _cap(_payload("capacity-2026-11-02.json")))), \
                 mock.patch.object(tui, "fix_output", side_effect=slow_fix):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
@@ -735,7 +851,7 @@ class TriageAppLiteralText(unittest.TestCase):
         app = tui.TriageApp()
         metrics = _metrics()
         cap = _cap(_payload("capacity-2026-11-02.json"))
-        with mock.patch.object(tui, "scan", return_value=(metrics, cap)), \
+        with mock.patch.object(tui, "scan", return_value=(metrics, None, cap)), \
                 mock.patch.object(tui, "fix_output", return_value=self.FIX):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
@@ -939,11 +1055,11 @@ class ConcurrencySparkline(unittest.TestCase):
         self.assertEqual(1, sum(char != " " for char in spark))
         self.assertNotEqual(" ", spark[-1])
 
-    def test_the_caption_names_the_peak_the_row_scales_to(self):
-        self.assertEqual("concurrency across the window · peak 17",
-                         tui.spark_caption(_metrics(peak_concurrency=17)))
-        self.assertEqual("concurrency across the window · peak unknown",
-                         tui.spark_caption(_metrics(peak_concurrency=None)))
+    def test_the_caption_says_which_scale_the_row_is_drawn_on(self):
+        self.assertEqual("scale: this window · peak at 14:04Z",
+                         tui.spark_caption(_busy_hour()))
+        self.assertEqual("█ = at or over ●12 lanes · over 7m of 60m · peak at 14:04Z",
+                         tui.spark_caption(_busy_hour(), lanes=12))
 
     def test_an_empty_window_draws_nothing_at_all(self):
         self.assertEqual("", tui.concurrency_sparkline(_metrics()))
@@ -953,7 +1069,73 @@ class ConcurrencySparkline(unittest.TestCase):
         metrics = _scan_of([(0, 17)])
         row, caption = tui.spark_text(metrics, width=8).plain.split("\n")
         self.assertEqual(8, len(row))
-        self.assertEqual(tui.spark_caption(metrics), caption)
+        self.assertEqual(tui.spark_caption(metrics, width=8), caption)
+
+
+# ---- the picture on the lane scale --------------------------------------
+class ThePictureScalesToTheLanes(unittest.TestCase):
+    """`█` means at or over the lane count, on every screen and in every window."""
+
+    def test_one_hour_is_one_cell_per_minute(self):
+        self.assertEqual(60, tui.SPARK_WIDTH)
+        self.assertEqual(60, len(tui.concurrency_sparkline(_busy_hour(), lanes=12)))
+
+    def test_a_minute_at_or_over_the_lane_count_is_the_full_block(self):
+        row = tui.concurrency_sparkline(
+            _hour_scan([(0, 12), (1, 24), (2, 11)]), lanes=12)
+        self.assertEqual("██▇", row[:3])
+
+    def test_below_the_lane_count_the_block_is_the_approach(self):
+        row = tui.concurrency_sparkline(_hour_scan([(0, 6), (1, 5), (2, 1)]), lanes=12)
+        self.assertEqual("▄▃▁", row[:3])
+
+    def test_the_lanes_set_the_scale_not_this_windows_peak(self):
+        """The current behaviour tops out at the window's worst minute, which
+        draws the same shape whether the lanes are 12 or 120."""
+        row = tui.concurrency_sparkline(_busy_hour(), lanes=100)
+        self.assertNotIn("█", row, "nothing here reached 100 lanes")
+        self.assertEqual({"▁"}, set(row), "every minute here is far below 100 lanes")
+
+    def test_without_lanes_the_row_still_scales_to_this_windows_peak(self):
+        row = tui.concurrency_sparkline(_busy_hour())
+        self.assertEqual("█", row[4], "the busiest minute is the full block")
+        self.assertNotIn("█", row[:4])
+
+    def test_the_count_of_full_blocks_is_the_minutes_over(self):
+        metrics = _busy_hour()
+        self.assertEqual(7, tui.concurrency_sparkline(metrics, lanes=12).count("█"))
+        self.assertIn("over 7m of 60m", tui.spark_caption(metrics, lanes=12))
+
+    def test_a_window_with_no_minute_over_says_so_in_its_units(self):
+        caption = tui.spark_caption(_hour_scan([(0, 3), (1, 4)]), lanes=12)
+        self.assertIn("over 0m of 60m", caption)
+        self.assertEqual("scale: this window · peak at 14:01Z",
+                         tui.spark_caption(_hour_scan([(0, 3), (1, 4)])))
+
+    def test_an_empty_window_has_no_picture_and_no_caption(self):
+        self.assertEqual("", tui.concurrency_sparkline(_metrics(), lanes=12))
+        self.assertEqual("", tui.spark_caption(_metrics(), lanes=12))
+        self.assertEqual("", tui.spark_text(_metrics(), lanes=12).plain)
+
+
+# ---- the lane count the picture scales to -------------------------------
+class TheLanesComeFromTheWidthRow(unittest.TestCase):
+    """The header's `●<lanes>` and the caption's denominator are one number."""
+
+    def test_the_accounts_number_wins_and_the_picture_scales_to_it(self):
+        cap = _cap(_payload("capacity-2026-11-02.json"))
+        self.assertEqual((12, "account"), tui.resolved_lanes(_metrics(), cap))
+
+    def test_a_declaration_is_the_fallback_when_nothing_is_cached(self):
+        self.assertEqual((None, "unknown"), tui.resolved_lanes(_metrics(), None))
+        value, source = tui.resolved_lanes(_metrics(declared_plan="apex"), None)
+        self.assertEqual("plan apex", source)
+        self.assertIsInstance(value, int)
+
+    def test_a_declaration_never_overrides_the_account(self):
+        cap = _cap(_payload("capacity-2026-11-02.json"))
+        self.assertEqual((12, "account"),
+                         tui.resolved_lanes(_metrics(declared_plan="pro"), cap))
 
 
 # ---- the sparkline on the screen ----------------------------------------
@@ -967,7 +1149,7 @@ class TheSparkOnTheScreen(unittest.TestCase):
         app = tui.TriageApp()
         cap = _cap(_payload("capacity-2026-11-02.json"))
         with mock.patch.object(tui, "scan",
-                               return_value=(_scan_of([(0, 17), (600, 4)]), cap)):
+                               return_value=(_scan_of([(0, 17), (600, 4)]), None, cap)):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
                 await pilot.press("enter")
@@ -978,7 +1160,8 @@ class TheSparkOnTheScreen(unittest.TestCase):
                 spark = app.query_one("#spark")
                 self.assertTrue(spark.display)
                 text = str(spark.render())
-                self.assertIn("concurrency across the window · peak 17", text)
+                self.assertIn("█ = at or over ●12 lanes", text)
+                self.assertIn("peak at 00:00Z", text)
                 self.assertTrue(set(text) & set(tui._SPARK_BLOCKS), text)
                 await pilot.press("q")
 
@@ -987,7 +1170,7 @@ class TheSparkOnTheScreen(unittest.TestCase):
 
     async def _drive_quiet(self):
         app = tui.TriageApp()
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)):
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
                 await pilot.press("enter")
@@ -1027,6 +1210,12 @@ class TheDetailOnAKeypress(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("", text)
 
+    def test_the_report_asks_for_the_dashboards_window(self):
+        with mock.patch.object(tui.cli, "main", return_value=0) as main:
+            tui.detail_output()
+        argv = main.call_args.args[0]
+        self.assertEqual("1h", argv[argv.index("--since") + 1])
+
     def test_a_failed_analyze_hands_back_its_code_and_its_error(self):
         def refused(argv):
             print("luna-doctor: bad --since value", file=sys.stderr)
@@ -1057,6 +1246,27 @@ class TheDetailOnAKeypress(unittest.TestCase):
     def test_an_empty_capture_is_an_empty_report_not_a_failure(self):
         self.assertTrue(tui.carries_report(0, ""))
 
+
+# ---- [f]: the fix for the window on screen ------------------------------
+class TheFixAsksForThisWindow(unittest.TestCase):
+    """The advice is about the rows on screen, so it is read for their window."""
+
+    def test_the_fix_runs_for_the_window_on_screen(self):
+        with mock.patch.object(tui.cli, "main", return_value=0) as main:
+            tui.fix_output("apex", 6)
+        argv = main.call_args.args[0]
+        self.assertEqual("fix", argv[0])
+        self.assertEqual("6h", argv[argv.index("--since") + 1])
+        self.assertIn("--offline", argv)
+        self.assertEqual("apex", argv[argv.index("--plan") + 1])
+
+    def test_the_fix_defaults_to_the_dashboards_one_hour(self):
+        with mock.patch.object(tui.cli, "main", return_value=0) as main:
+            tui.fix_output()
+        argv = main.call_args.args[0]
+        self.assertEqual("1h", argv[argv.index("--since") + 1])
+        self.assertNotIn("--plan", argv)
+
     def test_d_runs_analyze_and_fills_the_detail_panel(self):
         asyncio.run(self._drive())
 
@@ -1067,7 +1277,7 @@ class TheDetailOnAKeypress(unittest.TestCase):
             print("peak concurrency 17")
             return 0
 
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
                 mock.patch.object(tui.cli, "main", side_effect=report) as main:
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
@@ -1092,7 +1302,7 @@ class TheDetailOnAKeypress(unittest.TestCase):
     async def _drive_failure(self):
         app = tui.TriageApp()
         failed = (2, "luna-doctor: bad --since value: 'nope'")
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
                 mock.patch.object(tui, "detail_output", return_value=failed):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
@@ -1117,7 +1327,7 @@ class TheDetailOnAKeypress(unittest.TestCase):
         app = tui.TriageApp()
         pressure = (1, "Concurrency pressure across 17 requests: 3 request(s) "
                        "were blocked at admission, peak concurrency 17.\n")
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
                 mock.patch.object(tui, "detail_output", return_value=pressure):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
@@ -1198,6 +1408,14 @@ class TheChartOnAKeypress(unittest.TestCase):
         self.assertIsNone(png, "a chart nobody wrote is not offered as opened")
         self.assertIn("no space left", error, "the command's own last line comes back")
 
+    def test_the_chart_asks_for_the_dashboards_one_hour_by_default(self):
+        with mock.patch.object(tui.cli, "main", return_value=0) as main:
+            svg, _png, error = tui.chart_output()
+        self.addCleanup(shutil.rmtree, os.path.dirname(svg), True)
+        argv = main.call_args.args[0]
+        self.assertEqual("1h", argv[argv.index("--since") + 1])
+        self.assertTrue(error, "nothing was written, so no path is offered")
+
     def test_a_chart_that_wrote_no_file_is_a_failure_even_at_exit_zero(self):
         with mock.patch.object(tui.cli, "main", return_value=0):
             svg, _png, error = tui.chart_output("apex", 24)
@@ -1212,7 +1430,7 @@ class TheChartOnAKeypress(unittest.TestCase):
         app = tui.TriageApp()
         drawn = ("/tmp/luna-doctor-chart/chart.svg",
                  "/tmp/luna-doctor-chart/chart.png", "")
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
                 mock.patch.object(tui, "chart_output", return_value=drawn) as chart:
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
@@ -1234,7 +1452,7 @@ class TheChartOnAKeypress(unittest.TestCase):
         app = tui.TriageApp()
         failed = ("/tmp/luna-doctor-chart/chart.svg", None,
                   "luna-doctor: cannot write the chart: no space left")
-        with mock.patch.object(tui, "scan", return_value=(_metrics(), None)), \
+        with mock.patch.object(tui, "scan", return_value=(_metrics(), None, None)), \
                 mock.patch.object(tui, "chart_output", return_value=failed):
             async with app.run_test(size=(100, 40)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
