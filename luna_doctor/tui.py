@@ -73,17 +73,23 @@ TRIAGE_CHOICES: list[tuple[str, str]] = [
     ("Nothing yet, just checking", "checking"),
 ]
 
-# Which evidence leads the verdict for each answer. "admission" is the admission
-# and saturation panel, "latency" the latency-and-queue-wait panel, "stuck" the
-# idle-budget diagnosis, and "overview" the plain traffic summary.
+# Which evidence group each answer selects. The answer chooses which three rows
+# stand under the picture; it never gates the screen, and it never changes
+# anything above them. The values are the region kinds, spelled here as the
+# strings they are because `_LEAD` is read at import time and the region names
+# are declared further down.
 _LEAD = {
-    "failing": "admission",
+    "failing": "stalls",
     "slow": "latency",
-    "finish_reason": "stuck",
-    "concurrency": "admission",
-    "stuck": "stuck",
-    "checking": "overview",
+    "finish_reason": "stalls",
+    "concurrency": "refusals",
+    "stuck": "stalls",
+    "checking": "latency",
 }
+
+# The three regions an answer can select, in the order the scale rises. `load` is
+# not one of them: it is on the screen in every state.
+EVIDENCE_GROUPS = ("latency", "refusals", "stalls")
 
 _BADGE_UNKNOWN = badges.badge_for(sources.PROV_UNKNOWN)
 _BADGE_MEASURED = badges.badge_for(sources.PROV_MEASURED)
@@ -95,7 +101,7 @@ _GLYPH_STYLE = Style(color=False, emoji=True, motion=False)
 
 
 def pick_lead(choice_key: str) -> str:
-    """The lead panel id for one on-screen answer."""
+    """The evidence group one on-screen answer selects."""
     return _LEAD[choice_key]
 
 
@@ -693,6 +699,11 @@ def local_rows(choice_key: str, metrics: dict) -> list[tuple[str, str]]:
     invisible and the peak is a floor, not a total. Nothing sums a measured
     count with a configured width. The answer picks which evidence follows the
     peak (pick_lead), so the classes the person named come first.
+
+    This panel is the screen's old local column, and `group_rows` is what
+    replaces it: the same three facts on the fixed grid, selected by the same
+    answer. Until the panel goes, it dispatches on that group so one selector
+    answers for both surfaces.
     """
     rows = []
     peak = _count(metrics.get("peak_concurrency"))
@@ -703,15 +714,13 @@ def local_rows(choice_key: str, metrics: dict) -> list[tuple[str, str]]:
         rows.append((_BADGE_MEASURED,
                      f"peak {peak} concurrent, {badges.badge_help(sources.PROV_MEASURED)} "
                      f"- other machines are invisible to these logs"))
-    lead = pick_lead(choice_key)
-    if lead == "latency":
+    group = pick_lead(choice_key)
+    if group == REGION_LATENCY:
         rows.extend(_latency_rows(metrics))
-    elif lead == "stuck":
+    elif group == REGION_STALLS:
         rows.extend(_stuck_rows(metrics))
-    elif lead == "admission":
-        rows.extend(_admission_evidence_rows(metrics))
     else:
-        rows.extend(_overview_rows(metrics))
+        rows.extend(_admission_evidence_rows(metrics))
     return rows
 
 
@@ -838,24 +847,6 @@ def _stuck_rows(metrics: dict) -> list[tuple[str, str]]:
         rows.append((_BADGE_MEASURED,
                      "the slowest request here is not established (unknown): this "
                      "scan ranked none, and it recorded no reason why"))
-    return rows
-
-
-def _overview_rows(metrics: dict) -> list[tuple[str, str]]:
-    """The plain traffic summary, for "nothing yet, just checking"."""
-    hours = int(metrics.get("window_hours") or WINDOW_HOURS)
-    n = _count(metrics.get("requests")) or 0
-    by_harness = metrics.get("by_harness") or {}
-    harnesses = ", ".join(f"{name} {count}" for name, count in sorted(by_harness.items()))
-    text = f"{n} request(s) in the last {hours}h"
-    if harnesses:
-        text += f" ({harnesses})"
-    rows = [(_BADGE_MEASURED, text)]
-    by_tier = metrics.get("by_tier") or {}
-    if by_tier:
-        rows.append((_BADGE_MEASURED,
-                     "tiers: " + ", ".join(f"{name} {count}"
-                                           for name, count in sorted(by_tier.items()))))
     return rows
 
 
@@ -1101,20 +1092,42 @@ def delta_cells(metrics: dict, previous, key: str) -> str:
     direction is a row fact and severity is a region fact - so the region title
     is the only severity here.
     """
+    return _delta_text(_delta_move(_delta_value(metrics, key),
+                                   _delta_value(previous, key), metrics, previous))
+
+
+def _delta_move(now, before, metrics: dict, previous) -> int | None:
+    """The signed move of one pair of counts, or None when there is none to show.
+
+    None is every case the delta column reads `·`: no previous window, a window
+    under `baseline.FLOOR`, a count nobody read, and a count that was zero in
+    both windows - no change to report, which `▬` would overstate.
+    """
     if not previous:
-        return DELTA_NONE
+        return None
     if min(_window_requests(metrics), _window_requests(previous)) < baseline.FLOOR:
+        return None
+    if now is None or before is None or (not now and not before):
+        return None
+    return now - before
+
+
+def _delta_text(move: int | None, digits: int | None = None) -> str:
+    """One delta cell from a move `_delta_move` already read.
+
+    `digits` is the width an evidence group's numbers share, so a group prints
+    `▲  4` beside `▲ 11` (§2.4) and `▾ 4` in a group whose numbers are all one
+    digit (§2.2). Without it the cell is the LOAD region's three cells: one cell
+    of air up to nine, so a ten-request move still fits.
+    """
+    if move is None:
         return DELTA_NONE
-    now, before = _delta_value(metrics, key), _delta_value(previous, key)
-    if now is None or before is None:
-        return DELTA_NONE
-    if not now and not before:
-        return DELTA_NONE
-    if now == before:
+    if move == 0:
         return DELTA_LEVEL
-    arrow = DELTA_UP if now > before else DELTA_DOWN
-    moved = abs(now - before)
-    # One cell of air up to nine, so a ten-request move still fits three cells.
+    arrow = DELTA_UP if move > 0 else DELTA_DOWN
+    moved = abs(move)
+    if digits:
+        return "%s %s" % (arrow, str(moved).rjust(digits))
     return "%s %d" % (arrow, moved) if moved < 10 else "%s%d" % (arrow, moved)
 
 
@@ -1247,6 +1260,317 @@ def load_rows(metrics: dict, cap, window_hours, previous=None) -> list[tuple[str
     return [_now_row(metrics, cap),
             _peak_row(metrics, previous, cap, window_hours),
             _blocked_row(metrics, previous)]
+
+
+# ---- the evidence group: the three rows that say what kind of trouble ------
+# A group is the screen's third region: three data rows on the same grid the LOAD
+# region draws, built from metrics keys the analysis already produces. The answer
+# selects which group stands under the picture (§8 item 4), and its title then
+# wears the moon those three rows earn (`region_moon`), so a group is one region
+# and not a second scoring system.
+#
+# The delta column is the one place these rows differ from LOAD's: a group's
+# numbers share one width, because the mockups print `▲  4` beside `▲ 11` in the
+# same group (§2.4) and `▾ 4` in a group whose numbers are all one digit (§2.2).
+# One width per group is what makes both read as columns rather than as steps.
+
+
+class _EvidenceRow(NamedTuple):
+    """One evidence row before it is drawn: its facts, in their columns.
+
+    `move` is the signed change against the previous window: None when there is
+    no comparable window (the row prints `·`), and 0 when both windows read the
+    same (`▬`).
+    """
+
+    label: str
+    badge: str
+    number: str
+    move: int | None
+    qualifier: str
+
+
+def _group_digits(moves) -> int:
+    """The width one group's delta numbers share: one cell, or more for counts."""
+    return max([len(str(abs(move))) for move in moves if move] or [1])
+
+
+def _sampled(tier) -> bool:
+    """Whether a latency tier measured anything: a percentile with no n is `?`."""
+    return bool(_count((tier or {}).get("n")))
+
+
+def _seconds_cell(value) -> str:
+    """A duration as the label's unit says: seconds, an integer above 10s."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return ""
+    return "%ds" % int(round(value)) if value >= 10 else "%.1fs" % value
+
+
+def _latency_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
+    """LATENCY: the interactive p50 and p90, then the gateway's fixed wait.
+
+    The percentiles are completed interactive requests only, each badged ○
+    because it measures these logs and so is a lower bound. A percentile with no
+    sample prints `?` and no number: a suppressed percentile never prints its
+    denominator (§6.3 item 19). The gateway row is the documented wait every
+    request pays before headers, so it has no trend - `·`, never an arrow - and
+    it is context, not severity, when the region reads its own moon.
+    """
+    tier = (metrics.get("latency_s") or {}).get("interactive") or {}
+    before = ((previous or {}).get("latency_s") or {}).get("interactive") or {}
+    measured = _sampled(tier)
+    before_measured = _sampled(before)
+    rows = []
+    for label in ("p50", "p90"):
+        number = _seconds_cell(tier.get(label)) if measured else ""
+        earlier = _seconds_cell(before.get(label)) if before_measured else ""
+        rows.append(_EvidenceRow(
+            label,
+            _BADGE_MEASURED if number else _BADGE_UNKNOWN,
+            number,
+            (_delta_move(round(tier[label]), round(before[label]), metrics, previous)
+             if number and earlier else None),
+            ""))
+    rows.append(_EvidenceRow("gateway", _BADGE_MEASURED,
+                             "%ds" % int(round(cli.PRE_HEADER_WAIT_S)), None,
+                             "fixed wait before headers"))
+    return rows
+
+
+# What happened to the slowest request, in words. The explain digest carries the
+# outcome as an API class name, and §7 rule 6 keeps those names in the
+# drill-down: this row says the same fact in the register the screen speaks.
+_OUTCOME_WORDS = {
+    "completed": "it finished",
+    "client_idle_timeout": "the idle budget killed it",
+    "admission_timeout": "it was blocked at admission",
+    "rate_limited": "the gateway refused it with a 429",
+    "org_concurrency_limit": "the account's pool was full",
+}
+
+
+def _refusals_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
+    """REFUSALS: the three ways the gateway refuses work, each with its delta.
+
+    Every count is this machine's own outcome count, badged ○. The clauses say
+    what the class means in words a person can act on and never name the field
+    (§7 rule 6). In a window that carried traffic, a counter's absent class is a
+    zero: nothing was refused, so nothing was unread. A window with no traffic at
+    all is not evidence of health - zero refusals out of zero requests - so it
+    reads `?` with no number, the shape §2.5 gives an empty window.
+    """
+    measured = bool(_window_requests(metrics))
+    by_outcome = metrics.get("by_outcome") or {}
+    by_tier = metrics.get("by_tier") or {}
+    before = previous or {}
+    rows = []
+    for label, side, key, qualifier in (
+            ("429", "by_outcome", "rate_limited", "the account's rate limit"),
+            ("at limit", "by_outcome", "org_concurrency_limit", "account pool full"),
+            ("background", "by_tier", "background", "demoted to the slow tier")):
+        if not measured:
+            rows.append(_EvidenceRow(label, _BADGE_UNKNOWN, "", None,
+                                     "nothing measured"))
+            continue
+        now = _count(((metrics.get(side) or {})).get(key)) or 0
+        then = _count(((before.get(side) or {})).get(key)) or 0
+        rows.append(_EvidenceRow(label, _BADGE_MEASURED, "%d" % now,
+                                 _delta_move(now, then, metrics, previous), qualifier))
+    return rows
+
+
+def _stalls_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
+    """STALLS: what stalled, the slowest request, and the starved-peer count.
+
+    A stall is a request the harness's own idle budget killed, and the clause
+    says that rather than naming the class. The slowest row carries the duration
+    explain ranked first and, in its clause, what happened to that request - the
+    one fact a duration cannot carry on its own. The starved row is the
+    cross-machine evidence: this request stalled while another request to the
+    same model finished, so the model was healthy and this request was never
+    served.
+
+    Only the two counts have a previous window to compare against. The digest is
+    ranked from this window's requests, so its delta is `·`: an arrow there would
+    claim a comparison nobody measured.
+    """
+    measured = bool(_window_requests(metrics))
+    by_outcome = metrics.get("by_outcome") or {}
+    before = (previous or {}).get("by_outcome") or {}
+    stalled = _count(by_outcome.get("client_idle_timeout")) or 0
+    starved = _count(metrics.get("starved_peer_evidence")) or 0
+    digest = metrics.get("slowest_request") or {}
+    duration = digest.get("duration") if isinstance(digest.get("duration"), str) else ""
+    stalled_row = _EvidenceRow("stalled", _BADGE_MEASURED, "%d" % stalled,
+                               _delta_move(stalled,
+                                           _count(before.get("client_idle_timeout")) or 0,
+                                           metrics, previous),
+                               "the harness's idle budget")
+    starved_row = _EvidenceRow("starved", _BADGE_MEASURED, "%d" % starved,
+                               _delta_move(starved,
+                                           _count((previous or {}).get("starved_peer_evidence")) or 0,
+                                           metrics, previous),
+                               "stalled while a peer finished")
+    if not measured:
+        # A window that measured nothing did not measure a clean run of zeroes
+        # either: the same `?` an empty refusals group prints.
+        stalled_row = _EvidenceRow("stalled", _BADGE_UNKNOWN, "", None,
+                                   "nothing measured")
+        starved_row = _EvidenceRow("starved", _BADGE_UNKNOWN, "", None,
+                                   "nothing measured")
+    return [
+        stalled_row,
+        # An unknown with no reason is the bare `?` §7 rule 8 refuses: a window
+        # that ranked nothing says so.
+        _EvidenceRow("slowest", _BADGE_MEASURED if duration else _BADGE_UNKNOWN,
+                     duration, None,
+                     _OUTCOME_WORDS.get(digest.get("outcome"), "")
+                     if duration else "nothing ranked"),
+        starved_row,
+    ]
+
+
+_GROUPS = {
+    REGION_LATENCY: _latency_group,
+    REGION_REFUSALS: _refusals_group,
+    REGION_STALLS: _stalls_group,
+}
+
+
+def group_rows(group_key: str,
+               metrics: dict,
+               previous: dict | None = None) -> list[tuple[str, str]]:
+    """The three evidence rows for one group, on the fixed grid.
+
+    The rows are built from metrics keys the analysis already produces: no group
+    reads a log, ranks a request or re-derives a count. `previous` is the
+    equal-length window before this one, and it decides nothing but the delta
+    column - without it, or with either window under `baseline.FLOOR`, every row
+    prints `·`.
+
+    Each row comes back as (badge, the line it prints), the same shape the LOAD
+    region returns: the badge cell is already in the line, so the screen draws
+    each row as it arrives and no caller measures columns twice.
+    """
+    cells = _GROUPS[group_key](metrics or {}, previous)
+    digits = _group_digits([cell.move for cell in cells])
+    return [_grid_row(cell.label, cell.badge, cell.number,
+                      _delta_text(cell.move, digits), cell.qualifier)
+            for cell in cells]
+
+
+# ---- the NEXT region: the one imperative, and the command that carries it --
+NEXT_CELLS = 60        # the imperative's budget, §7 rule 2
+
+
+def _window_hours(metrics) -> int:
+    """The window the screen is reading; the dashboard's own is one hour."""
+    hours = _count((metrics or {}).get("window_hours"))
+    return hours if hours and hours > 0 else WINDOW_HOURS
+
+
+def _command_line(command: str, *, hours: int | None = None,
+                  key: str | None = None) -> str:
+    """The command a reader types, its keypress right-aligned when one runs it.
+
+    The key lands on the same edge the header's clock does, so the screen has one
+    right margin and the eye finds the key in the same place on both rows.
+    """
+    line = "\u2192 luna-doctor %s" % command
+    if hours is not None:
+        line += " --since %gh" % hours
+    if key:
+        line = line.ljust(HEADER_CELLS - len("[%s]" % key)) + "[%s]" % key
+    return line
+
+
+def next_rows(metrics: dict, cap, group_key: str) -> list[tuple[str, str]]:
+    """The NEXT region: one imperative, then the command that carries it.
+
+    Four states and no fifth. They are read from the facts the header reads -
+    `header_moon` decides the state, and `resolved_lanes` decides whether there
+    is a lane count to act on at all - because this row is the last row of one
+    decision, not a second opinion:
+
+    - nothing measured (the plain moon): widen the window, and the command reads
+      the next wider window `[w]` offers;
+    - a window nobody can judge (no lane count): hold flat until the account
+      answers, and the command fetches the account's width;
+    - pressure or over capacity: hold the lane count in flight and send the rest
+      to the -background tier, which is the per-agent fix;
+    - otherwise: nothing to change, and `watch` keeps watch.
+
+    `group_key` is the evidence group on screen, checked here so a typo fails
+    loudly. It does not choose any of the four wordings: §2.4 draws the same
+    imperative beside the refusals group that §2.1 draws beside the latency
+    group, and a group-shaped fifth imperative is the sixth the brief refuses.
+    """
+    if group_key not in _GROUPS:
+        raise KeyError(group_key)
+    moon = header_moon(metrics)
+    lanes, source = resolved_lanes(metrics, cap)
+    hours = _window_hours(metrics)
+    if moon == _PLAIN_MOON:
+        imperative = "Nothing measured in the last hour \u00b7 widen the window"
+        wider = window_cycle(hours)
+        if wider > hours:
+            command = _command_line("analyze", hours=wider, key="w")
+        else:
+            # The ring wraps to 1h from the widest window, which is not wider:
+            # no key claims it, and the command still reads this window.
+            command = _command_line("analyze", hours=hours)
+    elif lanes is None:
+        imperative = "Hold concurrency flat until the lane count is known"
+        command = _command_line("capacity --online")
+    elif moon in (report.MOON_NEW, report.MOON_QUARTER):
+        imperative = "Hold %d in flight \u00b7 send the rest to -background" % lanes
+        command = _command_line("fix", hours=hours, key="f")
+    else:
+        imperative = "Nothing to change \u00b7 %s%d lanes hold this load" % (
+            badges.badge_for(source), lanes)
+        command = _command_line("watch", hours=hours)
+    return [("", "NEXT  " + imperative), ("", command)]
+
+
+# ---- the keys: provenance, then the moons, one line each ------------------
+_PROVENANCE_KEY = "%s account \u00b7 %s this machine (a lower bound) \u00b7 %s unknown" % (
+    badges.BADGE_ACCOUNT, badges.BADGE_MEASURED, _BADGE_UNKNOWN)
+
+# The moon key's words, in the order the scale rises. `style.MOON_STATUS` names
+# the same three glyphs with the words a report prints (`healthy`); the key is
+# four glyphs and their words, and the dashboard's first word is `ok`.
+_KEY_MOONS = (
+    (report.MOON_FULL, "ok"),
+    (report.MOON_QUARTER, "pressure"),
+    (report.MOON_NEW, "blocked at admission"),
+)
+_KEY_PLAIN_MOON = "not established"
+
+
+def _moon_key(not_established: bool) -> str:
+    """The moon line, leading with the plain moon only when the screen drew it."""
+    bits = ["%s %s" % (moon_glyph(name), word) for name, word in _KEY_MOONS]
+    if not_established:
+        bits.insert(0, "%s %s" % (moon_glyph(_PLAIN_MOON), _KEY_PLAIN_MOON))
+    return " \u00b7 ".join(bits)
+
+
+def key_lines(metrics: dict | None = None, cap=None) -> list[str]:
+    """The two key lines the screen closes with: provenance, then the moons.
+
+    Two lines replace 162 cells of key (§6.2 item 10). The `\u25cc` entry appears
+    only when a `\u25cc` is on the screen, which is exactly when the lane count was
+    declared rather than reported - `resolved_lanes` says whose number it is. The
+    plain moon's entry appears only when the window claims no status at all,
+    because a key to a glyph nobody drew is decoration.
+    """
+    line = _PROVENANCE_KEY
+    _lanes, source = resolved_lanes(metrics or {}, cap)
+    if badges.badge_for(source) == badges.BADGE_DECLARED:
+        line += " \u00b7 %s declared" % badges.BADGE_DECLARED
+    not_established = bool(metrics) and header_moon(metrics) == _PLAIN_MOON
+    return [line, _moon_key(not_established)]
 
 
 # ---- the verdict panel: the CLI's own verdict, never a second one ----------

@@ -148,26 +148,45 @@ def _busy_hour():
     return _hour_scan(pairs)
 
 
-# ---- (a) the six answers steer the lead panel -------------------------------
+# ---- (a) the six answers select the evidence group -------------------------
 class TriageChoices(unittest.TestCase):
-    """The six on-screen answers, in the order the design draws them."""
+    """The six on-screen answers, in the order the design draws them.
 
-    def test_the_six_answers_map_to_their_lead_panels(self):
+    The answer chooses which three evidence rows stand under the picture. It
+    never gates the screen and it never changes anything above the picture.
+    """
+
+    def test_the_six_answers_select_their_evidence_group(self):
         self.assertEqual(
             ["failing", "slow", "finish_reason", "concurrency", "stuck", "checking"],
             [key for _text, key in tui.TRIAGE_CHOICES])
         self.assertEqual(
-            ["admission", "latency", "stuck", "admission", "stuck", "overview"],
+            ["stalls", "latency", "stalls", "refusals", "stalls", "latency"],
             [tui.pick_lead(key) for _text, key in tui.TRIAGE_CHOICES])
 
-    def test_concurrency_and_stuck_lead_their_own_panels(self):
-        self.assertEqual("admission", tui.pick_lead("concurrency"))
-        self.assertEqual("stuck", tui.pick_lead("stuck"))
+    def test_the_selection_names_a_region_the_screen_draws(self):
+        """One spelling per concept: the selector answers in the same three
+        region kinds `region_moon` and the region title use."""
+        self.assertEqual(
+            set(tui.EVIDENCE_GROUPS),
+            {tui.pick_lead(key) for _text, key in tui.TRIAGE_CHOICES})
+        for group in tui.EVIDENCE_GROUPS:
+            self.assertIn(group, tui.REGION_KINDS)
+            self.assertNotEqual(tui.REGION_LOAD, group)
 
-    def test_finish_reason_leads_the_idle_budget_diagnosis(self):
-        """The spec binds "stream ended without finish_reason" to its existing
-        diagnosis path, the client_idle_timeout class, not to admission."""
-        self.assertEqual("stuck", tui.pick_lead("finish_reason"))
+    def test_a_429_answer_selects_the_refusals_and_a_stuck_one_the_stalls(self):
+        self.assertEqual(tui.REGION_REFUSALS, tui.pick_lead("concurrency"))
+        self.assertEqual(tui.REGION_STALLS, tui.pick_lead("stuck"))
+
+    def test_finish_reason_selects_the_stalls_group(self):
+        """The spec binds "stream ended without finish_reason" to the idle
+        budget that killed it, which is a stall, not an admission refusal."""
+        self.assertEqual(tui.REGION_STALLS, tui.pick_lead("finish_reason"))
+
+    def test_just_checking_selects_latency_rather_than_nothing(self):
+        """The dashboard renders before any answer, so "just checking" picks the
+        group a quiet screen shows - the same three rows as "slow"."""
+        self.assertEqual(tui.REGION_LATENCY, tui.pick_lead("checking"))
 
     def test_every_answer_has_a_visible_label(self):
         for text, _key in tui.TRIAGE_CHOICES:
@@ -927,7 +946,7 @@ class MediumDensityPanels(unittest.TestCase):
         self.assertIn("background latency", tiers[0])
 
     def test_the_pressure_classes_share_one_row(self):
-        rows = tui.local_rows("failing", self._busy())
+        rows = tui.local_rows("concurrency", self._busy())
         named = [text for _badge, text in rows if "rate_limit_error" in text]
         self.assertEqual(1, len(named))
         self.assertIn("scheduler admission timeout", named[0])
