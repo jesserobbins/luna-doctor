@@ -328,9 +328,11 @@ def _lanes_cell(metrics: dict, cap) -> str:
 # How old the dashboard's data is, live. Row one carries the age of the scan it
 # drew, so a reader never subtracts a clock to learn whether what they are
 # looking at is current. `AGE_STALE_AFTER_S` is the capacity freshness window
-# `cli.CAPACITY_FRESH_S` - the same window that decides whether the `now` row
-# keeps its ● - so the age gains its stale marker at the moment the occupancy
-# stops being authoritative, and the two markers on one screen cannot disagree.
+# `cli.CAPACITY_FRESH_S`, the window the `now` row's badge is judged by too: one
+# threshold, two clocks. The header ages the scan, which is always younger than
+# the account's sample, so the sample can go stale first - the row reads `?` and
+# `stale 15m` while the header still says `age 3m` - and neither marker ever
+# claims a freshness the other row contradicts.
 AGE_STALE_AFTER_S = cli.CAPACITY_FRESH_S
 
 
@@ -967,9 +969,12 @@ def _now_row(metrics: dict, cap, wall_now=None) -> tuple[str, str]:
 
     `wall_now` dates the sample against the moment the row is drawn, so a screen
     left open long enough for the sample to age past the freshness window says so
-    instead of wearing a `●` it earned when it opened. That is the same window the
-    header's age cell gains its marker on (`AGE_STALE_AFTER_S`), which is why the
-    two cannot disagree about one sample.
+    instead of wearing a `●` it earned when it opened. The window is
+    `AGE_STALE_AFTER_S`, the same threshold the header's age cell uses, but the two
+    cells age different clocks: the header ages the scan and this row ages the
+    account's sample, and a cached sample is always the older of the two. So this
+    row can lose its badge while the header still reads `age 3m`, and that is the
+    honest order - the sample went stale, the scan did not.
     """
     served = (metrics or {}).get("capacity") or {}
     now = cli._cap_field(cap, "now")
@@ -2078,7 +2083,7 @@ class TriageApp(App):
         restatement of the header, and the header is on the screen now.
         """
         lines = dashboard_lines(self.choice, metrics, self.previous,
-                                self.capacity)
+                                self.capacity, wall_now=time.time())
         self.drawn = lines
         self.query_one("#dashboard", Static).update(styled_lines(lines))
         # The ask stands down to no rows instead of `display: none`: hiding the

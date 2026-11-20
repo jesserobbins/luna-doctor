@@ -17,6 +17,31 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Added
+
+- The triage screen dates itself. The top right corner of the first row holds the
+  age of the data, and it counts up while the window is open: `age 47s`, then
+  `age 2m`. Past the capacity freshness window the cell adds `stale`, so a reader
+  never subtracts a clock to learn whether the picture is current. The age works
+  from numbers the scan already read, so no second scan runs.
+- The `now` row reads both pools the account reports. The number column holds the
+  priority pool, and the clause beside it holds the background pool, so a person
+  sees where a request sits without reading a second row. A pool the account
+  closes prints `0 closed`, and a cap the account did not report prints
+  `cap unknown`, because a closed pool and an unread cap are different facts.
+- `?` opens a help overlay, and `?` or `esc` closes it. The overlay names every
+  key on one line each, spells out the two key lines, names the commands the
+  drill-down keys run, and shows the account the numbers belong to: the plan, the
+  lane counts, the overflow routing, and the age of the capacity cache.
+- The moons carry colour on a colour terminal: green for a clean window, amber for
+  pressure, red for a window over capacity. The status word, each region title,
+  the at-or-over run in the picture and the help overlay's section labels take the
+  same colours. The glyph still carries the meaning, so `NO_COLOR` and a mono
+  terminal lose the colour and keep the screen.
+- Timestamps print local time with the offset beside the minute (`15:51-08:00`),
+  because the logs and the account API speak UTC and a bare `Z` claims the machine
+  is on UTC.
+
 ## [0.8.0-alpha.1] - 2026-11-20
 
 ### Added

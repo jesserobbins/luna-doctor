@@ -578,8 +578,8 @@ class TheAgeOfTheData(unittest.TestCase):
             self.assertLessEqual(_cells(lines[0]), tui.ROW_CELLS, lines[0])
 
     def test_the_now_row_loses_its_badge_once_the_sample_ages_out(self):
-        """One window, two markers: the header says stale and the row stops
-        claiming the account reported a number it can no longer stand behind."""
+        """One threshold, two clocks: past it both cells move, and the header's
+        marker arrives on the scan's own age."""
         payload = _payload("capacity-2026-11-02.json")
         payload["data"]["now"]["sampled_at"] = "2026-11-02T14:31:43.9Z"
         cap = _cap(payload)
@@ -592,6 +592,25 @@ class TheAgeOfTheData(unittest.TestCase):
         self.assertIn("stale", stale[3])
         self.assertIn("stale", stale[0])
 
+    def test_the_sample_goes_stale_before_the_scan_does(self):
+        """A cached sample is older than the scan that read it, so it crosses the
+        one threshold first: the row refuses the badge while the header still
+        reads `age 3m` with no marker. The two cells never contradict each other,
+        because they are not ageing the same number."""
+        payload = _payload("capacity-2026-11-02.json")
+        # Twelve minutes before the scan closes, as the real cache is: 14:20:43Z.
+        payload["data"]["now"]["sampled_at"] = "2026-11-02T14:20:43.9Z"
+        cap = _cap(payload)
+        lines = tui.dashboard_lines("slow", _busy(), _busy_before(), cap,
+                                    _CLOCK + 231)
+        self.assertTrue(lines[0].endswith("age 3m"), lines[0])
+        self.assertNotIn("stale", lines[0],
+                         "the scan is three minutes old, not fifteen")
+        self.assertNotIn(badges.BADGE_ACCOUNT, lines[3])
+        self.assertIn(tui._BADGE_UNKNOWN, lines[3])
+        self.assertIn("7/12", lines[3], "the numbers stay when the badge goes")
+        self.assertIn("stale 15m", lines[3])
+
 
 class TheAgeTicksOnTheScreen(unittest.TestCase):
     """The one cell that moves: one second, one repaint, no re-scan."""
@@ -602,8 +621,11 @@ class TheAgeTicksOnTheScreen(unittest.TestCase):
     async def _drive(self):
         app = tui.TriageApp()
         cap = _cap(_payload("capacity-2026-11-02.json"))
+        # The screen dates the frame it draws, so the wall clock is pinned for the
+        # whole drive: a landing is `age 0s` only against the clock it landed on.
         with mock.patch.object(tui, "scan",
-                               return_value=(_busy(), _busy_before(), cap)) as scan:
+                               return_value=(_busy(), _busy_before(), cap)) as scan, \
+                mock.patch.object(tui.time, "time", return_value=_CLOCK):
             async with app.run_test(size=(80, 24)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
                 opened = list(app.drawn)
@@ -1028,6 +1050,9 @@ class TheSeverityColours(unittest.TestCase):
             async with app.run_test(size=(80, 24)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
                 self.assertTrue(app.no_color, "Textual did not take the NO_COLOR filter")
+                # The Footer is composed a frame after the rows land, so wait for
+                # it rather than counting whatever the first frame happened to hold.
+                await self._settle(pilot, lambda: any("quit" in row for row in _painted(app)))
                 painted = [row for row in _painted(app) if row.strip()]
                 self.assertEqual(19, len(painted), "the mono screen lost a row")
                 self.assertEqual(self.lines, self._dashboard(app))
@@ -1216,8 +1241,13 @@ class TheGroupKeyOnTheScreen(unittest.TestCase):
     async def _drive(self):
         app = tui.TriageApp()
         cap = _cap(_payload("capacity-2026-11-02.json"))
+        # The rows above the group are dated against the wall clock each time they
+        # are drawn, so the clock is pinned here: without it `[g]` pressed twenty
+        # minutes in would re-age the header and this comparison would be about
+        # the clock rather than about the group.
         with mock.patch.object(tui, "scan",
-                               return_value=(_busy(), _busy_before(), cap)):
+                               return_value=(_busy(), _busy_before(), cap)), \
+                mock.patch.object(tui.time, "time", return_value=_CLOCK):
             async with app.run_test(size=(80, 24)) as pilot:
                 await self._settle(pilot, lambda: app.metrics is not None)
                 opened = self._dashboard(app)

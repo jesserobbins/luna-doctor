@@ -95,7 +95,22 @@ picture can change without an answer:
 
 The last row is the `Footer`, and it lists the keys: `f` for the `fix` output,
 `d` for the `analyze` report, `c` for the chart, `g` for the next evidence
-group, `w` for the window, and `q` to quit.
+group, `w` for the window, `?` for the help overlay, and `q` to quit.
+
+The first row dates itself. The cell on its right holds the age of the data and
+counts up while the screen is open: `age 2m`, and `age 16m stale` once the data
+is older than the freshness window. The `now` row under it holds both pools the
+account reports. The number column is the priority pool, and the clause beside it
+is the background pool, so `now ● 7/12 · background 0/12 · sampled 15:51-08:00`
+reads as one sample of two pools at one local time. A pool the account closes
+prints `closed` instead of a ratio, and a cap the account did not report prints
+`cap unknown`, because a closed pool and an unread cap are not the same fact.
+
+`?` opens the help overlay. It names every key, spells out the badges and the
+moons, names the command behind each drill-down key, and shows the account the
+numbers belong to: the plan, the priority and background concurrency, the
+overflow routing, and the age of the capacity cache. The same key, or `esc`, closes it and gives back the
+screen it covered.
 
 The screen reads the capacity cache. As on every command that explains the
 account's numbers, a fresh cache is served without network, and a stale one is

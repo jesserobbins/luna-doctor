@@ -135,13 +135,27 @@ _NO_CAPACITY_HEADER = (
 _NO_TRAFFIC_HEADER = (
     "🌙 NOT ESTABLISHED · 1h · 0 req · apex · ●12 lanes                     age 0s")
 
+def _local(stamp):
+    """`HH:MM±HH:MM` for one UTC stamp, on the clock of the machine running the suite.
+
+    The screen prints local time with the offset beside it, so a fixture row that
+    carries a sample minute is derived the same way instead of being pinned to one
+    developer's zone.
+    """
+    return tui.local_hhmm(tui._stamp_epoch(stamp))
+
+
 # The mockup rows, as printed (leading spaces included): the copy rules are
-# measured in terminal cells, so the strings are the ones a reader sees.
+# measured in terminal cells, so the strings are the ones a reader sees. The now
+# row models both pools and the local sample minute, which is what the screen
+# draws; the UTC one-pool row is retired.
 _MOCKUP_ROWS = [
-    " now          ●     7/12   · sampled 14:20Z",
+    " now          ●     7/12   · background 0/12 · sampled %s"
+    % _local("2026-11-02T14:20Z"),
     " peak 1h      ○       17 ▲ 5 over ●12 by 5",
     " blocked      ○        3 ▲ 3 0 × 429",
-    " █ = at or over ●12 lanes · over 7m of 60 · peak at 14:07Z",
+    " █ = at or over ●12 lanes · over 7m of 60 · peak at %s"
+    % _local("2026-11-02T14:07Z"),
     " p50          ○      95s ▲ 12",
     " p90          ○     240s ▲ 38",
     " gateway      ○      25s   · fixed wait before headers",
@@ -159,19 +173,22 @@ _MOCKUP_ROWS = [
 ]
 
 # The regions' rows, per mockup, as (badge, text) pairs.
-_LOAD_OVER = [("●", "now          7/12   · sampled 14:20Z"),
+_LOAD_OVER = [("●", "now          7/12   · background 0/12 · sampled %s"
+               % _local("2026-11-02T14:20Z")),
               ("○", "peak 1h       17 ▲ 5 over ●12 by 5"),
               ("○", "blocked        3 ▲ 3 0 × 429")]
 _LATENCY_OVER = [("○", "p50           95s ▲ 12"),
                  ("○", "p90          240s ▲ 38"),
                  ("○", "gateway       25s   · fixed wait before headers")]
-_LOAD_HEALTHY = [("●", "now          3/12   · sampled 14:31Z"),
+_LOAD_HEALTHY = [("●", "now          3/12   · background 1/12 · sampled %s"
+                 % _local("2026-11-02T14:31Z")),
                  ("○", "peak 1h        4 ▲ 1 never over"),
                  ("○", "blocked        0   · 0 × 429")]
 _LATENCY_HEALTHY = [("○", "p50           31s ▾ 4"),
                     ("○", "p90           58s ▾ 9"),
                     ("○", "gateway       25s   · fixed wait before headers")]
-_LOAD_NOTHING_MEASURED = [("●", "now          4/12   · sampled 14:31Z"),
+_LOAD_NOTHING_MEASURED = [("●", "now          4/12   · background 0/12 · sampled %s"
+                          % _local("2026-11-02T14:31Z")),
                           ("?", "peak 1h          · nothing measured here"),
                           ("?", "blocked          ·")]
 _LATENCY_NOTHING_MEASURED = [("?", "p50              ·"),
@@ -396,7 +413,8 @@ class RegionMoons(unittest.TestCase):
                          tui.region_moon(_LATENCY_HEALTHY[1:], tui.REGION_LATENCY))
         self.assertEqual(
             tui.region_moon(_LATENCY_HEALTHY, tui.REGION_LATENCY),
-            tui.region_moon([("●", "now          12/12   · sampled 14:31Z")]
+            tui.region_moon([("●", "now          12/12   · background 0/12 "
+                             "· sampled %s" % _local("2026-11-02T14:31Z"))]
                             + _LATENCY_HEALTHY, tui.REGION_LATENCY))
 
     def test_a_partly_measured_region_reads_on_what_it_measured(self):

@@ -635,7 +635,10 @@ def _rendered(screen: Screen, size=(80, 24)) -> tuple:
             async with app.run_test(size=size) as pilot:
                 for _attempt in range(200):
                     await pilot.pause(0.02)
-                    if app.metrics is not None and any(_painted(app)):
+                    # The Footer is composed a frame after the rows land, so the
+                    # frame a person sees is the one that holds all nineteen.
+                    if app.metrics is not None and any(
+                            "quit" in row for row in _painted(app)):
                         break
                 rows = _painted(app)
                 await pilot.press("q")
