@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.8.0-alpha.2] - 2026-11-20
+
 ### Added
 
 - The triage screen dates itself. The top right corner of the first row holds the
