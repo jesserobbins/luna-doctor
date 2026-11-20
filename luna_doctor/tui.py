@@ -384,12 +384,17 @@ _BLOCK_LABELS = ("blocked",)
 _PRESSURE_LABELS = ("stalled", "starved")
 _LATENCY_LABELS = ("p50", "p90")
 
-# The three ways work is turned away, as the REFUSALS region draws them (§2.4):
-# the gateway's 429, the account's full pool, and the demotion to the slow tier.
-# In that region these rows are the region's own subject, so a count above zero
-# is the darkest moon - the rule the admission counts follow: refusal severity
-# comes from the counts, never from the qualifier printed beside them.
-_REFUSAL_LABELS = ("429", "at limit", "background")
+# The two ways work never ran, as the REFUSALS region draws them (§2.4): the
+# gateway's 429, and the refusal at the account's full pool. In that region these
+# rows are the region's own subject, so a count above zero is the darkest moon -
+# the rule the admission counts follow: severity comes from the counts, never
+# from the qualifier printed beside them.
+#
+# The third row, `background`, is not here: a request sent to the slow tier RAN.
+# `cli.verdict` calls that window healthy, so a demotion can never darken a
+# region under a full header - and it is the exact configuration the NEXT row
+# recommends, which must not read as over capacity.
+_REFUSAL_LABELS = ("429", "at limit")
 
 # A load row's own words: a peak that crossed the wall, or a peak with no wall to
 # be measured against. `never over` is the clean case and never matches.
@@ -430,10 +435,12 @@ def region_moon(region_rows: list[tuple[str, str]], region_kind: str) -> str:
     regions are the causes, and the conclusion is `header_moon`'s.
 
     Two kinds of count earn the darkest moon, because both are work that never
-    ran: a LOAD region's admission block, and a REFUSALS region's refusal. The
-    second closes a hole the invariant would otherwise leave open: a window can
-    be dark because the gateway refused the work, with no admission block in the
-    LOAD rows, and the region that holds those refusals has to be able to say so.
+    ran: a LOAD region's admission block, and a 429 or an at-limit refusal in a
+    REFUSALS region. The second closes a hole the invariant would otherwise leave
+    open: a window can be dark because the gateway refused the work, with no
+    admission block in the LOAD rows, and the region that holds those refusals
+    has to be able to say so. A request sent to the background tier ran, so a
+    demotion there is clean rather than dark.
     """
     if region_kind not in REGION_KINDS:
         raise KeyError(region_kind)
@@ -1225,13 +1232,14 @@ def next_rows(metrics: dict, cap, group_key: str) -> list[tuple[str, str]]:
 _PROVENANCE_KEY = "%s account \u00b7 %s this machine (a lower bound) \u00b7 %s unknown" % (
     badges.BADGE_ACCOUNT, badges.BADGE_MEASURED, _BADGE_UNKNOWN)
 
-# The moon key's words, in the order the scale rises. `style.MOON_STATUS` names
-# the same three glyphs with the words a report prints (`healthy`); the key is
-# four glyphs and their words, and the dashboard's first word is `ok`.
+# The moon key's words, in the order the scale rises: §4.2's own header words,
+# one per glyph, so the key and the first row cannot use two words for one moon.
+# `style.MOON_STATUS` keeps the words a report prints (`healthy`), which is the
+# CLI's register and not this screen's.
 _KEY_MOONS = (
     (report.MOON_FULL, "ok"),
     (report.MOON_QUARTER, "pressure"),
-    (report.MOON_NEW, "blocked at admission"),
+    (report.MOON_NEW, "over capacity"),
 )
 _KEY_PLAIN_MOON = "not established"
 

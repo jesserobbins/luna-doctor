@@ -138,12 +138,13 @@ from:
 |---|---|---|
 | `🌕` | `OK` | nothing blocked and nothing over the account's count |
 | `🌗` | `PRESSURE` | a 429, a refusal at the account's limit, a peak over the count, or evidence too stale to rule pressure out |
-| `🌑` | `OVER CAPACITY` | work that never ran: at least one admission block, or at least one refusal on the group's own rows |
+| `🌑` | `OVER CAPACITY` | work that never ran: at least one admission block, or at least one 429 or at-limit refusal on the group's own rows |
 | `🌙` | `NOT ESTABLISHED` | nothing measured in the window |
 
-A region title reads its own three rows. The `REFUSALS` title turns dark as
-soon as one refusal is counted, because those requests never ran, while the
-first row keeps the CLI's word for the whole window.
+A region title reads its own three rows. The `REFUSALS` title turns dark as soon
+as one 429 or at-limit refusal is counted, because those requests never ran,
+while the first row keeps the CLI's word for the whole window. A request sent to
+the background tier ran, so a demotion on its own leaves the title clean.
 
 A terminal that refuses emoji draws `(O)`, `(o)` and `()` in its place.
 

@@ -123,6 +123,17 @@ def _empty():
     return _window(0, 0, samples=0, admitted=None)
 
 
+def _demoted():
+    """A clean window whose only slow-tier traffic was sent there on purpose.
+
+    Seven of 42 requests ran on the background tier, nothing was blocked, the
+    peak is under the lane count, and the percentiles fell. Latency samples are
+    part of the fixture so every region on the screen measured something: a
+    region that measured nothing claims no status, and that is a separate case.
+    """
+    return _window(42, 4, background=7, p50=31.0, p90=58.0)
+
+
 # ---- the five mockups, verbatim -------------------------------------------
 class LatencyGroup(unittest.TestCase):
     """§2.1, §2.2, §2.3 and §2.5: the same three rows, and all that changes."""
@@ -272,11 +283,17 @@ class TheEvidenceGrid(unittest.TestCase):
                                          tui.REGION_REFUSALS))
 
     def test_the_moons_still_tie_to_the_header(self):
-        """The two-level invariant survives the refusal rule, in both directions."""
+        """The two-level invariant survives the refusal rule, in both directions.
+
+        The demoted window is in the tuple on purpose: seven requests on the
+        slow tier all ran, so the header reads clean and no region may claim
+        trouble. It is also the window `fix` recommends, which must not read as
+        over capacity on the screen that recommends it.
+        """
         stressed = _window(42, 17, blocked=3, rejected=11, at_limit=4, background=7,
                            stalled=2, starved=1, p50=95.0, p90=240.0)
         for metrics in (stressed, _window(999, 17, rejected=999),
-                        _healthy()):
+                        _demoted(), _healthy()):
             header = tui.moon_glyph(tui.header_moon(metrics))
             regions = [tui.region_moon(tui.load_rows(metrics, _cap(7, 12), 1, self.before),
                                        tui.REGION_LOAD)]
@@ -285,6 +302,20 @@ class TheEvidenceGrid(unittest.TestCase):
                     tui.group_rows(key, metrics, self.before), key))
             self.assertTrue(tui.regions_satisfy_invariant(header, regions),
                             "%s: %s" % (header, regions))
+
+    def test_a_demoted_request_leaves_the_refusals_title_clean(self):
+        """A demotion is not a refusal: the request ran, on the slow tier.
+
+        The CLI calls this window healthy, and `NEXT` sends work here on
+        purpose, so the region that draws the demotion cannot turn dark for it.
+        """
+        demoted = _demoted()
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_FULL),
+                         tui.moon_glyph(tui.header_moon(demoted)))
+        rows = tui.group_rows(tui.REGION_REFUSALS, demoted, self.before)
+        self.assertIn("        7", rows[2][1], "the demotion is on screen")
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_FULL),
+                         tui.region_moon(rows, tui.REGION_REFUSALS))
 
     def test_a_qualifier_names_no_api_field(self):
         banned = ("rate_limit_error", "scheduler admission timeout",
@@ -406,14 +437,14 @@ class TheKeyLines(unittest.TestCase):
     def test_the_two_key_lines_are_the_mockups_lines(self):
         self.assertEqual(tui.key_lines(), [
             "● account · ○ this machine (a lower bound) · ? unknown",
-            "🌕 ok · 🌗 pressure · 🌑 blocked at admission",
+            "🌕 ok · 🌗 pressure · 🌑 over capacity",
         ])
 
     def test_the_moon_key_names_the_plain_moon_only_when_the_screen_drew_it(self):
         self.assertEqual(tui.key_lines(_empty(), self.cap)[1],
-                         "🌙 not established · 🌕 ok · 🌗 pressure · 🌑 blocked at admission")
+                         "🌙 not established · 🌕 ok · 🌗 pressure · 🌑 over capacity")
         self.assertEqual(tui.key_lines(_healthy(), self.cap)[1],
-                         "🌕 ok · 🌗 pressure · 🌑 blocked at admission")
+                         "🌕 ok · 🌗 pressure · 🌑 over capacity")
 
     def test_the_declared_entry_appears_only_beside_a_declared_number(self):
         self.assertNotIn("◌", tui.key_lines(_healthy(), self.cap)[0])

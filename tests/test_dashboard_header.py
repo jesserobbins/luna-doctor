@@ -149,7 +149,7 @@ _MOCKUP_ROWS = [
     "NEXT  Hold 12 in flight · send the rest to -background",
     "→ luna-doctor fix --since 1h                                              [f]",
     "● account · ○ this machine (a lower bound) · ? unknown",
-    "🌕 ok · 🌗 pressure · 🌑 blocked at admission",
+    "🌕 ok · 🌗 pressure · 🌑 over capacity",
 ]
 
 # The regions' rows, per mockup, as (badge, text) pairs.
