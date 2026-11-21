@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.8.0-alpha.3] - 2026-11-20
+
 ### Changed
 
 - The latency group reads each tier on its own rows. Priority and background are
@@ -28,8 +30,9 @@ Versioning policy:
   where the two three-row groups draw eighteen.
 - The gateway's fixed wait is not a row any more. It is one constant, so the
   `analyze` adjustment states it beside the window's own number: `interactive p50
-  95s end to end; about 25s of that is the fixed wait before headers`. The line
-  carries no verdict and no threshold that decides when it prints.
+  95s end to end`, and on the same line the share the wait holds, `about 25s of
+  that is the fixed wait before headers`. The line carries no verdict and no
+  threshold that decides when it prints.
 - `[g]` reaches a fourth group, `MODELS`: one row per model, its own p50, its own
   delta against the same model in the previous window, and its p90 in the clause.
   It lists at most three models, in sample-count order, and a model below the
