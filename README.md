@@ -219,7 +219,7 @@ luna-doctor capacity          # the account's plan and priority concurrency (cac
 luna-doctor latency            # latency per model, harness or outcome: a table
 luna-doctor fix               # per-agent copy-paste config, from the evidence
 luna-doctor fix --agent pi    # …or one agent at a time (pi | claude-code | codex | swamp)
-luna-doctor chart --since 24h # SVG: one stacked-area graph of concurrent requests
+luna-doctor chart --since 24h # SVG: concurrent requests, one stack per class
 luna-doctor chart --since 24h --open  # …and open it in your browser
 ```
 
@@ -413,7 +413,7 @@ The tool redacts home paths, email addresses, and long opaque tokens before it
 writes the block. You can put the block in a support ticket or an issue, and the
 block does not carry the layout of your machine.
 
-### `chart`: three panels, one time axis
+### `chart`: three panels, one time axis, two stacks
 
 The picture is built to answer one question per panel, and each panel carries
 its own unit:
@@ -422,7 +422,7 @@ its own unit:
 |---|---|---|
 | top | what happened to each request, counted per column: served, overflowed, refused at admission, refused at the account's limit | did the account refuse me, and when |
 | middle | request duration as a heatmap: log-scale rows, time columns at the measurement resolution, colour as the count per cell, with p50 and p90 traced over it and a completion bar beneath | when did it go wrong, and in what shape |
-| bottom | concurrent requests in flight, split by model and scheduling class, with the priority-concurrency rule | how far over the width did this machine go |
+| bottom | two stacks of concurrent requests in flight: priority on the page's bottom axis, background above it on its own scale, each with the number that governs it | how far over the width did the priority work go, and what did the batch work do meanwhile |
 
 A percentile line alone cannot separate "everything got three times slower"
 from "one percent started taking twenty minutes". Those are different faults
@@ -434,19 +434,34 @@ sample count invites reading noise as structure.
 Only completed requests enter the duration distribution. A refusal that fails in
 200 ms pulls the percentiles down, an admission timeout that fails after 120 s
 pulls them up, and neither is a statement about how slow the served traffic was.
+The field traces a p50 and a p90 for each scheduling class, in that class's own
+colours, so the batch class's slower level shows beside the realtime level
+instead of averaging into one line.
+
+The two scheduling classes are two populations, so the picture gives each one its
+own stack. Priority scheduling is the work someone is waiting on, and the
+account's priority concurrency is the number it runs against. Background
+scheduling is batch work that the gateway admitted as capacity allowed. It runs
+at its own slower level, against its own number. Both stacks sit in one plot area
+and are read against one time axis, so a burst in one class lines up with what the
+other class was doing at that moment. The two are never added into a single
+height, because no limit governs that sum.
 
 The account's own counters are day-granular, so the picture does not draw them
 at all: a daily count on an hourly axis asserts a step function the data does not
 contain. `capacity` and `analyze` report them as sentences.
 
-![Seven days of concurrent requests: the stack peaks above the dashed
-priority-concurrency rule, and red flare ticks mark requests the gateway
+![Seven days of concurrent requests in two stacks: the priority stack crosses
+the dashed priority-concurrency rule, the violet background stack sits above it on
+its own scale, and red flare ticks mark requests the gateway
 rejected](https://raw.githubusercontent.com/jesserobbins/luna-doctor/main/assets/chart-7d.png)
 
-Seven days of generated example traffic. The stack is the concurrent requests
-in flight, split by model and by scheduling class. The dashed rule is a declared
-width, not a measured one. The open circle is the peak. Each red tick on the top
-edge is a request that the gateway rejected. The thin stretches are the night.
+Seven days of generated example traffic. The lower stack is the priority traffic
+in flight, and the violet stack above it is the background class on its own scale.
+Each band is one model's traffic from one agent. The dashed rule is a declared
+width, not a measured one, and it governs the lower stack only. The open circle is
+a stack's own peak. Each red tick on a region's top edge is a request that the
+gateway rejected or overflowed. The thin stretches are the night.
 
 ![One day of the same example: a burst crosses the rule and five requests were
 refused](https://raw.githubusercontent.com/jesserobbins/luna-doctor/main/assets/chart-24h.png)
@@ -465,28 +480,34 @@ capacity cache empty, so no account value can reach the picture.
 A standalone SVG opens anywhere. It has no embedded or remote fonts, so the text
 names a system font stack. It has no scripts and no CDN. A PNG is written
 beside it under the same stem, and that PNG is the inline image, pasteable into
-a chat, a note or a doc. `--no-image` suppresses it. The graph is one
-stacked-area graph: a single time axis and a single stack. The height of the
-stack is the account's total concurrent inference requests. The stack is
-layered by band. A band is one model's traffic from one agent in one scheduling
-class (blues for priority, violets for background). A band is named for the
-agent that it belongs to ("glm-5.3 · pi") whenever more than one agent has
-traffic. A grey outline carries the busiest moment per column. An open circle
-marks the exact peak. Red flare ticks hang where the gateway rejected a request.
-The account's priority concurrency is one rule, drawn from the capacity
-API's cached account value, or declared with `--plan` when the account has no
-number. The mark shows the provenance: a number from the account is a thick
-solid line, and a declared number is a thin dashed one. The rule is labelled
-with its source as well, so a fetched value can never be mistaken for a declared
-one. The picture dates itself in the header, at the right of the title. Two lines
-under it carry the rule's provenance and the one reading that matters, and no
-more.
+a chat, a note or a doc. `--no-image` suppresses it. The graph is two
+stacked-area graphs over one time axis: one stack per scheduling class, each with
+its own baseline, its own scale and its own numbers in the left gutter. A band is
+one model's traffic from one agent (blues for priority, violets for background),
+and it is named for the agent that it belongs to ("glm-5.3 · pi") whenever more
+than one agent has traffic. A grey outline carries the busiest moment per column,
+for its own stack. Each region says which population it draws, in its own ink, at
+its top right. An open circle marks a stack's exact peak. Red flare ticks hang
+from the top edge of the region their own class owns.
+
+The account's priority concurrency is drawn in the priority region, from the
+capacity API's cached account value or from a `--plan` declaration when the
+account has no number. The mark shows the provenance: a number from the account
+is a thick solid line, and a declared number is a thin dashed one. The rule is
+labelled with its source as well, so a fetched value can never be mistaken for a
+declared one. When the account reports a background concurrency, that number gets
+its own rule in the background region, against the stack it governs. The picture
+dates itself in the header, at the right of the title. Two lines under it carry
+the rule's provenance and the one reading that matters, and no more. That reading
+is the priority peak against the priority rule, never a total of the two classes.
 
 The picture deliberately carries no universal admission deadline, because the
 deadline is per model. It carries no advisory concurrency figure, because advice
 that depends on the plan belongs to `analyze`. Every window draws the same page,
 so the admission panel, the latency field and its completion bars sit above the
-stack at any width. The story of one request lives in `explain`.
+stacks at any width. A window with traffic in one class draws one stack over the
+whole plot, and a window with no traffic draws the page without either. The story
+of one request lives in `explain`.
 
 ## Use it as an agent skill
 

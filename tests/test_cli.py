@@ -615,12 +615,16 @@ class ChartPlan(unittest.TestCase):
             self.assertIn("luna-doctor capacity fetches it", svg)
 
 
-class ChartSingleStack(unittest.TestCase):
-    """The chart is ONE stacked-area graph: one plot area, one time axis,
-    one stack, with attribution carried in the band names. The row of
-    per-agent pictures is gone, so these tests pin the shape the product
-    owner asked for: a regression back to several small pictures, or a
-    stack that stops saying whose traffic a band is, cannot pass unnoticed.
+class ChartTwoStacks(unittest.TestCase):
+    """The chart separates the two scheduling classes: one plot area, one time
+    axis, and two stacks with a scale each, with attribution carried in the
+    band names. Priority is realtime work, read against the account's priority
+    concurrency. Background is batch work, admitted only as capacity allowed,
+    running at its own level against its own number. One stack added them into
+    a height no limit governs and hid that the batch class runs at its own
+    level, so these tests pin the split: a regression that piles the two back
+    onto one scale, or splits them into side-by-side canvases that break the
+    time alignment, cannot pass unnoticed.
     """
 
     def setUp(self):
@@ -664,7 +668,7 @@ class ChartSingleStack(unittest.TestCase):
             self.assertEqual(svg.count(">%s<" % label), 1,
                              "tick label %r is not on a single shared axis" % label)
         self.assertEqual(svg.count('r="2.6"'), 1,
-                         "one peak circle, on the one stack")
+                         "one peak circle per stack, and this window drew one")
 
     def test_band_names_carry_the_agent_when_two_agents_ran(self):
         base = 1_700_000_000.0
@@ -688,26 +692,71 @@ class ChartSingleStack(unittest.TestCase):
         self.assertNotIn("\u00b7 pi", svg,
                          "with one agent there is nothing for a suffix to distinguish")
 
-    def test_priority_scheduling_bases_the_stack_background_rides_above(self):
+    def _bands(self, scene):
+        navy = [s for s in scene.shapes
+                if isinstance(s, self.m.Rect) and s.fill == "#173f8f"]
+        violet = [s for s in scene.shapes
+                  if isinstance(s, self.m.Rect) and s.fill == "#5b21b6"]
+        return navy, violet
+
+    def _both(self):
         base = 1_700_000_000.0
-        reqs = [
+        return [
             self.m.Request(harness="pi", session="s", model="glm-5.3",
                            start=base, end=base + 600, outcome="completed"),
             self.m.Request(harness="pi", session="s", model="glm-5.3-background",
                            start=base, end=base + 600, outcome="completed",
                            tier="background"),
         ]
-        scene = self._scene(reqs)
+
+    def test_priority_stack_bases_the_plot_and_background_gets_its_own_region(self):
+        """Two stacks with a clear gap, never one pile with a second class on
+        top of it: the classes are different populations, not one load.
+        """
+        scene = self._scene(self._both())
         bot = self._bottom_axes(scene)[0].y1
-        navy = [s for s in scene.shapes
-                if isinstance(s, self.m.Rect) and s.fill == "#173f8f"]
-        violet = [s for s in scene.shapes
-                  if isinstance(s, self.m.Rect) and s.fill == "#5b21b6"]
+        navy, violet = self._bands(scene)
         self.assertTrue(navy and violet, "both classes must draw their band")
         self.assertTrue(all(abs(r.y + r.h - bot) < 0.6 for r in navy),
                         "priority scheduling sits on the axis, at the base")
-        self.assertTrue(all(r.y + r.h <= min(r.y for r in navy) + 0.6 for r in violet),
-                        "background scheduling rides above the priority block")
+        self.assertLess(max(r.y + r.h for r in violet), min(r.y for r in navy) - 8,
+                        "the background stack is a separate region, not a layer")
+
+    def test_each_region_scales_itself(self):
+        """The priority band is the same height whether the batch window was
+        quiet or busy, because that class's peak is not part of the priority
+        scale. On one shared scale the busier batch window would have shrunk
+        the priority stack, and a busy batch hour would read as a quieter
+        priority one.
+        """
+        base = 1_700_000_000.0
+        alone = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                                start=base, end=base + 600, outcome="completed")]
+
+        def background(count):
+            return [self.m.Request(harness="pi", session="s",
+                                   model="glm-5.3-background", tier="background",
+                                   start=base, end=base + 600,
+                                   outcome="completed") for _ in range(count)]
+
+        quiet_navy, quiet_violet = self._bands(self._scene(alone + background(1)))
+        busy_navy, busy_violet = self._bands(self._scene(alone + background(6)))
+        self.assertAlmostEqual(quiet_navy[0].h, busy_navy[0].h, places=2,
+                               msg="the batch peak joined the priority scale")
+        self.assertGreater(busy_violet[0].h, quiet_violet[0].h,
+                           "the busier batch window draws taller, in its own scale")
+
+    def test_a_class_that_never_ran_draws_no_region(self):
+        base = 1_700_000_000.0
+        reqs = [self.m.Request(harness="pi", session="s", model="glm-5.3",
+                               start=base, end=base + 600, outcome="completed")]
+        scene = self._scene(reqs)
+        navy, violet = self._bands(scene)
+        self.assertTrue(navy, "the priority stack draws")
+        self.assertEqual([], violet, "an empty second region would claim a class that never ran")
+        text = " ".join(getattr(s, "s", "") for s in scene.shapes)
+        self.assertNotIn("background scheduling \u00b7 concurrent requests", text,
+                         "no region caption without a region")
 
     def test_an_empty_window_is_one_plot_area_with_the_honest_footer(self):
         scene = self._scene([])

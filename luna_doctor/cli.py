@@ -1450,6 +1450,18 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat()
 
 
+def _class_tag(model: str, row: dict) -> str:
+    """A deadline row's name with its scheduling class: `glm-5.3 [bg]`.
+
+    The two classes answer to different admission deadlines, so a row that
+    names only the model invites a reader to compare two populations. `pri` and
+    `bg` are the same two tags the triage screen's latency rows carry.
+    """
+    tier = (row or {}).get("tier")
+    tag = "bg" if tier == "background" else "pri"
+    return f"{model} [{tag}]"
+
+
 def per_model_deadlines(reqs: list[Request], min_n: int = DEADLINE_MIN_SAMPLES) -> dict[str, dict]:
     """The admission deadline each model actually showed, never a borrowed one."""
     by_model: dict[str, list[float]] = {}
@@ -1467,11 +1479,17 @@ def per_model_deadlines(reqs: list[Request], min_n: int = DEADLINE_MIN_SAMPLES) 
     out: dict[str, dict] = {}
     for model, durs in by_model.items():
         durs = sorted(durs)
-        span = _span([r for r in reqs
-                      if r.outcome == "admission_timeout" and (r.model or "(unknown)") == model])
+        members = [r for r in reqs if r.outcome == "admission_timeout"
+                   and (r.model or "(unknown)") == model]
+        span = _span(members)
+        # The scheduling class rides on each row: a background model answers to
+        # a different admission deadline, so a reader comparing two rows has to
+        # know which population each one belongs to.
+        tier = next((getattr(r, "tier", "") for r in members if getattr(r, "tier", "")),
+                    "interactive")
         if len(durs) < min_n:
-            out[model] = {"n": len(durs), "seen_n": len([r for r in reqs if r.outcome == "admission_timeout"
-                                                          and (r.model or "(unknown)") == model]),
+            out[model] = {"n": len(durs), "seen_n": len(members),
+                          "tier": tier,
                           "deadline_s": None, "status": "unknown", **span}
             continue
         out[model] = {
@@ -1480,8 +1498,8 @@ def per_model_deadlines(reqs: list[Request], min_n: int = DEADLINE_MIN_SAMPLES) 
             "low_s": round(durs[0], 1),
             "high_s": round(durs[-1], 1),
             "status": "observed",
-            "seen_n": len([r for r in reqs if r.outcome == "admission_timeout"
-                           and (r.model or "(unknown)") == model]),
+            "seen_n": len(members),
+            "tier": tier,
             **span,
         }
     return out
@@ -2196,7 +2214,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         conv = m["admission_conversion"]["interactive"]["admitted_pct"]
         per_model = m.get("per_model_deadlines") or {}
         observed = ", ".join(
-            f"{model} {d['deadline_s']:.1f}s (n={d['n']})"
+            f"{_class_tag(model, d)} {d['deadline_s']:.1f}s (n={d['n']})"
             for model, d in sorted(per_model.items()) if d.get("deadline_s"))
         line = (f"{dead} request(s) were blocked at admission (`scheduler admission timeout`). "
                 f"Of the interactive requests that finished or were blocked at admission, "
@@ -2206,7 +2224,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         unknown = [(mo, d) for mo, d in per_model.items() if d.get("status") == "unknown"]
         if unknown:
             detail = ", ".join(
-                f"{mo} ({d.get('seen_n', d['n'])} blocked at admission, {d['n']} usable duration(s))"
+                f"{_class_tag(mo, d)} ({d.get('seen_n', d['n'])} blocked at admission, {d['n']} usable duration(s))"
                 for mo, d in sorted(unknown))
             line += (f" No deadline is established for {detail} - fewer than "
                      f"{DEADLINE_MIN_SAMPLES} usable observations, so do not assume another "
@@ -2774,9 +2792,10 @@ def build_report(m: dict, head: str, adj: list[str], att=None,
     if pm:
         bits = []
         for model, d in sorted(pm.items()):
-            bits.append(f"{model} {d['deadline_s']}s (n={d['n']})"
+            name = _class_tag(model, d)
+            bits.append(f"{name} {d['deadline_s']}s (n={d['n']})"
                         if d.get("deadline_s")
-                        else f"{model} unknown ({d.get('seen_n', d['n'])} blocked at admission, "
+                        else f"{name} unknown ({d.get('seen_n', d['n'])} blocked at admission, "
                              f"{d['n']} usable)")
         pressure.append(report.Row("admission wall", ', '.join(bits)))
     storms = m.get("timeout_storms") or []

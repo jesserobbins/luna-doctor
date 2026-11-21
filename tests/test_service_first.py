@@ -6,6 +6,7 @@ local sections keep their own labels, and nothing here is ever added to them.
 """
 
 import os
+import re
 import sys
 import unittest
 
@@ -541,7 +542,141 @@ class TheRuleMarkCarriesItsAuthority(unittest.TestCase):
         self.assertIn('stroke="#374151" stroke-dasharray="5 4"', declared)
         account = cli.svg_from(self._scene(self._account()))
         self.assertIn('stroke="#111827" stroke-width="3.5"', account)
-        self.assertNotIn("stroke-dasharray", account)
+        # The rule's own tag is the check, not the whole document: the rule is
+        # the only thick mark in that ink, and other marks may be dashed for
+        # reasons of their own (the latency field's p90 overlay is).
+        rules = re.findall(r'<line[^>]*stroke="#111827" stroke-width="3.5"[^>]*/>',
+                           account)
+        self.assertEqual(1, len(rules), rules)
+        self.assertNotIn("stroke-dasharray", rules[0],
+                         "an authoritative rule is never dashed")
+
+
+class TheChartSeparatesTheTwoClasses(unittest.TestCase):
+    """Jesse, 2026-11-16: priority and background are two populations.
+
+    Priority is realtime work read against the account's priority concurrency.
+    Background is batch work, admitted only as capacity allowed, running at its
+    own slower level against its own number. A picture that averages them says
+    nothing about either, so the stacks are split (test_cli.ChartTwoStacks pins
+    the geometry), the percentiles are split here, each class's rule is drawn
+    against its own stack, and the one reading in the footer is the priority
+    peak against the priority rule.
+    """
+
+    NOW = 1_700_000_000.0
+
+    def _req(self, i, duration=10.0, tier="interactive", step=15.0,
+             outcome="completed", demoted=False):
+        model = "glm-5.3-background" if tier == "background" else "glm-5.3"
+        return cli.Request(harness="pi", session="s", model=model, tier=tier,
+                           demoted=demoted, start=self.NOW + i * step,
+                           end=self.NOW + i * step + duration, outcome=outcome)
+
+    def _scene(self, reqs, capacity=None, hours=24.0):
+        return cli.build_chart_scene(reqs, cli.analyse(reqs, hours), hours,
+                                     capacity=capacity)
+
+    def _text(self, scene):
+        return " ".join(getattr(shape, "s", "") for shape in scene.shapes)
+
+    def _percentile_lines(self, scene, ink, dash):
+        """The percentile overlay's own segments, not the key's samples: the
+        key draws 13 px marks, a traced percentile joins two columns."""
+        return [s for s in scene.shapes
+                if isinstance(s, cli.Line) and s.stroke == ink
+                and bool(s.dash) == dash and abs(s.x2 - s.x1) > 20]
+
+    def test_the_percentiles_are_traced_once_per_class(self):
+        reqs = ([self._req(i, 10.0) for i in range(120)]
+                + [self._req(i, 900.0, tier="background") for i in range(120)])
+        scene = self._scene(reqs)
+        for ink in ("#173f8f", "#5b21b6"):
+            self.assertTrue(self._percentile_lines(scene, ink, False),
+                            "no p50 traced in %s: the p90 is its dashed twin" % ink)
+            self.assertTrue(self._percentile_lines(scene, ink, True),
+                            "no p90 traced in %s" % ink)
+
+    def test_the_slower_class_is_visibly_slower_without_mixing(self):
+        """The batch class takes 900 s where the realtime class takes 10 s. Two
+        traced p50s say so; one merged p50 would have read as neither.
+        """
+        reqs = ([self._req(i, 10.0) for i in range(120)]
+                + [self._req(i, 900.0, tier="background") for i in range(120)])
+        scene = self._scene(reqs)
+
+        def p50_y(ink):
+            lines = self._percentile_lines(scene, ink, False)
+            self.assertTrue(lines, ink)
+            return min(s.y1 for s in lines)
+
+        self.assertLess(p50_y("#5b21b6"), p50_y("#173f8f") - 20,
+                        "the background p50 sits at a higher duration, on its own line")
+
+    def test_each_class_is_governed_by_its_own_number(self):
+        reqs = [self._req(0, 10.0), self._req(0, 300.0, tier="background")]
+        capacity = plan.Capacity(priority=12, source="account", declared="",
+                                 account_present=True, account_priority=12,
+                                 account_background=8, account_plan="apex")
+        text = self._text(self._scene(reqs, capacity))
+        self.assertIn("priority concurrency 12 (account, plan apex)", text)
+        self.assertIn("background concurrency 8 (account, plan apex)", text)
+        self.assertIn("background scheduling \u00b7 concurrent requests "
+                      "\u00b7 account limit 8", text,
+                      "the region states the number that governs it")
+
+    def test_a_payload_with_no_background_number_draws_none(self):
+        reqs = [self._req(0, 10.0), self._req(0, 300.0, tier="background")]
+        capacity = plan.Capacity(priority=12, source="account", declared="",
+                                 account_present=True, account_priority=12)
+        text = self._text(self._scene(reqs, capacity))
+        self.assertNotIn("background concurrency", text,
+                         "no number, no line and no label")
+        self.assertNotIn("account limit", text)
+
+    def test_a_zero_background_number_states_itself_without_a_rule(self):
+        """0 is an established number: the account is entitled to no overflow.
+        It cannot be drawn as a rule on the baseline, so the caption says it.
+        """
+        reqs = [self._req(0, 10.0), self._req(0, 300.0, tier="background")]
+        capacity = plan.Capacity(priority=12, source="account", declared="",
+                                 account_present=True, account_priority=12,
+                                 account_background=0)
+        text = self._text(self._scene(reqs, capacity))
+        self.assertNotIn("background concurrency", text)
+        self.assertIn("account limit 0", text)
+
+    def test_the_reading_is_the_priority_peak_against_the_priority_rule(self):
+        """The rule governs the priority stack. This window peaked at 10
+        concurrent requests across both classes and at 5 within the priority
+        class, against a rule of 6: it stayed within the rule, and a reading
+        built on the mixed total would have said it crossed.
+        """
+        reqs = ([cli.Request(harness="pi", session="s", model="glm-5.3",
+                             start=self.NOW, end=self.NOW + 300.0,
+                             outcome="completed") for _ in range(5)]
+                + [cli.Request(harness="pi", session="s",
+                               model="glm-5.3-background", tier="background",
+                               start=self.NOW, end=self.NOW + 300.0,
+                               outcome="completed") for _ in range(5)])
+        capacity = plan.Capacity(priority=6, source="account", declared="",
+                                 account_present=True, account_priority=6)
+        text = self._text(self._scene(reqs, capacity))
+        self.assertEqual(10, cli.analyse(reqs, 24.0)["peak_concurrency"],
+                         "the fixture really does peak at ten across both classes")
+        self.assertIn("reading: priority peak 5 stayed within the account rule of 6",
+                      text)
+
+    def test_the_overflowed_row_names_the_stack_it_feeds(self):
+        """One colour, one meaning: the fate panel counts overflowed requests in
+        the violet of the background stack, and says so once.
+        """
+        reqs = ([self._req(i, 10.0, step=5.0) for i in range(280)]
+                + [self._req(i, 300.0, tier="background", step=5.0, demoted=True)
+                   for i in range(20)])
+        text = self._text(self._scene(reqs, hours=1.0))
+        self.assertIn("overflowed", text)
+        self.assertIn("overflowed requests are the violet stack's intake", text)
 
 
 class TheChartSaysWhatItIsDoing(unittest.TestCase):

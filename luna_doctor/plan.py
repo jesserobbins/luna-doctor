@@ -109,11 +109,13 @@ class Capacity:
     consumer can say what the account reports even when a --plan
     declaration is in play: `account_present` (a payload was served at
     all), `account_priority` (None when the account did not report one --
-    null is unknown, never zero), `account_plan`, `account_stale` (the
-    payload was past its TTL when served) and `account_note` (the
-    cache/fetch note). `declared_ignored` is True when a --plan
-    declaration was set aside because the account reports a different
-    number."""
+    null is unknown, never zero), `account_background` (the same fact for
+    the background pool: None when the payload reports no number, 0 when
+    the account is entitled to no overflow, which is a real value),
+    `account_plan`, `account_stale` (the payload was past its TTL when
+    served) and `account_note` (the cache/fetch note). `declared_ignored`
+    is True when a --plan declaration was set aside because the account
+    reports a different number."""
 
     priority: "int | None"
     source: str
@@ -121,6 +123,7 @@ class Capacity:
     declared_ignored: bool = False
     account_present: bool = False
     account_priority: "int | None" = None
+    account_background: "int | None" = None
     account_plan: "str | None" = None
     account_stale: bool = False
     account_note: str = ""
@@ -143,11 +146,14 @@ def _account_facts(account):
     pri = getattr(cfg, "priority_lanes", None) if cfg is not None else None
     if isinstance(pri, bool) or not isinstance(pri, int):
         pri = None
+    bg = getattr(cfg, "background_lanes", None) if cfg is not None else None
+    if isinstance(bg, bool) or not isinstance(bg, int):
+        bg = None
     name = getattr(cfg, "plan", None) if cfg is not None else None
     if not isinstance(name, str):
         name = None
     return {"account_present": True, "account_priority": pri,
-            "account_plan": name,
+            "account_background": bg, "account_plan": name,
             "account_stale": bool(getattr(account, "stale", False)),
             "account_note": str(getattr(account, "note", "") or "")}
 

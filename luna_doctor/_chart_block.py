@@ -10,34 +10,50 @@ Design note -- what the picture is, why each mark exists, and what was
 chosen not to draw.
 
 WHAT. One page, one layout, at every window width: the fate panel on top,
-the latency field and its completion bars below it, and under them the one
-stacked-area graph -- one plot area, one time axis, one vertical scale, one
-stack. That layout does not vary with the window: a fifteen-minute question
-and a thirty-day one are drawn the same way, because the picture answers the
-same questions at both scales and a reader who has read one has read them
-all. The stack's height at any moment is the account's total
-concurrent inference requests -- everything in flight at once, which is
-what the gateway prices and what a priority-concurrency limit compares
-against. The stack is layered by band, and a band is one model's traffic
-from one agent in one scheduling class: blues are priority scheduling,
-violets are background scheduling (the `-background` model-id form), and
-each band is named with its agent ("glm-5.3 \u00b7 pi") whenever more than
-one agent has traffic in the window. The machine's whole story -- every
-agent, every model, both scheduling classes -- is one stack: the build-up
-the reader is looking for is which bands piled up, for whom, in which
-class, and whether the total crossed what the account is allowed to run.
-Above the stack, drawn in the stack's own time columns: what happened to
-each request, and how long the served ones took.
+the latency field and its completion bars below it, and under them the
+concurrency picture -- one plot area, one time axis, and two stacks, one per
+scheduling class. That layout does not vary with the window: a
+fifteen-minute question and a thirty-day one are drawn the same way, because
+the picture answers the same questions at both scales and a reader who has
+read one has read them all.
 
-BAND ORDER. Fixed and deterministic: scheduling class first -- every
-priority-scheduling band below every background-scheduling band -- then,
-within a class, by the band's peak thickness (its widest moment over the
-window), then by total volume, then by name. Priority scheduling sits at
-the base because it is the load the account's priority concurrency is
-about and the work someone is actively waiting on, and because background
-scheduling rides above it, which is also how the gateway admits it (only
-as capacity allows). The order puts the big, steady bands at the base of
-the stack where the eye reads totals, and the thin ones cap it.
+TWO STACKS, NOT ONE. Priority scheduling is realtime work that someone is
+waiting on, and the account's priority concurrency is the number it runs
+against. Background scheduling is batch work, admitted only as capacity
+allowed, running at its own slower level against its own number. The two
+share nothing but the clock. One stack added them into a single height, so
+a reader could not tell a busy priority window from a batch window riding
+along with it, and the batch class's much longer durations averaged into
+the fast class's percentiles until neither was readable. So each class gets
+its own stack, drawn in the same plot area against the same time axis and
+the same columns: the priority stack grows up from the page's bottom axis,
+and the background stack sits in a region above it with its own baseline,
+its own vertical scale and its own labelled numbers, with a clear gap
+between the two. Two stacks in one plot, because the reading a burst in one
+class makes against the other class at that same moment is the whole point
+of the picture, and side-by-side panels would have broken the alignment. A
+mirrored stack (the background one hanging down from the top edge) was the
+other candidate and is rejected: down would then mean more, and a reader
+who missed the flip would read the batch load as the smaller population.
+Each stack's height at any moment is that class's concurrent inference
+requests, averaged over the column.
+
+The stack is layered by band, and a band is one model's traffic from one
+agent in one scheduling class: blues are priority scheduling, violets are
+background scheduling (the `-background` model-id form), and each band is
+named with its agent ("glm-5.3 \u00b7 pi") whenever more than one agent has
+traffic in the window. The machine's whole story -- every agent, every
+model -- is those two stacks read together. Above them, drawn in the same
+time columns: what happened to each request, and how long the served ones
+took, per class.
+
+BAND ORDER. Fixed and deterministic, per stack: within its own class a
+band is ordered by its peak thickness (its widest moment over the window),
+then by total volume, then by name. Priority scheduling owns the lower
+stack because it is the load the account's priority concurrency is about
+and the work someone is actively waiting on. The order puts the big, steady
+bands at the base of each stack where the eye reads totals, and the thin
+ones cap it.
 
 WHY EACH MARK EXISTS.
 
@@ -46,28 +62,40 @@ Fate panel     what happened to each request, counted per column: served,
                account's limit. Counts, not rates, because the denominator
                per column is small; and from these logs, because the
                account's own counters are day-granular and cannot answer a
-               window shorter than a day.
+               window shorter than a day. The overflowed row is drawn in the
+               violet of the background stack, because that count is exactly
+               that stack's intake.
 Latency field  duration as a field, not a line: rows are duration on a log
                scale, columns are time, colour is how many completions
                landed in that cell, with the per-column p50 and p90 over the
                same cells. Only completed requests enter it, so a refusal
-               that fails in 200 ms never moves the percentiles.
+               that fails in 200 ms never moves the percentiles. The
+               percentiles are drawn once per class, each in its own ink, so
+               the two levels sit beside each other instead of averaging
+               into one line: a class line that rides higher is slower, and
+               a merged line would have hidden that by construction.
 Completion bars the count of completions under each column of the field:
                how much evidence that column's cells are drawn from.
-Stacked area   the core mark: the average concurrent inference requests per
-               time column, one band per model, agent and class. Average,
-               not per-column maxima, so the stack's height is an honest
-               load rather than a sum of peaks that never co-occurred.
-Grey outline   the busiest moment in each column. Averages smooth away the
-               bursts the reader is looking for, so the envelope carries
-               the peaks the areas cannot. It is the envelope of the
-               account total: the stack's own height at its worst.
-Open circle    the exact peak, and when it happened.
+Stacks (two)   the core mark: the average concurrent inference requests per
+               time column, one band per model, agent and class, on two
+               stacks with a scale each. Average, not per-column maxima, so
+               each stack's height is an honest load rather than a sum of
+               peaks that never co-occurred. A class with no traffic in the
+               window draws no stack: an empty region would say it ran at
+               zero, which is a claim these logs did not make.
+Grey outline   the busiest moment in each column, over its own class. Averages
+               smooth away the bursts the reader is looking for, so the
+               envelope carries the peaks the areas cannot. It is the
+               envelope of that class's height at its worst, never of the
+               two classes added together -- that sum is what the old single
+               stack drew, and it is the number this split retires.
+Open circle    the exact peak of each stack, and when it happened.
 Generated      the timestamp of the drawing sits at the right of the title line:
                a picture of a past window is only honest with its own date
                on it.
 Priority rule  the account's priority concurrency, drawn when the number is
-               established. Authority is a property of the mark, not only
+               established, against the priority stack it governs and against
+               nothing else. Authority is a property of the mark, not only
                of its label: a rule read from the account is a thick solid
                near-black line (stroke 3.5, no dash), and a rule declared
                with --plan is a thin dashed grey one, so a reader can tell
@@ -80,15 +108,32 @@ Priority rule  the account's priority concurrency, drawn when the number is
                The capacity API is the first authority: a --plan
                declaration is the fallback, and one the account contradicts
                is set aside with a note. It is an account-wide limit, so it
-               is drawn once, against the one total it governs.
-Flare ticks    one tick per request the gateway rejected, hung from the top
-               edge of the plot area at the moment it died. The hover
-               title names the agent whose request died; on the single
-               canvas the tick itself is anonymous without that title,
-               which is a price paid for one graph.
+               is drawn once, in the region it governs.
+Background rule the account's background concurrency, when the payload reports
+               one, drawn in the background region against the background
+               stack. Only the account can state it (no --plan declares a
+               background number), so it is always the thick solid mark, and
+               a payload past its TTL adds "stale cache". A background
+               number of zero is an established fact and cannot be drawn as
+               a rule on the baseline, so it rides in the region's caption
+               instead.
+Region captions the two stacks are two populations, and the numbers in the
+               left gutter are two scales. Each region is captioned at its
+               top right, in its class's ink: "priority scheduling \u00b7
+               concurrent requests", "background scheduling \u00b7 concurrent
+               requests \u00b7 account limit 12" when the account reports the
+               second number. Without them the upper scale could be read as
+               the same scale continued.
+Flare ticks    one tick per request the gateway rejected or overflowed, hung
+               from the top edge of the region its own class owns, at the
+               moment it died. The hover title names the agent whose request
+               died; on the single canvas the tick itself is anonymous
+               without that title, which is a price paid for one graph.
 Direct labels  each band is named at its right-hand edge, in its own
-               colour, at the height the band left the stack, with a
-               hairline leader when the band ended early. The name carries
+               colour, at the height the band left its own stack, with a
+               hairline leader when the band ended early. A name never
+               crosses into the other class's region, so a label can never
+               claim a band it does not belong to. The name carries
                the agent whenever more than one agent has traffic, so
                attribution never needs a second picture. There is no
                legend box: a legend makes the eye travel.
@@ -96,11 +141,12 @@ Footer         two short lines, and no more. The first gives the rule's
                provenance in a phrase - the number, its source, the plan it
                came from, and a set-aside --plan when there was one -, and
                says the rule is not established when nothing is known. The
-               second gives the one reading that matters: the peak against
-               the rule, or the rejection count when there is no rule to
-               read it against. A row that runs past the canvas wraps, but
-               there are only ever these two: what the picture could not
-               show belongs in `luna-doctor explain`, not under the mark.
+               second gives the one reading that matters: the priority peak
+               against the priority rule, or the rejection count when there
+               is no rule to read it against. A row that runs past the canvas
+               wraps, but there are only ever these two: what the picture
+               could not show belongs in `luna-doctor explain`, not under the
+               mark.
 
 WHAT WAS CHOSEN NOT TO DRAW.
 
@@ -109,8 +155,19 @@ this" by drawing a row of pictures -- the whole machine, then one per
 agent, on a shared scale. Splitting one number across several canvases
 made each thinner, and the account total -- the number the gateway
 prices -- lived only in the first of them. The row is gone; attribution
-moved into the band names, and the one stack carries the total at every
+moved into the band names, and the machine's own stacks carry it at every
 moment of the window.
+No single total stack. The one stack before this split added the two
+scheduling classes into one height, which is a number the gateway does not
+report and no limit governs: priority concurrency compares against the
+priority class alone. A total that mixes a realtime population with a batch
+one overstates the first and hides the second, and it cannot show that the
+batch work ran at a different level. The total is still computed where it is
+honest -- `analyse` reports the account peak, and the header line names both
+classes' peaks -- and it is not drawn.
+No stacked pair that shares a scale. Two classes at different levels on one
+scale would draw the smaller one as a hairline and invite a reader to
+compare their heights. Each region scales itself, and each says so.
 No universal admission deadline. The previous chart drew one wall at 120.2s
 for every model; that is one model's constant (another model's requests
 were rejected at 60.3s). Rejections are per-request ticks here, and
@@ -134,7 +191,8 @@ same columns as every other mark, and the stack answers what the bars could
 not: how much of the window this machine was busy, and with whose traffic.
 No latency summary line. A trend over time reads as a trend even when the
 samples under each point differ by an order of magnitude; the field carries
-the distribution, and the per-column percentiles ride over it.
+the distribution, and the per-column percentiles ride over it, one pair per
+class.
 No plot fills, plot borders, or legend: the data is the ink.
 
 Two deliberate trades. The folded tail: bands below legibility fold into
@@ -217,6 +275,21 @@ BACKGROUND_OTHER_STYLE = ("#ddd6fe", "#7c3aed")
 NAMED_PER_CLASS = 4      # bands named per class; the rest fold into "other"
 MAX_LABEL_CHARS = 24
 
+# The two scheduling classes, in the order this module reads them, each with
+# the name it wears on the page and its own colour ramp. They are two
+# populations with two limits, so they are two stacks: the class is the first
+# thing the picture separates, and the band is the second.
+CLASSES = (
+    ("interactive", "priority scheduling", PRIORITY_STYLE, PRIORITY_OTHER_STYLE),
+    ("background", "background scheduling", BACKGROUND_STYLE, BACKGROUND_OTHER_STYLE),
+)
+CLASS_LABEL = {tier: label for tier, label, _styles, _other in CLASSES}
+# The one word each class wears where a sentence needs a class name.
+CLASS_WORD = {"interactive": "priority", "background": "background"}
+# The clear space between the two stacks, in px. A gap, not a hairline: the
+# eye has to read two populations, and a shared edge would read as one pile.
+STACK_GAP = 18.0
+
 C = {
     "grid": "#e5e7eb",
     "axis": "#9ca3af",
@@ -286,9 +359,9 @@ def _bands(reqs):
     """The global band list and the request-to-band map.
 
     A band is one model's traffic from one agent in one scheduling class,
-    so the single stack can say whose traffic it is drawing: a model that
-    runs on two agents is two bands, and a band keeps one colour everywhere.
-    The busiest NAMED_PER_CLASS (model, agent) pairs per class get their own
+    so each stack can say whose traffic it is drawing: a model that runs on
+    two agents is two bands, and a band keeps one colour everywhere. The
+    busiest NAMED_PER_CLASS (model, agent) pairs per class get their own
     band; the rest fold into one "other" band per class and agent, which
     keeps the agent's identity while giving up the model names no label
     could fit.
@@ -300,9 +373,7 @@ def _bands(reqs):
         pair = (r.model, r.harness)
         pairs[pair] = pairs.get(pair, 0) + 1
     bands = []
-    for tier, styles, other_style in (
-            ("interactive", PRIORITY_STYLE, PRIORITY_OTHER_STYLE),
-            ("background", BACKGROUND_STYLE, BACKGROUND_OTHER_STYLE)):
+    for tier, _label, styles, other_style in CLASSES:
         counts = per_class.get(tier) or {}
         if not counts:
             continue
@@ -339,6 +410,16 @@ def _bands(reqs):
     return bands, band_of
 
 
+def _class_of(r) -> str:
+    """The scheduling class a request belongs to, as the two stacks split it.
+
+    One spelling of the split: a request is background when the gateway put
+    it on the background tier, and priority otherwise. Every mark that has to
+    pick a region, a scale or a colour reads the class from here.
+    """
+    return "background" if getattr(r, "tier", "") == "background" else "interactive"
+
+
 def _band_label(name, harness, multi):
     """A band's name: the model (and class) plus the agent when it matters.
 
@@ -352,12 +433,14 @@ def _band_label(name, harness, multi):
 
 
 def _panel_series(reqs, bands, band_of, t0, t1, n_cols):
-    """Column statistics for the whole window.
+    """Column statistics for one scheduling class over the window.
 
+    Called once per class, on that class's requests and bands only, so every
+    number it returns describes one population: the two stacks never add up.
     `means[key][k]` is the time-integral of that band's concurrent-request
     count over column k (divide by the column width for the average);
-    `colmax[k]` is the most concurrent inference requests at any instant in
-    column k; `peak`/`peak_t` the exact maximum and the first instant it
+    `colmax[k]` is the most concurrent requests of this class at any instant
+    in column k; `peak`/`peak_t` the exact maximum and the first instant it
     was reached. One event sweep computes all of it. (The name is pinned by
     tests that call this directly.)
     """
@@ -474,12 +557,17 @@ def _latency_heatmap(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols,
     Only completed requests enter the distribution. A refusal that fails in
     200 ms and an admission timeout that fails after 120 s would otherwise move
     the percentiles for reasons that have nothing to do with how slow the
-    served traffic was. Returns (drawn_cells, count_by_column, p50, p90).
+    served traffic was. The cells count both classes together -- a cell is
+    evidence, and splitting it would double the field -- but every percentile
+    line is drawn per class, in that class's own ink, so the two levels are
+    read side by side rather than averaged into one line. Returns
+    (drawn_cells, count_by_column).
     """
     edges = _buckets()
     rows = len(edges) - 1
     counts = [[0] * rows for _ in range(n_cols)]
-    per_column: list[list[float]] = [[] for _ in range(n_cols)]
+    per_class = {tier: [[] for _ in range(n_cols)] for tier in CLASS_LABEL}
+    col_counts = [0] * n_cols
     used = 0
     for r in reqs:
         if getattr(r, "outcome", "") != "completed":
@@ -491,7 +579,8 @@ def _latency_heatmap(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols,
         if not 0 <= k < n_cols:
             continue
         d = end - start
-        per_column[k].append(d)
+        per_class[_class_of(r)][k].append(d)
+        col_counts[k] += 1
         used += 1
         for i in range(rows):
             if edges[i] <= d < edges[i + 1]:
@@ -521,34 +610,42 @@ def _latency_heatmap(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols,
                            size=9, fill=C["muted"], anchor="end"))
     shapes.append(Text(px, y0 - 8,
                        f"request duration, log scale \u00b7 {used} completed "
-                       f"request(s) \u00b7 p50 and p90 over the same column \u00b7 "
+                       f"request(s) \u00b7 p50 and p90 per class over the same column \u00b7 "
                        f"colour: 0 to {peak} completion(s) per cell",
                        size=10.5, fill=C["text"]))
-    p50 = [pct(v, 50) if len(v) >= 3 else None for v in per_column]
-    p90 = [pct(v, 90) if len(v) >= 3 else None for v in per_column]
-    for series, colour in ((p50, "#111827"), (p90, "#dc2626")):
-        prev = None
-        for k, value in enumerate(series):
-            if value is None:
-                prev = None
-                continue
-            if value < DURATION_FLOOR_S or value > DURATION_CEIL_S:
-                prev = None
-                continue
-            pos = (value / DURATION_FLOOR_S) ** 0.5
-            o = 1.0
-            while o * o < pos:
-                o *= 2 ** 0.5
-            frac = 0.0
-            y = y1 - min(rows, max(0.0, _log2_index(value, edges))) * row_h
-            x = px + plot_w * (k + 0.5) / n_cols
-            if prev is not None:
-                shapes.append(Line(prev[0], prev[1], x, y, stroke=colour,
-                                   stroke_width=1.2))
-            prev = (x, y)
-    shapes.append(Text(px, y0 + 6, "p50", size=9, fill="#111827"))
-    shapes.append(Text(px + 26, y0 + 6, "p90", size=9, fill="#dc2626"))
-    return drawn, [len(v) for v in per_column]
+    # Two populations, two levels: each class traces its own p50 and p90, so a
+    # class whose durations sit higher is visibly the slower one instead of
+    # disappearing into a share of one merged percentile.
+    for tier, _label, styles, _other in CLASSES:
+        colour = styles[0][0]
+        for which, dash, q in (("p50", (), 50), ("p90", (4, 3), 90)):
+            prev = None
+            for k, values in enumerate(per_class[tier]):
+                value = pct(values, q) if len(values) >= 3 else None
+                if value is None or value < DURATION_FLOOR_S \
+                        or value > DURATION_CEIL_S:
+                    prev = None
+                    continue
+                y = y1 - min(rows, max(0.0, _log2_index(value, edges))) * row_h
+                x = px + plot_w * (k + 0.5) / n_cols
+                if prev is not None:
+                    shapes.append(Line(prev[0], prev[1], x, y, stroke=colour,
+                                       stroke_width=1.2, dash=dash))
+                prev = (x, y)
+    # the key for those four lines: the class word, then a line sample and the
+    # percentile it traces, so the dash is read, not guessed
+    kx = px
+    for tier, _label, styles, _other in CLASSES:
+        colour = styles[0][0]
+        word = "priority" if tier == "interactive" else "background"
+        shapes.append(Text(kx, y0 + 6, word, size=9, fill=colour))
+        kx += _est_w(word, 9) + 7
+        for which, dash in (("p50", ()), ("p90", (4, 3))):
+            shapes.append(Line(kx, y0 + 2, kx + 13, y0 + 2, colour, 1.2, dash))
+            kx += 16
+            shapes.append(Text(kx, y0 + 6, which, size=9, fill=colour))
+            kx += _est_w(which, 9) + 9
+    return drawn, col_counts
 
 
 def _log2_index(value: float, edges: list) -> float:
@@ -628,6 +725,12 @@ def _admission_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols):
     for kind in kinds:
         shapes.append(Text(x, y0 + 10, kind, size=9, fill=colour_of[kind]))
         x += 22 + 5.2 * len(kind)
+    # The overflowed row is drawn in the violet of the background stack, so the
+    # count and the stack it feeds are one colour. The clause says so once, and
+    # steps aside when the canvas is too narrow to hold it beside the key.
+    clause = "\u00b7 overflowed requests are the violet stack's intake"
+    if x + 10 + _est_w(clause, 9) <= px + plot_w:
+        shapes.append(Text(x + 4, y0 + 10, clause, size=9, fill=C["muted"]))
 
 
 def _occupancy_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1):
@@ -742,17 +845,207 @@ def _tail_rank_panel(shapes, *, reqs, px, plot_w, y0, y1):
                                    "black max", size=9.5, fill=C["muted"]))
 
 
+def _y_scale(peak: float, floor: float = 0):
+    """The vertical scale of one stack: whole steps, with headroom above it.
+
+    Each region scales itself. The two classes run at different levels, and one
+    shared scale would draw the smaller population as a hairline while
+    inviting a reader to compare two heights that mean different things. The
+    governing number joins the scale when there is one, so a rule is always
+    drawable instead of clipping off the top of its region.
+    """
+    y_raw = max(1, peak, floor)
+    step = 1 if y_raw <= 10 else (2 if y_raw <= 30 else 5)
+    head = max(2, y_raw // 8 + 1)
+    y_max = ((y_raw + head + step - 1) // step) * step
+    return y_max, list(range(0, y_max + 1, step))
+
+
+def _place_labels(entries, top, bot):
+    """Where each band's name goes, inside that band's own stack.
+
+    A name sits at the height its band left its own stack, so the eye follows
+    the band and does not climb a ladder. Where two bands leave close together
+    the names open to the minimum gap, and the whole column shifts back inside
+    the region when it would run past the baseline. A name never leaves its own
+    region: a background band's name can never appear against the priority
+    stack, where it would claim traffic that is not its own.
+    """
+    ordered = sorted(entries, key=lambda entry: entry[1])
+    ys = []
+    for _b, y0, _lx in ordered:
+        y = y0
+        if ys and y < ys[-1] + 11.0:
+            y = ys[-1] + 11.0
+        ys.append(y)
+    if ys and ys[-1] > bot - 7:
+        shift = ys[-1] - (bot - 7)
+        ys = [max(top + 7.0, y - shift) for y in ys]
+        for i in range(1, len(ys)):
+            if ys[i] < ys[i - 1] + 11.0:
+                ys[i] = ys[i - 1] + 11.0
+    return list(zip(ordered, ys))
+
+
+def _draw_stack(shapes, *, panel, n_cols, col_s, col_x, x_of, plot_w, px):
+    """One scheduling class's stack: its own baseline, scale and marks.
+
+    `panel` carries everything the class owns -- its bands, its per-column
+    series, its peak, its region and the number that governs it -- so nothing
+    here can read another class's numbers. The two stacks share the time axis,
+    the columns and the drawing code, and nothing else: no height is summed,
+    no envelope is shared, and no label crosses the gap between them.
+    """
+    tier = panel["tier"]
+    top, bot = panel["top"], panel["bot"]
+    y_max, y_vals = panel["y_max"], panel["y_vals"]
+
+    def y_of(v):
+        return bot - (v / y_max) * (bot - top)
+
+    # the region's own furniture: level hairlines, and the baseline it grows
+    # from -- the page's bottom axis for priority, the floor of the background
+    # band for the other class
+    for v in y_vals:
+        if v:
+            shapes.append(Line(px, y_of(v), px + plot_w, y_of(v),
+                               C["grid"], 1.0, (), 0.8))
+        # every region carries its own numbers in the gutter: two scales, and
+        # each says what it counts
+        shapes.append(Text(px - 10, y_of(v) + 3.5, str(v), size=10.5,
+                           fill=C["muted"], anchor="end"))
+    shapes.append(Line(px, bot, px + plot_w, bot, C["axis"]))
+
+    # the stack: one rect run per band, this class's averages per column, in
+    # the order fixed above; the running total is this class's in-flight count
+    cum = [0.0] * n_cols
+    label_entries = []      # (band, y at the band's end, leader x or None)
+    for b in panel["bands"]:
+        mvals = panel["means"].get((b["tier"], b["model"], b["harness"]))
+        if not mvals:
+            continue
+        segs = []           # (y_top, y_bot) per column, None when nothing
+        last_k, last_y0 = None, None
+        for k in range(n_cols):
+            base = cum[k]
+            v = mvals[k] / col_s
+            cum[k] = base + v
+            if v <= 0:
+                segs.append(None)
+                continue
+            y_t, y_b = y_of(base + v), y_of(base)
+            segs.append((y_t, y_b))
+            if y_b - y_t < 0.15:
+                continue      # sub-pixel bands stay in the stack, not the ink
+            last_k, last_y0 = k, (y_t + y_b) / 2.0
+        # merge columns whose band segment rounds to the same geometry
+        k = 0
+        while k < n_cols:
+            seg = segs[k]
+            if seg is None:
+                k += 1
+                continue
+            q = (round(seg[0] * 4), round(seg[1] * 4))
+            j = k
+            while (j + 1 < n_cols and segs[j + 1] is not None
+                   and (round(segs[j + 1][0] * 4),
+                        round(segs[j + 1][1] * 4)) == q):
+                j += 1
+            shapes.append(Rect(col_x(k), seg[0], col_x(j + 1) - col_x(k),
+                               seg[1] - seg[0], fill=b["fill"]))
+            k = j + 1
+        if last_k is not None:
+            at_edge = last_k >= n_cols - 1
+            label_entries.append((b, last_y0,
+                                  None if at_edge else col_x(last_k + 1)))
+
+    # the busiest moment in each column, as one step outline over this stack:
+    # the envelope of this class's in-flight requests, never of both classes
+    colmax = panel["colmax"]
+    k = 0
+    while k < n_cols:
+        v = colmax[k]
+        j = k
+        while j + 1 < n_cols and colmax[j + 1] == v:
+            j += 1
+        if v > 0:
+            shapes.append(Line(col_x(k), y_of(v), col_x(j + 1), y_of(v),
+                               C["outline"], 1.1, (), 0.9))
+        k = j + 1
+    for k in range(1, n_cols):
+        a, b2 = colmax[k - 1], colmax[k]
+        if a != b2:
+            shapes.append(Line(col_x(k), y_of(a), col_x(k), y_of(b2),
+                               C["outline"], 1.1, (), 0.9))
+
+    # the exact peak of this stack, marked where it happened
+    if panel["peak"] > 0:
+        peak_txt = datetime.fromtimestamp(panel["peak_ts"],
+                                          timezone.utc).strftime("%H:%M UTC")
+        shapes.append(Circle(
+            x_of(panel["peak_ts"]), y_of(panel["peak"]), 2.6, fill=C["bg"],
+            stroke=C["text"], stroke_width=1.2,
+            title="peak %d %s concurrent inference requests \u00b7 %s"
+                  % (panel["peak"], CLASS_WORD[tier], peak_txt)))
+
+    # the number that governs this class, against this stack and no other
+    rule = panel.get("rule")
+    if rule is not None:
+        ry = y_of(rule["n"])
+        shapes.append(Line(px, ry, px + plot_w, ry, rule["ink"], rule["width"],
+                           rule["dash"], 0.9))
+        ly = ry - 5 if ry - 15 >= top else ry + 12
+        # The rule crosses the stack, and its own ink on a dark band is
+        # unreadable. A white plate behind the label keeps the text legible on
+        # whatever the bands are doing underneath, without hiding the rule.
+        plate_w = 5.4 * len(rule["label"]) + 6
+        shapes.append(Rect(px + 2, ly - 10, plate_w, 14, fill="#ffffff",
+                           fill_opacity=0.88))
+        shapes.append(Text(px + 5, ly, rule["label"], size=10, fill=rule["ink"]))
+
+    # which population this region draws, at its top right, in its own ink: the
+    # two scales in the gutter would otherwise read as one scale continued
+    caption = "%s \u00b7 concurrent requests" % CLASS_LABEL[tier]
+    if panel.get("account_limit") is not None:
+        caption += " \u00b7 account limit %d" % panel["account_limit"]
+    cap_w = _est_w(caption, 9.5) + 8
+    shapes.append(Rect(px + plot_w - cap_w, top + 1, cap_w, 14, fill="#ffffff",
+                       fill_opacity=0.88))
+    shapes.append(Text(px + plot_w - 3, top + 12, caption, size=9.5,
+                       fill=panel["bands"][0]["fill"] if panel["bands"] else C["muted"],
+                       anchor="end"))
+
+    # direct labels: each band named at the height it left this stack, with a
+    # hairline leader when the band ended early
+    for (b, y0, lx), y in _place_labels(label_entries, top, bot):
+        if lx is not None:
+            if px + plot_w - lx <= 60:
+                # a short leader: the band ended near the right edge, so the
+                # line joins the name to the band's own end
+                shapes.append(Line(lx, y0, px + plot_w + 2, y,
+                                   C["axis"], 0.7, (), 0.6))
+            else:
+                # a band that ended early would need a long diagonal across the
+                # data to reach its name. A stub at the edge names it without
+                # drawing over the picture.
+                shapes.append(Line(px + plot_w - 10, y, px + plot_w + 2, y,
+                                   C["axis"], 0.7, (), 0.6))
+        shapes.append(Text(px + plot_w + 6, y + 3.2, b["display"], size=10,
+                           fill=b["ink"]))
+
+
 def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     """Collect the chart as an ordered list of shapes.
 
     `m` is the metrics dict from analyse(); `reqs` the raw requests, because
     the picture draws one tick per rejected request. `capacity` is a
-    plan.Capacity: the rule is drawn when it carries a number, from the
-    account's fetched config.priority_lanes (source "account", the first
-    authority) or from `--plan` (source "plan", the fallback when the
-    account has no number), and the label says which. None means nothing
-    was established, and then no priority rule is drawn. Shape order
-    below is paint order.
+    plan.Capacity, and it feeds two rules: the priority concurrency, drawn when
+    it carries a number, from the account's fetched config.priority_lanes
+    (source "account", the first authority) or from `--plan` (source "plan",
+    the fallback when the account has no number), and the background
+    concurrency, which only the account can state. The labels say which source
+    each number came from. None means nothing was established, and then no
+    rule is drawn. Shape order below is paint order.
     """
     timed_reqs = timed(reqs)
 
@@ -792,17 +1085,31 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     pad_l, pad_r = 56, 18
     title_y, sub_y, key_y = 30, 53, 74
     # One layout for every window: the fate panel on top, the latency field
-    # and its completion bars in the middle, the concurrency stack below on
-    # its own scale and its own unit. The panels keep fixed heights; the stack
-    # takes what the canvas has left, because it is the mark the picture is
-    # about, and a canvas too short for it grows rather than starving it.
+    # and its completion bars in the middle, the two stacks below, each on its
+    # own scale and in its own region. The panels keep fixed heights; the
+    # stack area takes what the canvas has left, because it is the mark the
+    # picture is about, and a canvas too short for it grows rather than
+    # starving it.
     fate_panel_h = 92
     heat_y0 = 98 + fate_panel_h + 30
     heat_y1 = heat_y0 + 150
     count_y0 = heat_y1 + 6
     count_y1 = count_y0 + 22
     top = count_y1 + 26
-    bot = max(top + 140, height - 112)
+
+    # The classes that drew. An empty window keeps the priority region: the
+    # rule that is not established is the priority one, and an empty
+    # background region would claim a class that never ran.
+    classes_present = [tier for tier in CLASS_LABEL
+                       if any(_class_of(r) == tier for r in timed_reqs)]
+    if not classes_present:
+        classes_present = ["interactive"]
+
+    # Two stacks share the plot's height, never its scale. Both present, the
+    # plot asks for 280 px so neither region is thinner than a scale can be
+    # read on; one class keeps the room the page already gave it.
+    plot_min = 280 if len(classes_present) > 1 else 140
+    bot = max(top + plot_min, height - 112)
     xlab_y = bot + 20
 
     label_w = max([_est_w(b["display"], 10) for b in bands] + [40.0])
@@ -813,33 +1120,95 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     col_s = float(_column_seconds(span))
     n_cols = max(24, min(int(plot_w), int(span / col_s)))
 
-    # one series for the whole machine: the stack's height is the account
-    # total, and one sweep computes every band's share of it
-    means, colmax, peak_total, peak_ts = _panel_series(
-        timed_reqs, bands, band_of, t0, t1, n_cols)
+    # Two stacks, one clock. Each class is swept on its own requests and its
+    # own bands, so no number below adds the two populations together: the
+    # priority peak is what the priority rule compares against, and the
+    # background peak is what the batch window was doing at its worst.
+    panels = {}
+    for tier in classes_present:
+        tier_reqs = [r for r in timed_reqs if _class_of(r) == tier]
+        tier_bands = [b for b in bands if b["tier"] == tier]
+        means, colmax, peak, peak_ts = _panel_series(
+            tier_reqs, tier_bands, band_of, t0, t1, n_cols)
 
-    # the one stack order, read off the series itself: scheduling class
-    # first (priority below background), then peak thickness, then volume,
-    # then name -- deterministic, big steady bands at the base, thin ones
-    # capping the stack
-    def _stack_order(b):
-        mv = means.get((b["tier"], b["model"], b["harness"])) or []
-        pk = max([v / col_s for v in mv] or [0.0])
-        return (0 if b["tier"] == "interactive" else 1,
-                -pk, -sum(mv), b["display"])
-    bands = sorted(bands, key=_stack_order)
+        # within its own stack, a band is ordered by peak thickness, then
+        # volume, then name: big steady bands at the base, thin ones capping
+        def _stack_order(b, means=means):
+            mv = means.get((b["tier"], b["model"], b["harness"])) or []
+            pk = max([v / col_s for v in mv] or [0.0])
+            return (-pk, -sum(mv), b["display"])
+        panels[tier] = {"tier": tier,
+                        "bands": sorted(tier_bands, key=_stack_order),
+                        "means": means, "colmax": colmax,
+                        "peak": peak, "peak_ts": peak_ts}
 
-    # one vertical scale: the peak of everything, plus the resolved
-    # priority concurrency when there is one (a rule must be drawable, so
-    # it joins the scale instead of clipping off the plot)
-    y_raw = max(1, peak_total, rule_n or 0)
-    step = 1 if y_raw <= 10 else (2 if y_raw <= 30 else 5)
-    head = max(2, y_raw // 8 + 1)
-    y_max = ((y_raw + head + step - 1) // step) * step
-    y_vals = list(range(0, y_max + 1, step))
+    # the regions: priority grows from the page's bottom axis, and the
+    # background stack takes the band of height above it, each with its own
+    # baseline and a clear gap between them
+    if len(classes_present) > 1:
+        mid = (top + bot) / 2.0
+        regions = {"background": (top, mid - STACK_GAP / 2.0),
+                   "interactive": (mid + STACK_GAP / 2.0, bot)}
+    else:
+        regions = {classes_present[0]: (top, bot)}
 
-    def y_of(v):
-        return bot - (v / y_max) * (bot - top)
+    # the priority rule governs the priority stack and nothing else
+    if rule_n is not None:
+        if rule_src == "account":
+            # Authority rides on the mark: the account's fetched number is a
+            # thick solid line, a --plan declaration a thin dashed one, so the
+            # two can never be confused at a glance. The label names the source
+            # as well, and takes its ink from its own rule.
+            rule_ink, rule_w, rule_dash = C["rule_account"], 3.5, ()
+            rule_label = "priority concurrency %d (account" % rule_n
+            if acct_plan:
+                rule_label += ", plan %s" % acct_plan
+            rule_label += ")"
+            if acct_stale:
+                # a rule drawn from a stale payload is still the best number
+                # available, but it is never drawn without saying so
+                rule_label += " \u00b7 stale cache"
+        elif declared_named:
+            rule_ink, rule_w, rule_dash = C["rule"], 1.0, (5, 4)
+            rule_label = "priority concurrency (--plan %s = %d)" % (
+                declared_txt, rule_n)
+        else:
+            rule_ink, rule_w, rule_dash = C["rule"], 1.0, (5, 4)
+            rule_label = "priority concurrency (--plan %d)" % rule_n
+        panels["interactive"]["rule"] = {"n": rule_n, "ink": rule_ink,
+                                         "width": rule_w, "dash": rule_dash,
+                                         "label": rule_label}
+
+    # the background number, when the account reports one, governs the violet
+    # stack and only it. No --plan declares a background width, so this rule is
+    # always the account's own, drawn as the thick solid mark.
+    bg_account_n = cap.account_background if cap is not None else None
+    if "background" in panels and isinstance(bg_account_n, int) \
+            and not isinstance(bg_account_n, bool):
+        panels["background"]["account_limit"] = bg_account_n
+        if bg_account_n > 0:
+            bg_label = "background concurrency %d (account" % bg_account_n
+            if acct_plan:
+                bg_label += ", plan %s" % acct_plan
+            bg_label += ")"
+            if acct_stale:
+                bg_label += " \u00b7 stale cache"
+            panels["background"]["rule"] = {"n": bg_account_n,
+                                            "ink": C["rule_account"],
+                                            "width": 3.5, "dash": (),
+                                            "label": bg_label}
+
+    # each region scales itself, and takes its rule into the scale so the rule
+    # is drawable instead of clipping off the top of the plot
+    for tier, (r_top, r_bot) in regions.items():
+        panel = panels[tier]
+        panel["top"], panel["bot"] = r_top, r_bot
+        rule = panel.get("rule")
+        panel["y_max"], panel["y_vals"] = _y_scale(
+            panel["peak"], rule["n"] if rule else 0)
+
+    pri_peak = panels["interactive"]["peak"] if "interactive" in panels else 0
+    bg_peak = panels["background"]["peak"] if "background" in panels else 0
 
     def col_x(k):
         return px + plot_w * k / n_cols
@@ -898,9 +1267,9 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
              size=11.5, fill=C["muted"], anchor="end"))
     if timed_reqs:
         add(Text(pad_l, sub_y,
-                 "%d requests \u00b7 peak %d concurrent inference requests "
-                 "\u00b7 %d rejected at admission \u00b7 %d%% on background scheduling"
-                 % (n_reqs, m["peak_concurrency"], dead, bg_pct),
+                 "%d requests \u00b7 peak %d priority, %d background concurrent "
+                 "requests \u00b7 %d rejected at admission \u00b7 %d%% on background "
+                 "scheduling" % (n_reqs, pri_peak, bg_peak, dead, bg_pct),
                  size=12.5, fill=C["muted"]))
     else:
         add(Text(pad_l, sub_y,
@@ -922,93 +1291,19 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     # label becomes the day.
     day_labels = span > 2 * 86400
 
-    # muted furniture, under the data: level hairlines and time hairlines
-    for v in y_vals:
-        if v:
-            y = y_of(v)
-            add(Line(px, y, px + plot_w, y, C["grid"], 1.0, (), 0.8))
+    # muted furniture, under the data: the time hairlines run the full height
+    # of the plot, so the one clock both stacks are read against is drawn once
     for i in range(x_ticks + 1):
         x = x_of(t0 + span * i / x_ticks)
         add(Line(x, top, x, bot, C["grid"], 1.0, (), 0.7))
 
-    # the stack: one rect run per band, averages per column, in the fixed
-    # band order; the running total is the account's in-flight requests
-    cum = [0.0] * n_cols
-    label_entries = []      # (band, y0 at the band's end, leader x or None)
-    for b in bands:
-        key = (b["tier"], b["model"], b["harness"])
-        mvals = means.get(key)
-        if not mvals:
-            continue
-        segs = []           # (y_top, y_bot) per column, None when nothing
-        last_k, last_y0 = None, None
-        for k in range(n_cols):
-            base = cum[k]
-            v = mvals[k] / col_s
-            cum[k] = base + v
-            if v <= 0:
-                segs.append(None)
-                continue
-            y_t, y_b = y_of(base + v), y_of(base)
-            segs.append((y_t, y_b))
-            if y_b - y_t < 0.15:
-                continue      # sub-pixel bands stay in the stack, not the ink
-            last_k, last_y0 = k, (y_t + y_b) / 2.0
-        # merge columns whose band segment rounds to the same geometry
-        k = 0
-        while k < n_cols:
-            seg = segs[k]
-            if seg is None:
-                k += 1
-                continue
-            q = (round(seg[0] * 4), round(seg[1] * 4))
-            j = k
-            while (j + 1 < n_cols and segs[j + 1] is not None
-                   and (round(segs[j + 1][0] * 4),
-                        round(segs[j + 1][1] * 4)) == q):
-                j += 1
-            add(Rect(col_x(k), seg[0], col_x(j + 1) - col_x(k),
-                     seg[1] - seg[0], fill=b["fill"]))
-            k = j + 1
-        if last_k is not None:
-            at_edge = last_k >= n_cols - 1
-            label_entries.append((b, last_y0,
-                                  None if at_edge else col_x(last_k + 1)))
-
-    # the busiest moment per column, as one step outline over the stack:
-    # the envelope of the account's total in-flight requests
-    k = 0
-    while k < n_cols:
-        v = colmax[k]
-        j = k
-        while j + 1 < n_cols and colmax[j + 1] == v:
-            j += 1
-        if v > 0:
-            y = y_of(v)
-            add(Line(col_x(k), y, col_x(j + 1), y,
-                     C["outline"], 1.1, (), 0.9))
-        k = j + 1
-    for k in range(1, n_cols):
-        a, b2 = colmax[k - 1], colmax[k]
-        if a != b2:
-            add(Line(col_x(k), y_of(a), col_x(k), y_of(b2),
-                     C["outline"], 1.1, (), 0.9))
-
-    # the axis under the stack
-    add(Line(px, bot, px + plot_w, bot, C["axis"]))
-
-    # the exact peak, marked where it happened
-    if peak_total > 0:
-        peak_txt = datetime.fromtimestamp(peak_ts, timezone.utc).strftime("%H:%M UTC")
-        add(Circle(x_of(peak_ts), y_of(peak_total), 2.6, fill=C["bg"],
-                   stroke=C["text"], stroke_width=1.2,
-                   title="peak %d concurrent inference requests \u00b7 %s"
-                         % (peak_total, peak_txt)))
-
-    # level labels
-    for v in y_vals:
-        add(Text(pad_l - 10, y_of(v) + 3.5, str(v), size=10.5,
-                 fill=C["muted"], anchor="end"))
+    # the two stacks, each in its own region, on its own scale. Priority is
+    # drawn first because it is the class the rule is about, so its name
+    # reaches the label gutter before the other class competes for the row.
+    for tier in ("interactive", "background"):
+        if tier in panels:
+            _draw_stack(shapes, panel=panels[tier], n_cols=n_cols, col_s=col_s,
+                        col_x=col_x, x_of=x_of, plot_w=plot_w, px=px)
 
     # time ticks: marks on the axis, labels under it. A short window puts two
     # ticks in the same minute, and two identical labels on one axis read as a
@@ -1036,40 +1331,10 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
         add(Line(x, bot, x, bot + 5, C["axis"]))
         add(Text(x, xlab_y, label, size=9.5, anchor="middle", fill=C["muted"]))
 
-    # direct labels: one per band at the right-hand edge, in the band's
-    # own ink, at the height the band left the stack; a hairline leader
-    # connects an early-ending band to its name. Gaps are enforced so
-    # the label column can never collide with itself.
-    ys = []
-    for b, y0, _lx in label_entries:
-        y = y0
-        if ys and y < ys[-1] + 11.0:
-            y = ys[-1] + 11.0
-        ys.append(y)
-    if ys and ys[-1] > bot - 7:
-        shift = ys[-1] - (bot - 7)
-        ys = [max(top + 7.0, y - shift) for y in ys]
-        for i in range(1, len(ys)):
-            if ys[i] < ys[i - 1] + 11.0:
-                ys[i] = ys[i - 1] + 11.0
-    for (b, y0, lx), y in zip(label_entries, ys):
-        if lx is None or px + plot_w - lx <= 4:
-            continue
-        if px + plot_w - lx <= 60:
-            # a short leader: the band ended near the right edge, so the line
-            # joins the name to the band's own end
-            add(Line(lx, y0, px + plot_w + 2, y, C["axis"], 0.7, (), 0.6))
-        else:
-            # a band that ended early would need a long diagonal across the data
-            # to reach its name. A stub at the edge names it without drawing
-            # over the picture.
-            add(Line(px + plot_w - 10, y, px + plot_w + 2, y, C["axis"], 0.7, (), 0.6))
-    for (b, y0, lx), y in zip(label_entries, ys):
-        add(Text(px + plot_w + 6, y + 3.2, b["display"], size=10, fill=b["ink"]))
-
     # ---- flare ticks: one per rejected or overflowed request ---------------
-    # Hung from the top edge of the plot area at the moment the request
-    # died; the hover title names the agent whose request it was.
+    # Hung from the top edge of the region its own class owns, at the moment
+    # the request died, so a tick can never read as evidence about the other
+    # population. The hover title names the agent whose request it was.
     for r in timed_reqs:
         if r.demoted:
             ts, kind = r.start, "overflowed to background scheduling"
@@ -1082,43 +1347,10 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
         x = x_of(ts)
         title = "%s \u00b7 %s \u00b7 %s \u00b7 waited %s" % (
             kind, r.harness, r.model or "(unknown)", _fmt_dur(r.duration))
-        add(Line(x, top, x, top + 7, C["flare"], 1.4, (), 0.95))
+        hang_top = panels[_class_of(r)]["top"]
+        add(Line(x, hang_top, x, hang_top + 7, C["flare"], 1.4, (), 0.95))
         # a Line cannot carry a tooltip, so an invisible hover spot does
-        add(Circle(x, top + 3.5, 3, fill=None, stroke=None, title=title))
-
-    # ---- the resolved priority concurrency, against the one stack ----------
-    if rule_n is not None:
-        ry = y_of(rule_n)
-        # Authority rides on the mark: the account's fetched number is a
-        # thick solid line, a --plan declaration a thin dashed one, so the
-        # two can never be confused at a glance. The label names the source
-        # as well, and takes its ink from its own rule.
-        if rule_src == "account":
-            rule_ink, rule_w, rule_dash = C["rule_account"], 3.5, ()
-        else:
-            rule_ink, rule_w, rule_dash = C["rule"], 1.0, (5, 4)
-        add(Line(px, ry, px + plot_w, ry, rule_ink, rule_w, rule_dash, 0.9))
-        if rule_src == "account":
-            rule_label = "priority concurrency %d (account" % rule_n
-            if acct_plan:
-                rule_label += ", plan %s" % acct_plan
-            rule_label += ")"
-            if acct_stale:
-                # a rule drawn from a stale payload is still the best number
-                # available, but it is never drawn without saying so
-                rule_label += " \u00b7 stale cache"
-        elif declared_named:
-            rule_label = "priority concurrency (--plan %s = %d)" % (
-                declared_txt, rule_n)
-        else:
-            rule_label = "priority concurrency (--plan %d)" % rule_n
-        ly = ry - 5 if ry - 15 >= top else ry + 12
-        # The rule crosses the stack, and its own ink on a dark band is
-        # unreadable. A white plate behind the label keeps the text legible on
-        # whatever the bands are doing underneath, without hiding the rule.
-        plate_w = 5.4 * len(rule_label) + 6
-        add(Rect(px + 2, ly - 10, plate_w, 14, fill="#ffffff", fill_opacity=0.88))
-        add(Text(px + 5, ly, rule_label, size=10, fill=rule_ink))
+        add(Circle(x, hang_top + 3.5, 3, fill=None, stroke=None, title=title))
 
     add(Text(width - pad_r, xlab_y, "UTC", size=9.5, anchor="end", fill=C["muted"]))
 
@@ -1152,15 +1384,15 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     # there is no rule to read it against
     if not timed_reqs:
         line2 = "reading: no timed request in this window, so nothing was measured"
-    elif rule_n is not None and m["peak_concurrency"] > rule_n:
+    elif rule_n is not None and pri_peak > rule_n:
         kind = "declared" if rule_src == "plan" else "account"
-        line2 = ("reading: peak %d exceeded the %s rule of %d"
-                 % (m["peak_concurrency"], kind, rule_n))
+        line2 = ("reading: priority peak %d exceeded the %s rule of %d"
+                 % (pri_peak, kind, rule_n))
         if dead:
             line2 += ", and %d request(s) were rejected at admission" % dead
     elif rule_n is not None:
-        line2 = ("reading: peak %d stayed within the %s rule of %d"
-                 % (m["peak_concurrency"],
+        line2 = ("reading: priority peak %d stayed within the %s rule of %d"
+                 % (pri_peak,
                     "declared" if rule_src == "plan" else "account", rule_n))
     elif dead:
         line2 = "reading: %d request(s) were rejected at admission" % dead

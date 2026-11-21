@@ -27,6 +27,24 @@ Versioning policy:
   background tier. The `--json` field keeps its name, `demoted`, because it is
   data and not copy.
 
+- The chart separates the two scheduling classes. Priority and background are
+  realtime and batch work, they run at different levels, and they answer to
+  different numbers, so each class gets its own stack in the same plot area: the
+  priority stack on the page's bottom axis, the background stack in a region
+  above it, with its own baseline, its own vertical scale and its own numbers in
+  the gutter. Both are read against one shared time axis, so a burst in one class
+  lines up with what the other was doing. Nothing is summed across the classes
+  any more: each stack carries its own grey envelope, its own peak circle and its
+  own rule. The priority concurrency is drawn against the priority stack, and a
+  background concurrency the account reports gets its own rule against the
+  background stack. The one reading in the footer is the priority peak against
+  the priority rule. The latency field traces its p50 and p90 once per class, so
+  the slower level shows beside the faster one. The fate panel's `overflowed`
+  row is drawn in the violet of the background stack, and one clause says that
+  it is that stack's intake. The per-model admission deadline rows carry their
+  class tag, `[pri]` or `[bg]`, because the two classes answer to different
+  deadlines.
+
 ## [0.8.0-alpha.3] - 2026-11-20
 
 ### Changed
