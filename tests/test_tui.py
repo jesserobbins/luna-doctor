@@ -190,7 +190,7 @@ def _dash(**over):
     return metrics
 
 
-def _models(busy=True):
+def _models():
     """The per-model cells `cli.latency_by` fills, most samples first."""
     cells = (("interactive / glm-5.3", 20, 95.0, 240.0),
              ("background / glm-5.3-background", 7, 400.0, 520.0),
@@ -300,7 +300,7 @@ def _cap_with_background(block):
 class TriageChoices(unittest.TestCase):
     """The six on-screen answers, in the order the design draws them.
 
-    The answer chooses which three evidence rows stand under the picture. It
+    The answer chooses which evidence group stands under the picture. It
     never gates the screen and it never changes anything above the picture.
     """
 
@@ -381,7 +381,7 @@ class TheDashboardsOrder(unittest.TestCase):
         refusals = _lines("concurrency", cap=self.cap)
         self.assertEqual(slow[:9], refusals[:9], "a region above the group moved")
         self.assertTrue(refusals[9].startswith("REFUSALS "))
-        self.assertNotEqual(slow[10:14], refusals[10:13])
+        self.assertNotEqual(slow[10:13], refusals[10:13])
 
     def test_the_header_word_and_moon_come_from_the_cli_verdict(self):
         """One verdict: the header asks `cli.verdict` and `report.status_moon`,

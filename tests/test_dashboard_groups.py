@@ -121,8 +121,11 @@ BUSY_MODELS = (
 )
 BUSY_MODELS_BEFORE = (
     _model_cell("interactive / glm-5.3", 18, 83.0, 202.0),
-    _model_cell("background / glm-5.3-background", 6, 380.0, 470.0),
+    # The two cells at six samples sit in the order a tie leaves them, which is
+    # the order one window's requests arrived and not the order this window's
+    # rows are drawn in: a delta matched by cell keeps each model its own number.
     _model_cell("interactive / claude-opus-lr11", 6, 118.0, 260.0),
+    _model_cell("background / glm-5.3-background", 6, 380.0, 470.0),
     _model_cell("interactive / gpt-5.1", 5, 64.0, 110.0),
 )
 # A clean window's models fell, which is what its full moon needs them to do.
@@ -318,7 +321,7 @@ class ModelsGroup(unittest.TestCase):
                               _window(42, 17, p50=95.0, p90=240.0),
                               _busy_before())
         self.assertEqual(_lines(rows), [
-            " no model     ?            · nothing reached the sample floor",
+            " no model     ?            · no model measured",
         ])
         self.assertEqual(tui._BADGE_UNKNOWN, rows[0][0])
         self.assertEqual(tui.moon_glyph("moon"),
@@ -336,6 +339,64 @@ class ModelsGroup(unittest.TestCase):
                          tui.region_moon(tui.group_rows(
                              tui.REGION_MODELS, _healthy(), _healthy_before()),
                              tui.REGION_MODELS))
+
+    def test_a_clean_header_tolerates_a_models_region_at_pressure(self):
+        """§4.2: latency is not a verdict signal, so the two moons can differ.
+
+        One model's p50 rose while both tier percentiles fell and nothing was
+        blocked, so `cli.verdict` calls the window clean and this group - which
+        holds nothing but percentiles - reads pressure. The shape is intended.
+        """
+        mixed = _window(9, 4, p50=31.0, p90=58.0, samples=9, models=(
+            _model_cell("interactive / glm-5.3", 20, 95.0, 240.0),
+            _model_cell("interactive / claude-haiku-lr34", 6, 22.0, 40.0)))
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_FULL),
+                         tui.moon_glyph(tui.header_moon(mixed)))
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_QUARTER),
+                         tui.region_moon(
+                             tui.group_rows(tui.REGION_MODELS, mixed,
+                                            _healthy_before()),
+                             tui.REGION_MODELS))
+        lines = tui.dashboard_lines(tui.REGION_MODELS, mixed, _healthy_before(),
+                                    _cap(3, 12))
+        self.assertTrue(lines[0].startswith(tui.moon_glyph(tui.report.MOON_FULL)),
+                        lines[0])
+        self.assertEqual(tui.moon_glyph(tui.report.MOON_QUARTER),
+                         lines[9].split()[1])
+
+    def test_one_model_on_both_tiers_names_the_tier_it_measured_on(self):
+        """Two rows can name one model, and then each label carries its tier.
+
+        `glm-5.3` measured on both tiers, so it has two percentiles and two
+        rows; the tag is spent only on the duplicate, because the label column
+        is 12 cells and an unambiguous name needs none of it.
+        """
+        both = (_model_cell("interactive / glm-5.3", 20, 95.0, 240.0),
+                _model_cell("background / glm-5.3", 9, 400.0, 520.0),
+                _model_cell("interactive / claude-opus-lr11", 6, 130.0, 300.0))
+        rows = tui.group_rows(tui.REGION_MODELS,
+                              _window(42, 17, p50=95.0, p90=240.0, models=both),
+                              _busy_before())
+        self.assertEqual(["glm-5.3 pri", "glm-5.3 bg", "claude-opus…"],
+                         [row[1][1:13].strip() for row in rows])
+        self.assertEqual(3, len({row[1][1:14] for row in rows}),
+                         "two rows of one model print one label")
+
+    def test_the_group_is_as_tall_as_the_models_it_measured(self):
+        """§3.1: the group's rows are the models it drew, so its height is too.
+
+        The busy window's three models make the eighteen-row shape, the
+        two-model window draws 17, and a window that measured no model draws its
+        one no-model row: 16.
+        """
+        cap = _cap(7, 12)
+        self.assertEqual(18, len(tui.dashboard_lines(
+            tui.REGION_MODELS, _busy(), _busy_before(), cap)))
+        self.assertEqual(17, len(tui.dashboard_lines(
+            tui.REGION_MODELS, _healthy(), _healthy_before(), cap)))
+        self.assertEqual(16, len(tui.dashboard_lines(
+            tui.REGION_MODELS, _window(42, 17, p50=95.0, p90=240.0),
+            _busy_before(), cap)))
 
 
 class RefusalsGroup(unittest.TestCase):
@@ -494,16 +555,22 @@ class TheEvidenceGrid(unittest.TestCase):
         slow tier all ran, so the header reads clean and no region may claim
         trouble. It is also the window `fix` recommends, which must not read as
         over capacity on the screen that recommends it.
+
+        MODELS is not one of the regions here: it reads latency, no verdict reads
+        latency, and `test_a_clean_header_tolerates_a_models_region_at_pressure`
+        pins the shape where the two moons differ (§4.2).
         """
         stressed = _window(42, 17, blocked=3, rejected=11, at_limit=4, background=7,
                            stalled=2, starved=1, p50=95.0, p90=240.0,
                            models=BUSY_MODELS)
+        verdict_groups = tuple(key for key in tui.EVIDENCE_GROUPS
+                               if key != tui.REGION_MODELS)
         for metrics in (stressed, _window(999, 17, rejected=999),
                         _demoted(), _healthy()):
             header = tui.moon_glyph(tui.header_moon(metrics))
             regions = [tui.region_moon(tui.load_rows(metrics, _cap(7, 12), 1, self.before),
                                        tui.REGION_LOAD)]
-            for key in tui.EVIDENCE_GROUPS:
+            for key in verdict_groups:
                 regions.append(tui.region_moon(
                     tui.group_rows(key, metrics, self.before), key))
             self.assertTrue(tui.regions_satisfy_invariant(header, regions),

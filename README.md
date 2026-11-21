@@ -53,18 +53,20 @@ luna-doctor --version
 
 `luna-doctor` with no arguments, in a terminal, opens the triage screen. The
 screen is a dashboard. It reads the last hour of local logs and the cached
-account capacity, then draws nineteen rows. The rows above the middle group hold
+account capacity, then draws its screen: nineteen rows with the latency group
+up, eighteen with any other group. The rows above the middle group hold
 their place in every state: only the numbers, the moons and that group change.
 
 | region | rows | the question it answers |
 |---|---|---|
 | status | 2 | over capacity now, and is it getting worse |
 | load | 6 | by how much, and since when |
-| one evidence group | 5 or 6 | what kind of trouble |
+| one evidence group | 4 or 5 | what kind of trouble |
 | next | 3 | what to do |
 
-The latency group draws six rows - two percentiles for each of the two tiers -
-and the other groups draw five.
+The latency group draws five rows - two percentiles for each of the two tiers.
+The models group draws one row per model that measured, up to three. The other
+groups draw four.
 
 The window is one hour. `w` cycles 1h, 6h and 24h, and every number and the
 picture follow the window. The dashboard holds no 7-day and no 30-day number.

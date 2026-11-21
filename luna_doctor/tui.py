@@ -1,10 +1,11 @@
-"""The triage screen: a dashboard of nineteen rows, twenty with LATENCY on it.
+"""The triage screen: a dashboard of eighteen rows, nineteen with LATENCY on it.
 
 The evidence group is the one region whose height changes: LATENCY draws four
 rows, one per tier and percentile, because a priority p50 and a background p50
-are two measurements; REFUSALS and STALLS draw three. So the screen carries
-eighteen drawn rows when those two groups are up and nineteen when LATENCY is,
-plus the Textual `Footer` under them.
+are two measurements; REFUSALS and STALLS draw three; MODELS draws one row per
+model it measured, three at most, and one row when it measured none. So the
+screen carries sixteen to nineteen drawn rows, plus the Textual `Footer` under
+them.
 
 Bare `luna-doctor` on a terminal opens this instead of argparse help: it fixes
 four regions on the screen - the status header, LOAD, one evidence group and
@@ -81,8 +82,8 @@ TRIAGE_CHOICES: list[tuple[str, str]] = [
 # group either way.
 DEFAULT_CHOICE = "checking"
 
-# Which evidence group each answer selects. The answer chooses which three rows
-# stand under the picture; it never gates the screen, and it never changes
+# Which evidence group each answer selects. The answer chooses which group's
+# rows stand under the picture; it never gates the screen, and it never changes
 # anything above them. The values are the region kinds, spelled here as the
 # strings they are because `_LEAD` is read at import time and the region names
 # are declared further down.
@@ -557,6 +558,9 @@ def regions_satisfy_invariant(header_glyph: str,
     never explains a darker header, and a darker region never contradicts a clean
     window. The quarter moon and the plain moon carry no constraint, because a
     window can be under pressure for a reason no region on this screen measures.
+    The tie holds over the regions that carry the verdict's own evidence: MODELS
+    reads latency, and no verdict reads latency, so it can claim pressure beside a
+    clean header (§4.2) and is not part of this tie.
     """
     glyphs = list(region_glyphs)
     if header_glyph == moon_glyph(report.MOON_NEW):
@@ -1088,12 +1092,12 @@ def load_rows(metrics: dict, cap, window_hours, previous=None,
             _blocked_row(metrics, previous)]
 
 
-# ---- the evidence group: the three rows that say what kind of trouble ------
-# A group is the screen's third region: three data rows on the same grid the LOAD
+# ---- the evidence group: the rows that say what kind of trouble -----------
+# A group is the screen's third region: its data rows on the same grid the LOAD
 # region draws, built from metrics keys the analysis already produces. The answer
 # selects which group stands under the picture (§8 item 4), and its title then
-# wears the moon those three rows earn (`region_moon`), so a group is one region
-# and not a second scoring system.
+# wears the moon its rows earn (`region_moon`), so a group is one region and not
+# a second scoring system.
 #
 # The delta column is the one place these rows differ from LOAD's: a group's
 # numbers share one width, because the mockups print `▲  4` beside `▲ 11` in the
@@ -1183,9 +1187,15 @@ def _latency_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
 
 
 # How many models the MODELS group ranks: the three with the most completed
-# samples, like every other three-row group here. A fourth row would move every
-# row under it, and the rest of the ranking is in `latency --by model`.
+# samples. The group is as tall as the models it measured, so the cap is what
+# keeps the screen at or under the eighteen-row shape; the rest of the ranking is
+# in `latency --by model`.
 MODEL_ROWS = 3
+
+# The tag a model's label wears when the same model measured on both tiers: two
+# rows would otherwise print one label for two different percentiles. The words
+# are the tier words the LATENCY rows carry, so one tier has one spelling.
+_TIER_TAGS = {"interactive": "pri", "background": "bg"}
 
 
 def _model_name(cell) -> str:
@@ -1200,17 +1210,26 @@ def _model_name(cell) -> str:
     return model or cell
 
 
-def _label_cell(name: str) -> str:
+def _tier_tag(cell) -> str:
+    """The tier one `latency_by` cell measured on, as the tag its label can hold."""
+    tier = cell.partition(" / ")[0] if isinstance(cell, str) else ""
+    return _TIER_TAGS.get(tier, "")
+
+
+def _label_cell(name: str, tag: str = "") -> str:
     """One model's name in the label column, cut where the column ends.
 
     A model name is a log slug (letters, digits, `-`, `.`), so one character is
     one cell. A name longer than the 12-cell label column keeps its first eleven
     cells and a `…`: a row that silently printed a shorter name would read as a
-    different model.
+    different model. `tag` is the tier a model that appears twice has to name,
+    and it is kept whole where the name is cut to make room for it.
     """
-    if len(name) <= LOAD_LABEL_CELLS:
-        return name
-    return name[:LOAD_LABEL_CELLS - 1] + "\u2026"
+    suffix = " %s" % tag if tag else ""
+    keep = LOAD_LABEL_CELLS - len(suffix)
+    if len(name) <= keep:
+        return name + suffix
+    return name[:keep - 1] + "\u2026" + suffix
 
 
 def _model_rows(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
@@ -1218,26 +1237,37 @@ def _model_rows(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
 
     `latency_by.by_tier_model` is the per-model half of the same measurement the
     tier rows print: one cell per model with at least `latency_by.floor`
-    completed samples, sorted by sample count. Each row is that model's own p50,
-    with its own delta against the same model in the previous window and its p90
-    in the clause, so a slow model cannot be read as the whole window being slow.
+    completed samples. The three with the most samples are ranked here rather
+    than trusted to arrive ranked - a tie keeps the order the upstream produced -
+    and each row is that model's own p50, with its own delta against the same
+    model in the previous window and its p90 in the clause, so a slow model
+    cannot be read as the whole window being slow.
+
+    A model that measured on both tiers has two cells and so two rows, and then
+    both labels name the tier they read: one name over two percentiles would read
+    as one model measured twice.
 
     A model below the sample floor has no cell and so no row: an unmeasured model
     is not a `?` fact about that model, it is a model nobody measured enough of.
-    A window where nothing reached the floor draws one row that says so rather
-    than four `?` rows that would name models as if they had been read.
+    A window where no model measured draws one row that says so rather than four
+    `?` rows that would name models as if they had been read.
     """
-    cells = (metrics.get("latency_by") or {}).get("by_tier_model") or []
+    cells = sorted((metrics.get("latency_by") or {}).get("by_tier_model") or [],
+                   key=lambda cell: -(cell.get("n") or 0))[:MODEL_ROWS]
     before_cells = ((previous or {}).get("latency_by") or {}).get("by_tier_model") or []
     earlier_by_cell = {cell.get("cell"): cell for cell in before_cells}
+    names = [_model_name(cell.get("cell")) for cell in cells]
+    duplicated = {name for name in names if names.count(name) > 1}
     rows = []
-    for cell in cells[:MODEL_ROWS]:
+    for cell in cells:
+        name = _model_name(cell.get("cell"))
         number = _seconds_cell(cell.get("p50"))
         earlier_cell = earlier_by_cell.get(cell.get("cell")) or {}
         earlier = _seconds_cell(earlier_cell.get("p50"))
         p90 = _seconds_cell(cell.get("p90"))
         rows.append(_EvidenceRow(
-            _label_cell(_model_name(cell.get("cell"))),
+            _label_cell(name, _tier_tag(cell.get("cell"))
+                        if name in duplicated else ""),
             _BADGE_MEASURED if number else _BADGE_UNKNOWN,
             number,
             (_delta_move(round(cell["p50"]), round(earlier_cell["p50"]),
@@ -1246,8 +1276,7 @@ def _model_rows(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
             "p90 %s" % p90 if p90 else ""))
     if rows:
         return rows
-    return [_EvidenceRow("no model", _BADGE_UNKNOWN, "", None,
-                         "nothing reached the sample floor")]
+    return [_EvidenceRow("no model", _BADGE_UNKNOWN, "", None, "no model measured")]
 
 
 # What happened to the slowest request, in words. The explain digest carries the
@@ -1354,7 +1383,7 @@ _GROUPS = {
 def group_rows(group_key: str,
                metrics: dict,
                previous: dict | None = None) -> list[tuple[str, str]]:
-    """The three evidence rows for one group, on the fixed grid.
+    """The evidence rows for one group, on the fixed grid.
 
     The rows are built from metrics keys the analysis already produces: no group
     reads a log, ranks a request or re-derives a count. `previous` is the
@@ -1489,11 +1518,13 @@ def key_lines(metrics: dict | None = None, cap=None) -> list[str]:
 
 # ---- the screen: the rows the dashboard draws, in order -------------------
 #
-# Nineteen drawn rows, in the four regions §3.1 fixes: the header and its rule,
-# LOAD's six, the evidence group's six, NEXT's three, and the two key lines. The
-# Textual Footer draws under them and renders the bindings. The group's six is
-# where the one variable lives: LATENCY holds four rows and the other two hold
-# three, so a screen with REFUSALS or STALLS on it is one row shorter. Every row
+# Nineteen drawn rows with LATENCY on it, in the four regions §3.1 fixes: the
+# header and its rule, LOAD's six, the evidence group's five or six, NEXT's
+# three, and the two key lines. The Textual Footer draws under them and renders
+# the bindings. The group's own height is the one variable: LATENCY holds four
+# rows, the refusals and stalls groups three, and MODELS is as tall as the models
+# it measured - one to three rows, or one row saying it measured none - so a
+# screen with MODELS on it is shorter by the models it did not measure. Every row
 # above the group keeps its place in every state; only the group's own contents
 # change with the answer, which is why the reading order is the decision order.
 RULE_CELLS = 76      # the rule runs from the left edge to the header's own margin

@@ -9,9 +9,11 @@ the severity and trend words are closed sets, and the moon on a region title
 explains the moon on the header.
 
 The one row latitude is the ruling that made the tiers independent: the LATENCY
-group draws a p50 and a p90 for each tier, four rows where the other two groups
-draw three, and the gateway's fixed wait - a constant with no trend - left the
-group so the screen grew by one row rather than two.
+group draws a p50 and a p90 for each tier, four rows where the refusals and
+stalls groups draw three, and the gateway's fixed wait - a constant with no
+trend - left the group so the screen grew by one row rather than two. The
+MODELS group is the other variable, and it is its own contents that decide it:
+one row per model it measured, one to three, or one row when it measured none.
 
 The rows come from `tui.dashboard_lines(choice_key, metrics, previous, cap)`:
 the one pure function that draws the dashboard, in the order the screen draws
@@ -55,11 +57,12 @@ FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 ROW_BUDGET = 78
 
 # The screen is eighteen drawn rows in a state whose evidence group holds three,
-# and nineteen when LATENCY holds four: two percentiles for each of two tiers,
-# which is one more than the gateway row it retired. The builders draw those; the
-# Textual Footer draws under them and adds no number of its own.
+# nineteen when LATENCY holds four - two percentiles for each of two tiers - and
+# shorter when MODELS measured fewer than three models, which is the one height
+# the group's own rows decide. The builders draw those; the Textual Footer draws
+# under them and adds no number of its own.
 DRAWN_ROWS = 18
-LATENCY_GROUP_ROWS = {"LATENCY": 4, "REFUSALS": 3, "STALLS": 3}
+GROUP_ROWS = {"LATENCY": 4, "MODELS": 3, "REFUSALS": 3, "STALLS": 3}
 
 # The scan clock the five states are pinned to, and the one-hour window that
 # closes at it. The burst in the busy hour peaks at 14:07Z, which is one of the
@@ -130,6 +133,13 @@ def region_of(line: str):
 def rule_rows(lines: list[str]) -> list[int]:
     """The indexes of the rows that are a horizontal rule."""
     return [i for i, line in enumerate(lines) if line.strip() and set(line.strip()) == {"\u2500"}]
+
+
+def group_height(lines: list[str], group: str) -> int:
+    """The data rows one evidence group draws, from its title to the next rule."""
+    title = next(i for i, line in enumerate(lines) if line.split()[:1] == [group])
+    end = next(i for i in rule_rows(lines) if i > title)
+    return end - title - 1
 
 
 def picture_row(lines: list[str]):
@@ -377,26 +387,42 @@ class RowGeometry(unittest.TestCase):
 
         The count is the contract, not the content: a region that grows or drops
         a row moves every row under it, which is the scan pattern the design
-        forbids. The one exception is the ruling this file records - LATENCY's
-        second tier earns two rows of its own - so the group that is on screen
-        decides the height and nothing else does. The window with no traffic
-        keeps its picture's two rows, empty, rather than handing their place to
-        the regions below.
+        forbids. The one group that is allowed to be shorter is MODELS, whose
+        height is the models it measured, so this test draws it for every state
+        and counts the rows it draws. The window with no traffic keeps its
+        picture's two rows, empty, rather than handing their place to the
+        regions below.
         """
         for screen in SCREENS:
             lines = screen.lines()
             group = tui.pick_lead(screen.choice).upper()
-            expected = DRAWN_ROWS + LATENCY_GROUP_ROWS[group] - 3
+            expected = DRAWN_ROWS + GROUP_ROWS[group] - 3
             self.assertEqual(
                 expected, len(lines),
                 f"the {screen} screen draws {len(lines)} rows, not {expected}: "
                 + repr(lines))
-            title = next(i for i, line in enumerate(lines)
-                         if line.split()[:1] == [group])
-            end = next(i for i in rule_rows(lines) if i > title)
             self.assertEqual(
-                LATENCY_GROUP_ROWS[group], end - title - 1,
-                f"the {screen} screen's {group} group holds {end - title - 1} rows")
+                GROUP_ROWS[group], group_height(lines, group),
+                f"the {screen} screen's {group} group is {group_height(lines, group)} rows")
+
+    def test_the_models_group_is_as_tall_as_the_models_it_measured(self):
+        """§3.1: one row per measured model, three at most, and one when none.
+
+        MODELS is the one group whose height follows its own rows, so the height
+        contract is checked over the models each state measured: the three-model
+        states draw the eighteen-row shape, the idle window measured none and
+        draws its single no-model row two rows shorter.
+        """
+        for screen in SCREENS:
+            models = (screen.metrics.get("latency_by") or {}).get("by_tier_model") or []
+            rows = min(GROUP_ROWS["MODELS"], len(models)) or 1
+            lines = tui.dashboard_lines(tui.REGION_MODELS, screen.metrics,
+                                        screen.previous, screen.cap)
+            self.assertEqual(DRAWN_ROWS + rows - 3, len(lines),
+                             f"the {screen} models screen draws {len(lines)} rows")
+            self.assertEqual(rows, group_height(lines, "MODELS"),
+                             f"the {screen} models group is "
+                             f"{group_height(lines, 'MODELS')} rows")
 
     def test_the_two_ends_of_the_screen_are_chrome(self):
         """The header is the first row and the two key lines are the last two.
@@ -432,11 +458,12 @@ class RowGeometry(unittest.TestCase):
         self.assertEqual("LATENCY", chosen["over capacity"])
 
     def test_the_models_group_draws_one_row_per_model_on_the_same_grid(self):
-        """MODELS is reached with `[g]`, and it keeps §3.1's eighteen drawn rows.
+        """MODELS is reached with `[g]`, and it draws its own measured models.
 
         One row per measured model, three at most, on the same 78-cell grid: the
         region that `[g]` adds is a group, not a taller screen, so the Footer is
-        still the row under the key lines.
+        still the row under the key lines. This window measured three models, so
+        it draws the eighteen-row shape.
         """
         screen = SCREENS[0]
         lines = tui.dashboard_lines("models", screen.metrics, screen.previous,
@@ -660,7 +687,7 @@ class TheAssembledScreen(unittest.TestCase):
         self.assertTrue(scanned, "the scan never reached the screen, so nothing was drawn")
         drawn = [row for row in rows if row.strip()]
         self.assertEqual(
-            DRAWN_ROWS + 1 + LATENCY_GROUP_ROWS["LATENCY"] - 3, len(drawn),
+            DRAWN_ROWS + 1 + GROUP_ROWS["LATENCY"] - 3, len(drawn),
             "the assembled screen paints these rows at 80x24:\n" + "\n".join(drawn))
         for row in drawn:
             self.assertLessEqual(cells(row), ROW_BUDGET,
