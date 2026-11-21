@@ -1606,6 +1606,32 @@ class PerModelDeadlines(unittest.TestCase):
         reqs = [self._dead("glm-5.3", base + i, 120.2, outcome="completed") for i in range(5)]
         self.assertEqual(self.m.per_model_deadlines(reqs), {})
 
+    def test_each_model_row_carries_its_scheduling_class(self):
+        """The two classes answer to different admission deadlines, so a row
+        that names only the model invites a reader to compare two populations.
+        Both classes render here with the tag each one belongs to.
+        """
+        from luna_doctor import report as _report
+        base = 1_700_000_000.0
+
+        def dead(model, tier, start, dur):
+            return self.m.Request(harness="pi", session="s", model=model, tier=tier,
+                                  start=start, end=start + dur,
+                                  outcome="admission_timeout")
+
+        reqs = ([dead("glm-5.3", "interactive", base + i * 500, 120.2 + i * 0.1)
+                 for i in range(4)]
+                + [dead("glm-5.3-background", "background", base + i * 500, 300.2)
+                   for i in range(4)])
+        m = self.m.analyse(reqs, 24.0)
+        head, adj, _ = self.m.verdict(m)
+        out = _report.render_plain(self.m.build_report(m, head, adj))
+        self.assertIn("glm-5.3 [pri] 120.4s (n=4), "
+                      "glm-5.3-background [bg] 300.2s (n=4)", out,
+                      "the admission wall names each model's class")
+        self.assertIn("Observed deadlines: glm-5.3 [pri]", out,
+                      "the verdict's deadline sentence carries the tags too")
+
 
 class TimeoutStorms(unittest.TestCase):
     def setUp(self):

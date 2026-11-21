@@ -140,13 +140,17 @@ Direct labels  each band is named at its right-hand edge, in its own
 Footer         two short lines, and no more. The first gives the rule's
                provenance in a phrase - the number, its source, the plan it
                came from, and a set-aside --plan when there was one -, and
-               says the rule is not established when nothing is known. The
-               second gives the one reading that matters: the priority peak
-               against the priority rule, or the rejection count when there
-               is no rule to read it against. A row that runs past the canvas
-               wraps, but there are only ever these two: what the picture
-               could not show belongs in `luna-doctor explain`, not under the
-               mark.
+               says the rule is not established when nothing is known. When
+               the number is established but no priority request ran in the
+               window, the rule is not drawn either, because only the stack a
+               rule governs can carry it: the first line gives the number and
+               says it is not drawn, and the second says the rule had nothing
+               to measure. The second line gives the one reading that
+               matters: the priority peak against the priority rule, or the
+               rejection count when there is no rule to read it against. A
+               row that runs past the canvas wraps, but there are only ever
+               these two: what the picture could not show belongs in
+               `luna-doctor explain`, not under the mark.
 
 WHAT WAS CHOSEN NOT TO DRAW.
 
@@ -1045,7 +1049,11 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     the fallback when the account has no number), and the background
     concurrency, which only the account can state. The labels say which source
     each number came from. None means nothing was established, and then no
-    rule is drawn. Shape order below is paint order.
+    rule is drawn. A rule is drawn only beside the stack it governs, so a
+    window whose traffic was all background draws no priority rule even when
+    the number is established: no region would claim a class that never ran,
+    and the footer says where the number came from and that it is not drawn.
+    Shape order below is paint order.
     """
     timed_reqs = timed(reqs)
 
@@ -1152,8 +1160,11 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     else:
         regions = {classes_present[0]: (top, bot)}
 
-    # the priority rule governs the priority stack and nothing else
-    if rule_n is not None:
+    # the priority rule governs the priority stack and nothing else, so it is
+    # attached only when that stack drew. A background-only window has no
+    # priority region: the number is established but nothing ran to compare it
+    # against, and an empty strip would claim the class ran at zero.
+    if rule_n is not None and "interactive" in panels:
         if rule_src == "account":
             # Authority rides on the mark: the account's fetched number is a
             # thick solid line, a --plan declaration a thin dashed one, so the
@@ -1375,10 +1386,15 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
     elif rule_src == "plan":
         line1 = "rule: %d declared (--plan %s)" % (rule_n, declared_txt)
     elif cap is not None and cap.account_present:
-        line1 = ("rule: not established \u2014 the cached account payload reports "
+        line1 = ("rule: not established \u00b7 the cached account payload reports "
                  "no number")
     else:
-        line1 = "rule: not established \u2014 luna-doctor capacity fetches it"
+        line1 = "rule: not established \u00b7 luna-doctor capacity fetches it"
+    if rule_n is not None and "interactive" not in panels:
+        # the number is established, but no priority stack drew in this window,
+        # so the rule has nothing to be drawn against. The footer names the
+        # number's source and says why the picture does not carry the mark.
+        line1 += " \u00b7 not drawn, no priority traffic in this window"
 
     # the one reading: the peak against the rule, or the rejection count when
     # there is no rule to read it against
@@ -1388,6 +1404,14 @@ def build_chart_scene(reqs, m, hours, width=1120, height=780, capacity=None):
         kind = "declared" if rule_src == "plan" else "account"
         line2 = ("reading: priority peak %d exceeded the %s rule of %d"
                  % (pri_peak, kind, rule_n))
+        if dead:
+            line2 += ", and %d request(s) were rejected at admission" % dead
+    elif rule_n is not None and "interactive" not in panels:
+        # a peak of 0 would be a subtraction, not a reading: nothing ran in
+        # the class the rule governs
+        line2 = ("reading: no priority request in this window, so the %s rule "
+                 "of %d had nothing to measure"
+                 % ("declared" if rule_src == "plan" else "account", rule_n))
         if dead:
             line2 += ", and %d request(s) were rejected at admission" % dead
     elif rule_n is not None:

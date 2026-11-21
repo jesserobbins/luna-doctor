@@ -667,6 +667,33 @@ class TheChartSeparatesTheTwoClasses(unittest.TestCase):
         self.assertIn("reading: priority peak 5 stayed within the account rule of 6",
                       text)
 
+    def test_a_background_only_window_draws_its_own_stack_and_no_rule(self):
+        """A window whose traffic was all background, with the priority number
+        established, used to raise KeyError 'interactive': the rule was
+        attached to the priority region whether or not that region drew. The
+        rule belongs to the stack it governs, so it is not drawn here, and the
+        footer says the number is established and why the mark is absent.
+        """
+        reqs = [self._req(i, 300.0, tier="background") for i in range(3)]
+        capacity = plan.Capacity(priority=12, source="account", declared="",
+                                 account_present=True, account_priority=12,
+                                 account_background=8, account_plan="apex")
+        scene = self._scene(reqs, capacity)
+        text = self._text(scene)
+        self.assertIn("background scheduling \u00b7 concurrent requests "
+                      "\u00b7 account limit 8", text,
+                      "the background stack drew its own region")
+        self.assertNotIn("priority scheduling \u00b7 concurrent requests", text,
+                         "no priority traffic, so no priority region draws")
+        self.assertNotIn("priority concurrency", text,
+                         "no priority stack drew, so the rule has nothing to cross")
+        self.assertIn("rule: 12 from account (plan apex) \u00b7 not drawn, "
+                      "no priority traffic in this window", text,
+                      "the number is established, and the footer says why the mark is absent")
+        self.assertIn("reading: no priority request in this window, so the "
+                      "account rule of 12 had nothing to measure", text,
+                      "a peak of 0 would be a subtraction, not a reading")
+
     def test_the_overflowed_row_names_the_stack_it_feeds(self):
         """One colour, one meaning: the fate panel counts overflowed requests in
         the violet of the background stack, and says so once.

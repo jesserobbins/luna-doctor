@@ -15,8 +15,10 @@ Code, flags, paths, quoted tool output and link targets are exempt by
 construction inside the checker, not here.
 """
 
+import html
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -53,15 +55,30 @@ def run(*args, timeout=180):
 
 
 def newest_changelog_section():
-    """The text under the newest released heading, without the older sections."""
+    """The prose the newest wave wrote: the `[Unreleased]` block when the file
+    has one, plus the newest released section under it, without the older
+    sections.
+
+    The Unreleased block is scanned while it is being written, not only after
+    it ships, so a note cannot sit in the file for weeks and break the rules on
+    the day it is released. The newest released section stays in the scan
+    because a wave that has not opened an Unreleased block yet still leaves its
+    note under a version heading.
+    """
     with open(CHANGELOG, encoding="utf-8") as fh:
         text = fh.read()
-    start = text.find("\n## [", text.find("## [Unreleased]") + 1)
+    start = text.find("## [Unreleased]")
     if start < 0:
-        return ""
-    rest = text[start + 1:]
+        start = text.find("\n## [")
+        if start < 0:
+            return ""
+        start += 1
+    rest = text[start:]
     nxt = rest.find("\n## [", 1)
-    return rest if nxt < 0 else rest[:nxt]
+    if nxt < 0:
+        return rest
+    after = rest.find("\n## [", nxt + 1)
+    return rest if after < 0 else rest[:after]
 
 
 def violations(text):
@@ -78,6 +95,19 @@ def markdown_under(path):
     for base, _dirs, names in os.walk(path):
         found.extend(os.path.join(base, n) for n in sorted(names) if n.endswith(".md"))
     return sorted(found)
+
+
+_SVG_TEXT = re.compile(r"<text[^>]*>(.*?)</text>", re.S)
+
+
+def svg_copy(svg):
+    """The words an SVG carries, unescaped, one string per text element.
+
+    A picture's copy lives in its text elements, so no markdown walk reaches
+    it. The hover titles are inside those elements and are read here too: a
+    tooltip is copy a reader sees.
+    """
+    return "\n".join(html.unescape(chunk) for chunk in _SVG_TEXT.findall(svg))
 
 
 class SimpleEnglish(unittest.TestCase):
@@ -150,3 +180,42 @@ class TheRestOfTheSurface(unittest.TestCase):
             if found:
                 broken[" ".join(args)] = found[:6]
         self.assertEqual(broken, {}, f"printed copy breaks Simple English: {broken!r}")
+
+    def test_the_chart_svg_is_simple_english(self):
+        """The picture's copy is SVG text, and every mark that carries words
+        is scanned: the fate panel's rows, the heatmap's caption, the regions'
+        captions, each rule's own label, the footer's two lines, and the hover
+        titles. Scenes are built here rather than from a store so the scan
+        draws the marks a reader sees, not an empty window's furniture.
+        """
+        from luna_doctor import cli as chart_cli
+        from luna_doctor import plan
+
+        base = 1_700_000_000.0
+        reqs = [chart_cli.Request(harness="pi", session="s", model="glm-5.3",
+                                  start=base + i * 20, end=base + i * 20 + 30,
+                                  outcome="completed") for i in range(60)]
+        reqs += [chart_cli.Request(harness="pi", session="s",
+                                   model="glm-5.3-background", tier="background",
+                                   start=base + i * 20, end=base + i * 20 + 400,
+                                   outcome="completed") for i in range(60)]
+        reqs += [chart_cli.Request(harness="pi", session="s", model="glm-5.3",
+                                   start=base + i * 20, end=base + i * 20 + 300,
+                                   outcome="admission_timeout") for i in range(3)]
+        metrics = chart_cli.analyse(reqs, 24.0)
+        known = plan.Capacity(priority=12, source="account", declared="",
+                              account_present=True, account_priority=12,
+                              account_background=8, account_plan="apex")
+        scenes = {
+            "both rules drawn": chart_cli.svg_chart(reqs, metrics, 24.0, capacity=known),
+            "no rule established": chart_cli.svg_chart(reqs, metrics, 24.0),
+            "an empty window": chart_cli.svg_chart([], chart_cli.analyse([], 24.0), 24.0),
+        }
+        broken = {}
+        for name, svg in scenes.items():
+            self.assertTrue(svg_copy(svg).strip(), f"{name}: no copy extracted")
+            found = violations(svg_copy(svg))
+            if found:
+                broken[name] = found[:6]
+        self.assertEqual(broken, {},
+                         f"the chart's copy breaks Simple English: {broken!r}")
