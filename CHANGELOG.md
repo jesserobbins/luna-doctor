@@ -17,6 +17,8 @@ Versioning policy:
 
 ## [Unreleased]
 
+## [0.8.0-alpha.4] - 2026-11-20
+
 ### Changed
 
 - A request that the gateway sends to the background tier is now called
