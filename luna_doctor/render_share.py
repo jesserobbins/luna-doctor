@@ -88,12 +88,12 @@ def _share_bullets(m: dict, adjustments) -> list:
     if m.get("pressure_windows"):
         bullets.append(
             "Bursts wider than the account's interactive admission width are "
-            "demoted to the background tier rather than failing.")
+            "overflowed to the background tier rather than failing.")
     if (by_outcome.get("client_idle_timeout") or 0) > 0:
         bullets.append(
             "Some requests stalled until the harness's own idle limit killed "
             "them - the silent-overflow signature: the request was likely "
-            "demoted to the background tier, which streams only keep-alives "
+            "overflowed to the background tier, which streams only keep-alives "
             "for minutes.")
     if adjustments:
         action = adjustments[-1]

@@ -6,7 +6,7 @@
 
 LunaRoute bills concurrent requests, not tokens. Other quotas exist on the same key, and none of them counts concurrency: a monthly BYOK spend cap in USD, a sponsored monthly web-search allowance, and System One metering on input tokens. The account admits a priority number of concurrent requests at once, and that number is fixed. Overflow above it depends on capacity that is free at that moment, so it is not a second guaranteed allowance. Most symptoms below are the priority number being exceeded.
 
-When the account is full, the gateway waits. It can also demote the request to a background tier, and then hold the stream open with keep-alives while it produces nothing. Part of that same overflow also arrives directly as a 429 (`rate_limit_error`, `CONCURRENT_REQUEST_LIMIT_EXCEEDED`). A 429 in your logs usually means the account's concurrent capacity ran out. It is not the only cause. The gateway's own error table lists 429s that come from capacity further down the stack, not from the account's priority concurrency: `embedding_gateway_busy` and `embedding_backend_busy` from an embedding gateway or backend under load, `systemone_backend_busy` from a System One upstream that is rate-limiting, and an audio pool with no room left. That table also lists the BYOK spend cap. A spend cap resets on the first day of each month, so that one is a quota that you can wait out. Often the harness kills a stall with an error string of its own making instead. That is why a grep of the logs for 429 finds only part of the picture.
+When the account is full, the gateway waits. It can also overflow the request to a background tier, and then hold the stream open with keep-alives while it produces nothing. Part of that same overflow also arrives directly as a 429 (`rate_limit_error`, `CONCURRENT_REQUEST_LIMIT_EXCEEDED`). A 429 in your logs usually means the account's concurrent capacity ran out. It is not the only cause. The gateway's own error table lists 429s that come from capacity further down the stack, not from the account's priority concurrency: `embedding_gateway_busy` and `embedding_backend_busy` from an embedding gateway or backend under load, `systemone_backend_busy` from a System One upstream that is rate-limiting, and an audio pool with no room left. That table also lists the BYOK spend cap. A spend cap resets on the first day of each month, so that one is a quota that you can wait out. Often the harness kills a stall with an error string of its own making instead. That is why a grep of the logs for 429 finds only part of the picture.
 
 `luna-doctor` reads the session logs that the machine already has. It reconstructs what was asked for at what tier, and what came back. Then it tells you what to adjust. Thresholds are measured on your machine, not assumed from ours.
 
@@ -177,7 +177,7 @@ from:
 A region title reads its own three rows. The `REFUSALS` title turns dark as soon
 as one 429 or at-limit refusal is counted, because those requests never ran,
 while the first row keeps the CLI's word for the whole window. A request sent to
-the background tier ran, so a demotion on its own leaves the title clean.
+the background tier ran, so an overflow on its own leaves the title clean.
 
 A terminal that refuses emoji draws `(O)`, `(o)` and `()` in its place.
 
@@ -268,7 +268,7 @@ the problem.
 
 The command reconstructs every model request from the pi and claude-code log
 stores. It classifies each outcome against measured gateway behaviour:
-admission timeouts, silent background demotions, upstream errors, concurrency
+admission timeouts, silent background overflows, upstream errors, concurrency
 rejections that surface as 429s, and more. Thresholds (admission deadlines,
 idle budgets) are measured per model, not hardcoded. The report carries each
 model's observed deadline with its sample count. It does not lend one model's
@@ -420,7 +420,7 @@ its own unit:
 
 | panel | what it shows | the question |
 |---|---|---|
-| top | what happened to each request, counted per column: served, demoted, refused at admission, refused at the account's limit | did the account refuse me, and when |
+| top | what happened to each request, counted per column: served, overflowed, refused at admission, refused at the account's limit | did the account refuse me, and when |
 | middle | request duration as a heatmap: log-scale rows, time columns at the measurement resolution, colour as the count per cell, with p50 and p90 traced over it and a completion bar beneath | when did it go wrong, and in what shape |
 | bottom | concurrent requests in flight, split by model and scheduling class, with the priority-concurrency rule | how far over the width did this machine go |
 

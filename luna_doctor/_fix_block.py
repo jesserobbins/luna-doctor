@@ -630,7 +630,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                 "from": idle_ms,
                 "to": RAISE_TIMEOUT_MS,
                 "why": _why(evidence,
-                            f"pi's idle budget is {idle_ms}ms. A demoted background stream can stay silent"
+                            f"pi's idle budget is {idle_ms}ms. An overflowed background stream can stay silent"
                             f" for about 600s while emitting keep-alives, so a shorter budget converts a"
                             f" slow success into `Stream ended without finish_reason`."),
                 "instruction": (f"Ask your agent: in {PI_SETTINGS} raise httpIdleTimeoutMs to {RAISE_TIMEOUT_MS} (from {idle_ms}). "
@@ -746,7 +746,7 @@ def recommendations(m, reqs, agents, configs=None, catalog_ids=None,
                                 f"This prevents a background request from being killed on the client side before "
                                 f"the gateway answers. Top-level timeout keys do not take effect when LunaRoute is "
                                 f"the base URL."),
-                "impact": "prevents a demoted request from being killed before it speaks.",
+                "impact": "prevents an overflowed request from being killed before it speaks.",
             })
 
         if bg and wide:

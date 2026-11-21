@@ -498,7 +498,7 @@ class TheKilledRows(unittest.TestCase):
     def test_the_slow_tier_appears_only_where_a_refusal_explains_it(self):
         refusals = _lines("concurrency", self.metrics, _busy_before(), self.cap)
         self.assertIn("background", refusals[12])
-        self.assertIn("demoted to the slow tier", refusals[12])
+        self.assertIn("sent to the slow tier", refusals[12])
 
     def test_no_row_repeats_a_key_that_the_footer_renders(self):
         """§6.2 item 11: the Footer renders the bindings, so no row lists them."""

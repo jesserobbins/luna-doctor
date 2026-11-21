@@ -63,7 +63,7 @@ The documented pair is `x-lunaroute-service-class` (`interactive` /
 LunaRoute's own pages define both. Measured here, they are honest. They
 appeared where the traffic predicts. At 20 concurrent requests on the account
 measured on 2026-10-20, the run split 10 interactive and 10 background. The
-warning sat on the demoted half, and no background header appeared at 1 or 10.
+warning sat on the overflowed half, and no background header appeared at 1 or 10.
 That split follows that account's priority concurrency. It is not a gateway
 constant, and no plan width is a gateway fact.
 

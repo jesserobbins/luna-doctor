@@ -12,10 +12,10 @@ Two halves:
 The constants below are measured, not assumed. See research notes: the gateway
 waits ~25.2s before sending SSE headers, kills unadmitted requests at a
 per-model deadline (~120.2s measured on glm-5.3, ~60.3s on deepseek-4.1-flash,
-reported per model in every run), demotes overflow past the
-interactive admission width to the background tier with
-`x-lunaroute-warning: overflowed-to-background`, and holds
-demoted streams open with an SSE keep-alive every ~10s while producing nothing.
+reported per model in every run), sends overflow past the interactive
+admission width to the background tier with
+`x-lunaroute-warning: overflowed-to-background`, and holds overflowed
+streams open with an SSE keep-alive every ~10s while producing nothing.
 pi's own idle budget is 300s, which is where `Stream ended without finish_reason`
 comes from - a client string, never a gateway one.
 
@@ -169,9 +169,13 @@ class Request:
 def tier_of(model: str | None, warning: str | None = None) -> tuple[str, bool, str]:
     """Return (tier, demoted, reason).
 
-    `reason` names how a demotion was seen: "overflow" when the interactive
-    cap spilled the request into the background tier, "no_entitlement" when
-    a `-background` request had no background entitlement and was downgraded
+    The boolean is `demoted` in code and "overflowed" to a reader: it is
+    True when the request ran on the background tier though its model asked
+    for priority. `reason` names how that was seen: "overflow" when the
+    interactive cap spilled the request into the background tier, the case
+    the gateway reports itself with
+    `x-lunaroute-warning: overflowed-to-background`; "no_entitlement" when a
+    `-background` request had no background entitlement and was downgraded
     into the priority pool instead. Only a live response header carries a
     warning; log records never do, so log-derived requests get "".
     """
@@ -2213,7 +2217,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
         adj.append(
             f"{idle} request(s) stalled until the harness's own ~{CLIENT_IDLE_TIMEOUT_S:.0f}s idle "
             f"budget killed them. That is the silent-overflow signature: the request was likely "
-            f"demoted to the background tier, which streams only SSE keep-alives for minutes."
+            f"overflowed to the background tier, which streams only SSE keep-alives for minutes."
         )
     if m["pressure_windows"]:
         # Wide windows alone flip the verdict only when the width behind them is
@@ -2410,7 +2414,7 @@ def verdict(m: dict) -> tuple[str, list[str], int]:
                 f"the account's overflow pool was full at the sample "
                 f"({bg.get('in_use')} of {bg.get('limit')} overflow concurrent "
                 f"requests, sampled {capm['now'].get('sampled_at')}, account) - a "
-                f"request demoted to a background tier waits for a slot in this "
+                f"overflowed request waits for a slot in this "
                 f"pool, so a stream that went quiet while this pool was full has "
                 f"a pool that agrees with it. Cross-check, not a merge: the "
                 f"sample is one instant and the stall has its own duration."
@@ -3524,7 +3528,7 @@ def _cap_overflow_value(r: dict) -> str:
     never used reports zeros with a null average and a null queued share, so
     those two read unknown and the zeros are left standing as zeros. A peak
     that equals the pool's cap means the pool ran full in that window, which
-    is the reading a demoted request cares about."""
+    is the reading an overflowed request cares about."""
     def n(v):
         return "unknown (not reported)" if v is None else str(v)
     bits = [
@@ -4496,8 +4500,8 @@ def _capacity_metrics(since: float, until: float, m: dict,
             "saturated": getattr(cap.now, "saturated", None),
             "ledger": getattr(cap.now, "ledger", None),
             "sampled_at": getattr(cap.now, "sampled_at", None),
-            # the overflow pool, verbatim: a request demoted to a background
-            # tier lands here, not in the priority pool's in_use, so a
+            # the overflow pool, verbatim: an overflowed request lands here,
+            # not in the priority pool's in_use, so a
             # consumer that reads only the flat fields cannot see the pool a
             # paused stream is sitting in. null stays null, and a closed pool
             # keeps its 0 cap instead of reading as unknown.

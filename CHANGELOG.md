@@ -17,6 +17,16 @@ Versioning policy:
 
 ## [Unreleased]
 
+### Changed
+
+- A request that the gateway sends to the background tier is now called
+  `overflowed`, which is the gateway's own word: its response header is
+  `x-lunaroute-warning: overflowed-to-background`. Every surface says it, so
+  the fate panel counts `overflowed`, the fix block says an overflowed request
+  can stay silent, and the share message says bursts overflow into the
+  background tier. The `--json` field keeps its name, `demoted`, because it is
+  data and not copy.
+
 ## [0.8.0-alpha.3] - 2026-11-20
 
 ### Changed
@@ -266,7 +276,7 @@ Versioning policy:
 - The account's day-granular counters read as a sentence in the footer instead
   of a step line, because a daily count on an hourly axis asserts a step
   function the data does not contain. The top panel now counts what happened to
-  each request in the same columns: served, demoted, refused at admission,
+  each request in the same columns: served, overflowed, refused at admission,
   refused at the account's limit.
 
 - The footer carries the heatmap reading key: a vertical stripe is a change at
@@ -308,7 +318,7 @@ Versioning policy:
   commands. The bare run gains the flag too, which it never had.
 - Five published claims corrected against the gateway's own documentation: a
   429 is not always the account's concurrency, other quota dimensions exist,
-  the overflow pool is where overflow traffic runs rather than where a demoted
+  the overflow pool is where overflow traffic runs rather than where an overflowed
   request waits, the 5-minute figure is the server's history cache, and the
   keep-alive cadence with two response headers are measured here and
   undocumented by LunaRoute. The 60 s documented park against this machine's
@@ -437,10 +447,10 @@ Versioning policy:
 - `capacity` reports the account's overflow pool, not only its priority pool.
   The API sends the live overflow occupancy inside `now`, and its own 7-day
   and 30-day measures inside both history windows. Each pool now gets its own
-  row, and the report never adds one pool to the other. A request demoted to a
-  background tier waits in the overflow pool, so it never appears in the
+  row, and the report never adds one pool to the other. An overflowed request
+  waits in the overflow pool, so it never appears in the
   priority pool's in-use count. The old report said that and then left a
-  reader with no way to see the pool that the demoted request was sitting in.
+  reader with no way to see the pool that the overflowed request was sitting in.
 - The two null shapes of a pool cap read as two different facts. A null cap
   means the cap was not read, so the report claims nothing about the pool. A
   zero cap is a closed pool, which is never saturated and always reports 0
@@ -451,7 +461,7 @@ Versioning policy:
   `now.background` verbatim, and `overflow_pool` with the 7-day and 30-day
   measures beside their priority counterparts. `analyze` adds one adjustment
   line when a fresh sample shows the overflow pool at its cap, because that is
-  the pool a paused demoted stream waits in. A stale sample says nothing,
+  the pool a paused overflowed stream waits in. A stale sample says nothing,
   because it is a fact about a different moment.
 - A new fixture, `tests/fixtures/capacity-2026-11-02.json`, holds the live
   payload captured on 2026-11-02, the first one this suite holds that reports
@@ -718,7 +728,7 @@ Versioning policy:
 
 ### Fixed
 
-- A demotion now carries its reason. `probe` splits its demoted count into `overflow` (the interactive width spilled the request into background) and `no_entitlement` (a `-background` request had no background entitlement and was downgraded into the priority pool, consuming interactive headroom). `fix` says plainly when background traffic is being served on priority concurrency, and hedges when no probe has seen the served tier.
+- An overflow now carries its reason. `probe` splits its overflowed count into `overflow` (the interactive width spilled the request into background) and `no_entitlement` (a `-background` request had no background entitlement and was downgraded into the priority pool, consuming interactive headroom). `fix` says plainly when background traffic is being served on priority concurrency, and hedges when no probe has seen the served tier.
 - `Request.saturated` no longer consults `stream_stalled`, an outcome nothing emits.
 - Installed copies can run `fix` and `chart` again. The CLI was packaged as a single script, so the two command files it loads from its own directory were left behind in the checkout and both commands answered `support missing` (exit 2). The CLI is now a proper package (`luna_doctor/`) with a console-script entry point, and `bin/luna-doctor` is a launcher that resolves its own symlink for the no-packaging install path. Tests now cover the pipx, package and symlink layouts instead of only the checkout.
 
@@ -744,6 +754,6 @@ Versioning policy:
 
 - `luna-doctor analyze` — reconstructs each model request from pi and claude-code session stores (read-only) and classifies outcomes against measured gateway behaviour.
 - `luna-doctor fix` — per-agent copy-paste config for pi, claude-code and codex, backed by keys verified in the installed bundles or their shipped docs. Each block backs up, validates, and merges to a temp file before moving into place.
-- `luna-doctor probe` / `compare` — live burst measurement capturing tier and demotion headers; shows how the interactive tier and its `-background` twin behave under load.
+- `luna-doctor probe` / `compare` — live burst measurement capturing tier and overflow headers; shows how the interactive tier and its `-background` twin behave under load.
 - `luna-doctor discover` — what log stores exist, how big, how fresh.
 - `skills/luna-doctor/SKILL.md` — the agent-facing skill.

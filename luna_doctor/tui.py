@@ -440,7 +440,7 @@ _LATENCY_LABELS = ("p50", "p90")
 # from the qualifier printed beside them.
 #
 # The third row, `background`, is not here: a request sent to the slow tier RAN.
-# `cli.verdict` calls that window healthy, so a demotion can never darken a
+# `cli.verdict` calls that window healthy, so an overflow can never darken a
 # region under a full header - and it is the exact configuration the NEXT row
 # recommends, which must not read as over capacity.
 _REFUSAL_LABELS = ("429", "at limit")
@@ -495,8 +495,8 @@ def region_moon(region_rows: list[tuple[str, str]], region_kind: str) -> str:
     REFUSALS region. The second closes a hole the invariant would otherwise leave
     open: a window can be dark because the gateway refused the work, with no
     admission block in the LOAD rows, and the region that holds those refusals
-    has to be able to say so. A request sent to the background tier ran, so a
-    demotion there is clean rather than dark.
+    has to be able to say so. A request sent to the background tier ran, so an
+    overflow there is clean rather than dark.
     """
     if region_kind not in REGION_KINDS:
         raise KeyError(region_kind)
@@ -949,7 +949,7 @@ def _background_cell(cap) -> str:
     """The background pool's live occupancy, in one clause (§3.3, the `now` row).
 
     Two pools answer "right now", and they are different pools: `in_use` on the
-    flat sample counts priority requests only, and a request demoted to the slow
+    flat sample counts priority requests only, and a request overflowed to the slow
     tier lands in `background` instead. So the ratio in the number column is the
     priority pool and this clause is the other one, on the same row because both
     come from one sample and share its one badge.
@@ -1159,7 +1159,7 @@ def _latency_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
     rows say the slow tier was not read, which is a fact and not a zero.
 
     Each row's delta compares that tier against the same tier in the previous
-    window, so a demotion that moved work between the tiers can never be read as
+    window, so an overflow that moved work between the tiers can never be read as
     the priority rows moving. The gateway's fixed wait is not here: it is one
     constant for every window, it has no trend, and it is in the CLI's own
     adjustment and in the skill's gateway contract.
@@ -1309,7 +1309,7 @@ def _refusals_group(metrics: dict, previous: dict | None) -> list[_EvidenceRow]:
     for label, side, key, qualifier in (
             ("429", "by_outcome", "rate_limited", "the account's rate limit"),
             ("at limit", "by_outcome", "org_concurrency_limit", "account pool full"),
-            ("background", "by_tier", "background", "demoted to the slow tier")):
+            ("background", "by_tier", "background", "sent to the slow tier")):
         if not measured:
             rows.append(_EvidenceRow(label, _BADGE_UNKNOWN, "", None,
                                      "nothing measured"))

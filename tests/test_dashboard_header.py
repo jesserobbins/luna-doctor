@@ -166,7 +166,7 @@ _MOCKUP_ROWS = [
     " blocked      ?            ·",
     " 429          ○       11 ▲ 11 the account's rate limit",
     " at limit     ○        4 ▲  4 account pool full",
-    " background   ○        7 ▲  7 demoted to the slow tier",
+    " background   ○        7 ▲  7 sent to the slow tier",
     "NEXT  Hold 12 in flight · send the rest to -background",
     "→ luna-doctor fix --since 1h                                              [f]",
     "● account · ○ this machine (a lower bound) · ? unknown",
@@ -203,7 +203,7 @@ _LATENCY_NOTHING_MEASURED = [("?", "p50 pri          ·"),
                              ("?", "p90 bg           ·")]
 _REFUSALS_ROWS = [("○", "429            11 ▲ 11 the account's rate limit"),
                   ("○", "at limit        4 ▲  4 account pool full"),
-                  ("○", "background      7 ▲  7 demoted to the slow tier")]
+                  ("○", "background      7 ▲  7 sent to the slow tier")]
 
 
 # ---- the header line -------------------------------------------------------

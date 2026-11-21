@@ -42,7 +42,7 @@ the stack where the eye reads totals, and the thin ones cap it.
 WHY EACH MARK EXISTS.
 
 Fate panel     what happened to each request, counted per column: served,
-               demoted to background, refused at admission, refused at the
+               overflowed to background, refused at admission, refused at the
                account's limit. Counts, not rates, because the denominator
                per column is small; and from these logs, because the
                account's own counters are day-granular and cannot answer a
@@ -573,12 +573,12 @@ def _duration_label(seconds: float) -> str:
 def _admission_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols):
     """What happened to each request, counted per column: the local fate rows.
 
-    Served, demoted to background, refused at admission, refused at the
+    Served, overflowed to background, refused at admission, refused at the
     account's limit. Counts, not rates, because the denominator per column is
     small. This panel works at any window width, which is what the account's
     day-granular counters cannot do.
     """
-    kinds = ("served", "demoted", "refused: admission", "refused: limit")
+    kinds = ("served", "overflowed", "refused: admission", "refused: limit")
     counts = {k: [0] * n_cols for k in kinds}
     for r in reqs:
         start, end = getattr(r, "start", None), getattr(r, "end", None)
@@ -594,12 +594,12 @@ def _admission_panel(shapes, *, reqs, t0, t1, px, plot_w, y0, y1, n_cols):
         elif outcome in ("org_concurrency_limit",):
             counts["refused: limit"][k] += 1
         elif getattr(r, "demoted", False):
-            counts["demoted"][k] += 1
+            counts["overflowed"][k] += 1
         elif outcome == "completed":
             counts["served"][k] += 1
     totals = {k: sum(v) for k, v in counts.items()}
     peak = max([sum(counts[k][i] for k in kinds) for i in range(n_cols)] or [0])
-    colour_of = {"served": "#cfe2fb", "demoted": "#a78bfa",
+    colour_of = {"served": "#cfe2fb", "overflowed": "#a78bfa",
                  "refused: admission": "#dc2626", "refused: limit": "#991b1b"}
     if peak < 5:
         shapes.append(Text(px, y0 + 12,

@@ -407,7 +407,7 @@ class RefusalsGroup(unittest.TestCase):
             tui.REGION_REFUSALS, _busy(), _busy_before())), [
             " 429          ○       11 ▲ 11 the account's rate limit",
             " at limit     ○        4 ▲  4 account pool full",
-            " background   ○        7 ▲  7 demoted to the slow tier",
+            " background   ○        7 ▲  7 sent to the slow tier",
         ])
 
     def test_the_badges_are_this_machines_own_counts(self):

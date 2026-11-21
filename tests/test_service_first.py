@@ -352,7 +352,7 @@ class TheChartIsDesignedForDiagnosis(unittest.TestCase):
         reqs = ([self._req(now + i * 60, 5.0) for i in range(12)]
                 + [self._req(now + i * 60, 120.0, outcome="admission_timeout") for i in range(6)])
         text = self._text(self._scene(reqs))
-        for kind in ("served", "demoted", "refused: admission", "refused: limit"):
+        for kind in ("served", "overflowed", "refused: admission", "refused: limit"):
             self.assertIn(kind, text)
 
     def test_the_picture_says_the_rule_and_one_reading_in_two_lines(self):
@@ -390,7 +390,7 @@ class OneLayoutAtEveryWindow(unittest.TestCase):
     NOW = 1_700_000_000.0
     # The two colours the retired rows were drawn in: priority navy and
     # background violet, one bar per request. The fate panel uses neither (its
-    # served and demoted fills are the pale steps of the same hues), so their
+    # served and overflowed fills are the pale steps of the same hues), so their
     # absence above the field is the rows' absence, and their presence below
     # it is the stack.
     BAND_INK = ("#173f8f", "#5b21b6")

@@ -83,7 +83,7 @@ wait reads "no waiting that day". Account counts never sum with local ones.
 `capacity` reports two pools. The priority pool is the account's main width.
 The overflow pool is where overflow traffic runs. A request that cannot get
 overflow waits for a priority slot, and waiting is not an attribute of either
-pool. A full overflow pool is one reason a demoted stream stays quiet. Read the
+pool. A full overflow pool is one reason an overflowed stream stays quiet. Read the
 two pools side by side. Never add one pool to the other.
 
 Attribution can lean on a daily total, which covers midnight to midnight rather
@@ -101,7 +101,7 @@ error. So quote it as the report's classification, not as a fact you read off
 the string.
 
 `client_idle_timeout` is the one you cannot settle from these logs. A quiet
-stream stopped by the harness reads the same whether the gateway demoted it or
+stream stopped by the harness reads the same whether the gateway overflowed it or
 the connection died. The report calls it the silent overflow signature, not a
 finding. Read it beside starved-peer evidence.
 

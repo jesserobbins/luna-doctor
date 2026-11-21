@@ -6,7 +6,7 @@ description: Use when a LunaRoute session feels stuck, slow or silently hangs. A
 # luna-doctor
 
 LunaRoute bills concurrent sessions, not tokens. When there is no room, the gateway does not
-error. It waits, or it demotes the request to the `-background` tier. In the demoted case it
+error. It waits, or it overflows the request to the `-background` tier. In the overflowed case it
 holds the connection with keep-alives and produces nothing. The harness then kills the stall
 with an error of its own making. That is why the logs read as inexplicable. The width past
 which that starts belongs to the account. It is not in these logs.
